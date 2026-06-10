@@ -6,6 +6,10 @@ compatibility_flags = ["nodejs_compat"]
 [assets]
 directory = "dist/dashboard"
 binding = "ASSETS"
+# SPA mode: any path that doesn't match a static asset returns index.html
+# (200). Without this, deep links like /404 or /admin land on the assets
+# handler's own 404 instead of letting the SPA render its own page.
+not_found_handling = "single-page-application"
 
 [[d1_databases]]
 binding = "DB"
