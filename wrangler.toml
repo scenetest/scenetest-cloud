@@ -1,0 +1,38 @@
+name = "scenetest-cloud"
+main = "src/worker/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "dist/dashboard"
+binding = "ASSETS"
+# SPA mode: any path that doesn't match a static asset returns index.html
+# (200). Without this, deep links like /404 or /admin land on the assets
+# handler's own 404 instead of letting the SPA render its own page.
+not_found_handling = "single-page-application"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "scenetest-cloud"
+database_id = "REPLACE_AFTER_wrangler_d1_create"
+migrations_dir = "migrations"
+
+[vars]
+GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
+# Bootstrap: first user whose GitHub login matches gets auto-inserted into
+# allowed_user when the table is empty. Set this to your own login before the
+# first deploy; can be left as-is afterward (the bootstrap path is a no-op
+# once allowed_user is non-empty).
+BOOTSTRAP_ALLOWED_LOGIN = "mhsnook"
+# DEV-ONLY: when "1", unlocks /api/debug/stub-run which fabricates runs
+# without bearer auth. MUST be unset / "0" in production.
+ENABLE_DEBUG_ROUTES = "1"
+# Secrets (set via `wrangler secret put`):
+#   GITHUB_OAUTH_CLIENT_SECRET
+#   GITHUB_WEBHOOK_SECRET
+#   SESSION_SECRET
+
+# Production overrides — `wrangler deploy --env production` must NOT enable
+# debug routes. Override here when a production environment is wired up.
+# [env.production.vars]
+# ENABLE_DEBUG_ROUTES = "0"
