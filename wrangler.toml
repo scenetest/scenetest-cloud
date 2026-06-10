@@ -1,0 +1,30 @@
+name = "scenetest-cloud"
+main = "src/worker/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "dist/dashboard"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "scenetest-cloud"
+database_id = "REPLACE_AFTER_wrangler_d1_create"
+migrations_dir = "migrations"
+
+[vars]
+GOOGLE_CLIENT_ID = ""
+GOOGLE_ALLOWED_EMAILS = ""
+# DEV-ONLY: when "1", unlocks /api/debug/stub-run which fabricates runs
+# without bearer auth. MUST be unset / "0" in production.
+ENABLE_DEBUG_ROUTES = "1"
+# Secrets (set via `wrangler secret put`):
+#   GOOGLE_CLIENT_SECRET
+#   GITHUB_WEBHOOK_SECRET
+#   SESSION_SECRET
+
+# Production overrides — `wrangler deploy --env production` must NOT enable
+# debug routes. Override here when a production environment is wired up.
+# [env.production.vars]
+# ENABLE_DEBUG_ROUTES = "0"
