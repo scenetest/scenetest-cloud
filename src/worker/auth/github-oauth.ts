@@ -32,7 +32,7 @@ function isHttps(req: Request): boolean {
   return new URL(req.url).protocol === 'https:'
 }
 
-function safeNext(input: string | null | undefined): string {
+export function safeNext(input: string | null | undefined): string {
   // Only allow same-origin paths.
   if (!input || !input.startsWith('/') || input.startsWith('//')) return '/'
   return input
