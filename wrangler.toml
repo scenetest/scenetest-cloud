@@ -14,12 +14,12 @@ database_id = "REPLACE_AFTER_wrangler_d1_create"
 migrations_dir = "migrations"
 
 [vars]
-GITHUB_OAUTH_CLIENT_ID = ""
+GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
 # Bootstrap: first user whose GitHub login matches gets auto-inserted into
 # allowed_user when the table is empty. Set this to your own login before the
 # first deploy; can be left as-is afterward (the bootstrap path is a no-op
 # once allowed_user is non-empty).
-BOOTSTRAP_ALLOWED_LOGIN = ""
+BOOTSTRAP_ALLOWED_LOGIN = "mhsnook"
 # DEV-ONLY: when "1", unlocks /api/debug/stub-run which fabricates runs
 # without bearer auth. MUST be unset / "0" in production.
 ENABLE_DEBUG_ROUTES = "1"
