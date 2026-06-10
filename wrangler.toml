@@ -3,6 +3,13 @@ main = "src/worker/index.ts"
 compatibility_date = "2025-01-15"
 compatibility_flags = ["nodejs_compat"]
 
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+
 [assets]
 directory = "dist/dashboard"
 binding = "ASSETS"
