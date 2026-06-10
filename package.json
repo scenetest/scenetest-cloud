@@ -5,8 +5,10 @@
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
+    "dev": "concurrently -k -n worker,dashboard -c blue,magenta \"pnpm dev:worker\" \"pnpm dev:dashboard:watch\"",
     "dev:worker": "wrangler dev",
     "dev:dashboard": "vite",
+    "dev:dashboard:watch": "vite build --watch",
     "build:dashboard": "vite build",
     "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
@@ -21,6 +23,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260610.1",
+    "concurrently": "^10.0.3",
     "typescript": "^6.0.3",
     "vite": "^8.0.16",
     "vitest": "^4.1.8",
