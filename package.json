@@ -6,11 +6,11 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "concurrently -k -n worker,dashboard -c blue,magenta \"pnpm dev:worker\" \"pnpm dev:dashboard:watch\"",
-    "dev:worker": "wrangler dev",
+    "dev:worker": "node -e \"fs.mkdirSync('dist/dashboard',{recursive:true})\" && wrangler dev",
     "dev:dashboard": "vite",
     "dev:dashboard:watch": "vite build --watch",
     "build:dashboard": "vite build",
-    "deploy": "wrangler deploy",
+    "deploy": "pnpm build:dashboard && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "typecheck": "tsc --noEmit",
