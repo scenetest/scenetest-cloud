@@ -15,16 +15,17 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
   const body = await req
     .json<{ prNumber?: number; subset?: string[] }>()
     .catch(() => ({} as { prNumber?: number; subset?: string[] }))
+  const repo = 'demo/repo'
   const prNumber = body.prNumber ?? 1
   const headSha = `sha-${Math.random().toString(36).slice(2, 10)}`
   const now = Date.now()
 
   await env.DB.prepare(
-    `INSERT INTO prs (pr_number, repo, head_sha, base_ref, state, opened_at, updated_at)
-     VALUES (?1, 'demo/repo', ?2, 'main', 'open', ?3, ?3)
-     ON CONFLICT(pr_number) DO UPDATE SET head_sha = excluded.head_sha, updated_at = ?3`,
+    `INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at)
+     VALUES (?1, ?2, ?3, 'main', 'open', ?4, ?4)
+     ON CONFLICT(repo, pr_number) DO UPDATE SET head_sha = excluded.head_sha, updated_at = ?4`,
   )
-    .bind(prNumber, headSha, now)
+    .bind(repo, prNumber, headSha, now)
     .run()
 
   const runId = crypto.randomUUID()
@@ -32,10 +33,10 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
   const bearerHash = await hashToken(bearerToken)
 
   await env.DB.prepare(
-    `INSERT INTO runs (id, pr_number, head_sha, trigger, subset_json, status, bearer_token_hash)
-     VALUES (?1, ?2, ?3, 'manual', ?4, 'queued', ?5)`,
+    `INSERT INTO runs (id, repo, pr_number, head_sha, trigger, subset_json, status, bearer_token_hash)
+     VALUES (?1, ?2, ?3, ?4, 'manual', ?5, 'queued', ?6)`,
   )
-    .bind(runId, prNumber, headSha, body.subset ? JSON.stringify(body.subset) : null, bearerHash)
+    .bind(runId, repo, prNumber, headSha, body.subset ? JSON.stringify(body.subset) : null, bearerHash)
     .run()
 
   await localStubRunner.spawn(
@@ -43,6 +44,7 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
     ctx,
     {
       runId,
+      repo,
       prNumber,
       headSha,
       baseSha: null,

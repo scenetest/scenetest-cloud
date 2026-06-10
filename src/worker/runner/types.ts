@@ -2,6 +2,7 @@ import type { Env } from '../env.ts'
 
 export interface JobSpec {
   runId: string
+  repo: string // 'owner/name'
   prNumber: number
   headSha: string
   baseSha: string | null

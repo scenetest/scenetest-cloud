@@ -39,10 +39,10 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
   if (!auth.ok) return auth.response
 
   const run = await env.DB.prepare(
-    'SELECT pr_number, head_sha FROM runs WHERE id = ?1',
+    'SELECT repo, pr_number, head_sha FROM runs WHERE id = ?1',
   )
     .bind(runId)
-    .first<{ pr_number: number; head_sha: string }>()
+    .first<{ repo: string; pr_number: number; head_sha: string }>()
   if (!run) return new Response('Run not found', { status: 404 })
 
   const body = await req.json<{
@@ -60,8 +60,8 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
 
   const stmt = env.DB.prepare(
     `INSERT INTO scene_executions
-       (id, run_id, pr_number, scene_id, scene_file, scene_name, head_sha, status, started_at, ended_at, summary_json)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+       (id, run_id, repo, pr_number, scene_id, scene_file, scene_name, head_sha, status, started_at, ended_at, summary_json)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
      ON CONFLICT(id) DO UPDATE SET
        status = excluded.status,
        started_at = COALESCE(excluded.started_at, scene_executions.started_at),
@@ -74,6 +74,7 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
       stmt.bind(
         e.id,
         runId,
+        run.repo,
         run.pr_number,
         e.scene_id,
         e.scene_file,

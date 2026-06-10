@@ -46,14 +46,15 @@ async function runStub(env: Env, spec: JobSpec, runnerId: string) {
   // Seed scene_executions as queued.
   const seedStmt = env.DB.prepare(
     `INSERT INTO scene_executions
-       (id, run_id, pr_number, scene_id, scene_file, scene_name, head_sha, status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued')`,
+       (id, run_id, repo, pr_number, scene_id, scene_file, scene_name, head_sha, status)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued')`,
   )
   await env.DB.batch(
     targetScenes.map((s) =>
       seedStmt.bind(
         crypto.randomUUID(),
         spec.runId,
+        spec.repo,
         spec.prNumber,
         sceneId(s.file, s.name),
         s.file,

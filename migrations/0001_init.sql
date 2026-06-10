@@ -7,19 +7,21 @@
 -- consumes it directly.
 
 CREATE TABLE prs (
-  pr_number INTEGER PRIMARY KEY,
-  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  repo TEXT NOT NULL,        -- 'owner/name' (matches watched_repo)
   head_sha TEXT NOT NULL,
   base_ref TEXT NOT NULL,
   state TEXT NOT NULL,
-  next_push_filter TEXT, -- JSON array of scene_ids, or NULL = run all
+  next_push_filter TEXT,     -- JSON array of scene_ids, or NULL = run all
   opened_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (repo, pr_number)
 );
 
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,
-  pr_number INTEGER NOT NULL REFERENCES prs(pr_number) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
   head_sha TEXT NOT NULL,
   base_sha TEXT,
   trigger TEXT NOT NULL, -- 'push' | 'manual' | 'auto-filter'
@@ -30,13 +32,15 @@ CREATE TABLE runs (
   ended_at INTEGER,
   runner_id TEXT,
   bearer_token_hash TEXT NOT NULL,
-  triggered_by_user_id TEXT
+  triggered_by_user_id INTEGER, -- github_id of the user who triggered (NULL = webhook/auto)
+  FOREIGN KEY (repo, pr_number) REFERENCES prs(repo, pr_number) ON DELETE CASCADE
 );
-CREATE INDEX runs_pr_started_idx ON runs(pr_number, started_at DESC);
+CREATE INDEX runs_pr_started_idx ON runs(repo, pr_number, started_at DESC);
 
 CREATE TABLE scene_executions (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  repo TEXT NOT NULL,
   pr_number INTEGER NOT NULL,
   scene_id TEXT NOT NULL, -- stable: '<file>:<scene name>'
   scene_file TEXT NOT NULL,
@@ -48,7 +52,7 @@ CREATE TABLE scene_executions (
   summary_json TEXT
 );
 CREATE INDEX scene_executions_pr_scene_idx
-  ON scene_executions(pr_number, scene_id, started_at DESC);
+  ON scene_executions(repo, pr_number, scene_id, started_at DESC);
 
 CREATE TABLE events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,19 +63,25 @@ CREATE TABLE events (
 );
 CREATE INDEX events_run_seq_idx ON events(run_id, seq);
 
-CREATE TABLE users (
-  id TEXT PRIMARY KEY, -- google sub
-  email TEXT NOT NULL UNIQUE,
-  name TEXT,
-  last_login_at INTEGER NOT NULL
+-- Identity is GitHub-verified; authorization is this table. Sessions are
+-- stateless HMAC-signed cookies, so there is no session table.
+CREATE TABLE allowed_user (
+  github_id INTEGER PRIMARY KEY,
+  github_login TEXT NOT NULL,
+  added_at INTEGER NOT NULL,
+  added_by INTEGER  -- github_id of inviter; NULL for the bootstrap user
 );
 
-CREATE TABLE sessions (
-  session_id TEXT PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at INTEGER NOT NULL
+-- Repos this deployment watches. Webhook handler rejects events whose
+-- repo.full_name doesn't match an `owner/name` here.
+CREATE TABLE watched_repo (
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
+  github_repo_id INTEGER,
+  added_at INTEGER NOT NULL,
+  added_by INTEGER NOT NULL REFERENCES allowed_user(github_id),
+  PRIMARY KEY (owner, name)
 );
-CREATE INDEX sessions_user_idx ON sessions(user_id);
 
 -- CI Overview (bolt-on, secondary).
 CREATE TABLE overview_issue_diffs (

@@ -14,13 +14,17 @@ database_id = "REPLACE_AFTER_wrangler_d1_create"
 migrations_dir = "migrations"
 
 [vars]
-GOOGLE_CLIENT_ID = ""
-GOOGLE_ALLOWED_EMAILS = ""
+GITHUB_OAUTH_CLIENT_ID = ""
+# Bootstrap: first user whose GitHub login matches gets auto-inserted into
+# allowed_user when the table is empty. Set this to your own login before the
+# first deploy; can be left as-is afterward (the bootstrap path is a no-op
+# once allowed_user is non-empty).
+BOOTSTRAP_ALLOWED_LOGIN = ""
 # DEV-ONLY: when "1", unlocks /api/debug/stub-run which fabricates runs
 # without bearer auth. MUST be unset / "0" in production.
 ENABLE_DEBUG_ROUTES = "1"
 # Secrets (set via `wrangler secret put`):
-#   GOOGLE_CLIENT_SECRET
+#   GITHUB_OAUTH_CLIENT_SECRET
 #   GITHUB_WEBHOOK_SECRET
 #   SESSION_SECRET
 
