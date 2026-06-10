@@ -1,29 +1,4 @@
-import { useEffect, useState } from 'preact/hooks'
-import { api, type ApiError } from './lib/api.ts'
-
-interface Me {
-  github_id: number
-  github_login: string
-}
-
-type MeState =
-  | { kind: 'loading' }
-  | { kind: 'signed-out' }
-  | { kind: 'signed-in'; me: Me }
-  | { kind: 'error'; message: string }
-
-function useMe(): MeState {
-  const [state, setState] = useState<MeState>({ kind: 'loading' })
-  useEffect(() => {
-    api<Me>('/api/me')
-      .then((me) => setState({ kind: 'signed-in', me }))
-      .catch((err: ApiError) => {
-        if (err.status === 401) setState({ kind: 'signed-out' })
-        else setState({ kind: 'error', message: err.message })
-      })
-  }, [])
-  return state
-}
+import { useMe, type Me } from './hooks/useMe.ts'
 
 export function App() {
   const path = window.location.pathname
