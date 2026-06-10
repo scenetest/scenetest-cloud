@@ -5,7 +5,9 @@ import { generateDashboardHtml } from '@scenetest/vite-plugin/dashboard'
 
 // scenetest-js's dashboard hardcodes absolute paths like '/__scenetest/events'.
 // Rewrite them to relative paths so all fetches/EventSource land back inside
-// our per-run namespace (the page is served at /r/:runId/dashboard/).
+// our per-run namespace (the page is served at /r/:runId/dashboard/). The
+// output is identical for every request, so compute once per isolate.
+let cached: string | null = null
 export function renderDashboard(): string {
-  return generateDashboardHtml().replaceAll("'/__scenetest/", "'./__scenetest/")
+  return (cached ??= generateDashboardHtml().replaceAll("'/__scenetest/", "'./__scenetest/"))
 }

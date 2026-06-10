@@ -8,8 +8,8 @@ export interface Env {
   // login matches this value, they're inserted automatically. Subsequent
   // logins use the table normally.
   BOOTSTRAP_ALLOWED_LOGIN: string
-  // GitHub webhook + session cookie
-  GITHUB_WEBHOOK_SECRET: string
+  // TODO: required once the /webhook/github handler lands.
+  GITHUB_WEBHOOK_SECRET?: string
   SESSION_SECRET: string
   ENABLE_DEBUG_ROUTES?: string
 }

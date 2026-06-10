@@ -1,5 +1,6 @@
 import type { Env } from '../env.ts'
 import type { JobSpec, Runner } from './types.ts'
+import { insertEvents } from '../db.ts'
 
 // LocalStubRunner: writes scenetest-shaped events + scene_executions directly to D1.
 // In production a real runner would POST via HTTP and authenticate with the bearer.
@@ -27,12 +28,9 @@ async function runStub(env: Env, spec: JobSpec, runnerId: string) {
 
   const startTs = Date.now()
   let seq = 0
-  const insertEvent = env.DB.prepare(
-    'INSERT INTO events (run_id, seq, payload, ts) VALUES (?1, ?2, ?3, ?4)',
-  )
   const emit = async (payload: unknown) => {
     seq += 1
-    await insertEvent.bind(spec.runId, seq, JSON.stringify(payload), Date.now()).run()
+    await insertEvents(env.DB, spec.runId, [{ seq, payload }])
   }
 
   await env.DB.prepare(

@@ -27,7 +27,6 @@ export class Router {
 
   get(p: string, h: Handler) { return this.on('GET', p, h) }
   post(p: string, h: Handler) { return this.on('POST', p, h) }
-  patch(p: string, h: Handler) { return this.on('PATCH', p, h) }
   delete(p: string, h: Handler) { return this.on('DELETE', p, h) }
 
   async handle(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

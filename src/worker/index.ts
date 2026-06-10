@@ -1,6 +1,6 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { dashboardHtml, dashboardSse, dashboardNoop } from './scenetest-bridge/routes.ts'
+import { dashboardHtml, dashboardRedirectToSlash, dashboardSse, dashboardNoop } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun } from './routes/debug.ts'
 import {
@@ -8,7 +8,6 @@ import {
   getGithubCallback,
   postLogout,
 } from './auth/github-oauth.ts'
-import { getMe } from './routes/me.ts'
 import {
   addRepo,
   addUser,
@@ -17,95 +16,69 @@ import {
   listRepos,
   listUsers,
 } from './routes/admin.ts'
-import {
-  getSessionUser,
-  jsonUnauthorized,
-  redirectToLogin,
-} from './auth/session.ts'
+import { withSession } from './auth/session.ts'
 
+// Auth is declared per route: withSession() for cookie-authed routes (json
+// 401 or login redirect on failure); everything else is either public by
+// design (/auth/*) or carries its own auth (bearer for runner ingest,
+// env-gating for debug, HMAC for future webhooks).
 const router = new Router()
   // Auth
   .get('/auth/github/login', getGithubLogin)
   .get('/auth/github/callback', getGithubCallback)
   .post('/auth/logout', postLogout)
-  .get('/api/me', getMe)
-  // Admin (session-gated inside the handlers)
-  .get('/api/admin/users', listUsers)
-  .post('/api/admin/users', addUser)
-  .delete('/api/admin/users/:github_id', deleteUser)
-  .get('/api/admin/repos', listRepos)
-  .post('/api/admin/repos', addRepo)
-  .delete('/api/admin/repos/:owner/:name', deleteRepo)
-  // Runner-facing dashboard
-  .get('/r/:runId/dashboard', dashboardHtml)
-  .get('/r/:runId/dashboard/', dashboardHtml)
-  .get('/r/:runId/dashboard/__scenetest/events', dashboardSse)
-  .post('/r/:runId/dashboard/__scenetest/replay', dashboardNoop)
-  .post('/r/:runId/dashboard/__scenetest/stop', dashboardNoop)
-  .post('/r/:runId/dashboard/__scenetest/pause', dashboardNoop)
+  .get('/api/me', withSession((_req, _env, _ctx, _params, user) => Response.json(user)))
+  // Admin
+  .get('/api/admin/users', withSession(listUsers))
+  .post('/api/admin/users', withSession(addUser))
+  .delete('/api/admin/users/:github_id', withSession(deleteUser))
+  .get('/api/admin/repos', withSession(listRepos))
+  .post('/api/admin/repos', withSession(addRepo))
+  .delete('/api/admin/repos/:owner/:name', withSession(deleteRepo))
+  // Run dashboard (served by the scenetest bridge)
+  .get('/r/:runId/dashboard', dashboardRedirectToSlash)
+  .get('/r/:runId/dashboard/', withSession(dashboardHtml, 'redirect'))
+  .get('/r/:runId/dashboard/__scenetest/events', withSession(dashboardSse))
+  .post('/r/:runId/dashboard/__scenetest/:cmd', withSession(dashboardNoop))
   // Runner ingest (bearer-authed)
   .post('/api/events/:runId', postEvents)
   .post('/api/runs/:runId/scene-executions', postSceneExecutions)
   .post('/api/runs/:runId/complete', postRunComplete)
-  // Debug
+  // Debug (env-gated inside the handler)
   .post('/api/debug/stub-run', debugStubRun)
 
-// /api/* paths that don't need a session cookie. Either anonymous by design
-// or carry their own auth (bearer for runner ingest, env-gated for debug).
-function isPublicApiPath(pathname: string): boolean {
-  if (pathname === '/api/me') return true                    // handler returns 401
-  if (pathname.startsWith('/api/events/')) return true       // bearer-authed
-  if (pathname.startsWith('/api/debug/')) return true        // env-gated
-  return /^\/api\/runs\/[^/]+\/(scene-executions|complete)$/.test(pathname)
-}
-
-async function route(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const url = new URL(req.url)
-  const path = url.pathname
-
-  // Webhooks carry their own HMAC auth; pass straight to the router.
-  if (path.startsWith('/webhook/') || path.startsWith('/auth/')) {
-    return router.handle(req, env, ctx)
-  }
-
-  // API: 401 JSON when the route requires a session.
-  if (path.startsWith('/api/')) {
-    if (!isPublicApiPath(path) && !(await getSessionUser(req, env))) {
-      return jsonUnauthorized()
-    }
-    return router.handle(req, env, ctx)
-  }
-
-  // Run dashboard: gate at the edge with a redirect to login.
-  if (path.startsWith('/r/')) {
-    if (!(await getSessionUser(req, env))) return redirectToLogin(req)
-    return router.handle(req, env, ctx)
-  }
-
-  // Everything else is the SPA shell — public. The SPA decides what to render
-  // (signed-in vs not, /404 for unknown routes) by calling /api/me + reading
-  // window.location.pathname.
-  return env.ASSETS.fetch(req)
-}
+const REQUIRED_VARS = ['GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET', 'SESSION_SECRET'] as const
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const missing = REQUIRED_VARS.filter((k) => !env[k])
+    if (missing.length > 0) {
+      return new Response(
+        `Missing config: ${missing.join(', ')}. Set in .dev.vars (local) or via wrangler vars/secrets.`,
+        { status: 500 },
+      )
+    }
+
     try {
-      return await route(req, env, ctx)
+      const path = new URL(req.url).pathname
+      if (
+        path.startsWith('/api/') ||
+        path.startsWith('/auth/') ||
+        path.startsWith('/webhook/') ||
+        path.startsWith('/r/')
+      ) {
+        return await router.handle(req, env, ctx)
+      }
+      // Everything else is the SPA shell — public. The SPA decides what to
+      // render (signed-in vs not, 404s) client-side.
+      return env.ASSETS.fetch(req)
     } catch (err) {
       const requestId = crypto.randomUUID()
       console.error(`[req ${requestId}]`, err instanceof Error ? err.stack ?? err.message : err)
-      const wantsJson = new URL(req.url).pathname.startsWith('/api/')
-      if (wantsJson) {
-        return new Response(JSON.stringify({ error: 'internal_error', requestId }), {
-          status: 500,
-          headers: { 'content-type': 'application/json' },
-        })
+      if (new URL(req.url).pathname.startsWith('/api/')) {
+        return Response.json({ error: 'internal_error', requestId }, { status: 500 })
       }
-      return new Response(`Internal error (request ${requestId})`, {
-        status: 500,
-        headers: { 'content-type': 'text/plain' },
-      })
+      return new Response(`Internal error (request ${requestId})`, { status: 500 })
     }
   },
 }

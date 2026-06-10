@@ -1,4 +1,5 @@
 import type { Env } from '../env.ts'
+import { GH_API_HEADERS } from '../github.ts'
 import {
   parseCookies,
   serializeCookie,
@@ -22,12 +23,6 @@ interface GitHubUser {
   login: string
 }
 
-function randomHex(bytes: number): string {
-  const arr = new Uint8Array(bytes)
-  crypto.getRandomValues(arr)
-  return [...arr].map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
 function isHttps(req: Request): boolean {
   return new URL(req.url).protocol === 'https:'
 }
@@ -38,20 +33,10 @@ export function safeNext(input: string | null | undefined): string {
   return input
 }
 
-function missingConfigResponse(name: string): Response {
-  return new Response(
-    `${name} is not configured. Set it in .dev.vars (local) or via wrangler vars/secrets.`,
-    { status: 500, headers: { 'content-type': 'text/plain' } },
-  )
-}
-
 export async function getGithubLogin(req: Request, env: Env): Promise<Response> {
-  if (!env.GITHUB_OAUTH_CLIENT_ID) return missingConfigResponse('GITHUB_OAUTH_CLIENT_ID')
-  if (!env.SESSION_SECRET) return missingConfigResponse('SESSION_SECRET')
-
   const url = new URL(req.url)
   const next = safeNext(url.searchParams.get('next'))
-  const nonce = randomHex(16)
+  const nonce = crypto.randomUUID()
 
   const state: StatePayload = {
     nonce,
@@ -82,10 +67,6 @@ export async function getGithubLogin(req: Request, env: Env): Promise<Response> 
 }
 
 export async function getGithubCallback(req: Request, env: Env): Promise<Response> {
-  if (!env.GITHUB_OAUTH_CLIENT_ID) return missingConfigResponse('GITHUB_OAUTH_CLIENT_ID')
-  if (!env.GITHUB_OAUTH_CLIENT_SECRET) return missingConfigResponse('GITHUB_OAUTH_CLIENT_SECRET')
-  if (!env.SESSION_SECRET) return missingConfigResponse('SESSION_SECRET')
-
   const url = new URL(req.url)
   const code = url.searchParams.get('code')
   const stateParam = url.searchParams.get('state')
@@ -120,11 +101,7 @@ export async function getGithubCallback(req: Request, env: Env): Promise<Respons
 
   // Fetch GitHub user.
   const userResp = await fetch('https://api.github.com/user', {
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'scenetest-cloud',
-    },
+    headers: { ...GH_API_HEADERS, authorization: `Bearer ${accessToken}` },
   })
   if (!userResp.ok) return new Response('GitHub /user failed', { status: 502 })
   const gh = (await userResp.json()) as GitHubUser

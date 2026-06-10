@@ -1,4 +1,5 @@
 import type { AuthedUser, Env } from '../env.ts'
+import type { Handler } from '../router.ts'
 import { parseCookies, serializeCookie, signPayload, verifyPayload } from './cookies.ts'
 
 export const SESSION_COOKIE = 'session'
@@ -49,10 +50,7 @@ export function clearSessionCookie(isHttps: boolean): string {
 }
 
 export function jsonUnauthorized(): Response {
-  return new Response(JSON.stringify({ error: 'unauthorized' }), {
-    status: 401,
-    headers: { 'content-type': 'application/json' },
-  })
+  return Response.json({ error: 'unauthorized' }, { status: 401 })
 }
 
 export function redirectToLogin(req: Request): Response {
@@ -60,4 +58,26 @@ export function redirectToLogin(req: Request): Response {
   const next = url.pathname + url.search
   const target = `/auth/github/login?next=${encodeURIComponent(next)}`
   return new Response(null, { status: 302, headers: { location: target } })
+}
+
+export type AuthedHandler = (
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  params: Record<string, string>,
+  user: AuthedUser,
+) => Promise<Response> | Response
+
+// Session auth, declared where the route is registered. The wrapped handler
+// receives the verified user; routes without this wrapper are public or carry
+// their own auth (bearer, webhook HMAC).
+export function withSession(
+  handler: AuthedHandler,
+  onUnauthed: 'json' | 'redirect' = 'json',
+): Handler {
+  return async (req, env, ctx, params) => {
+    const user = await getSessionUser(req, env)
+    if (!user) return onUnauthed === 'json' ? jsonUnauthorized() : redirectToLogin(req)
+    return handler(req, env, ctx, params, user)
+  }
 }

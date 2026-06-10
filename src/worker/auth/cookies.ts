@@ -20,19 +20,24 @@ function b64urlDecode(s: string): Uint8Array {
   return out
 }
 
-async function importHmacKey(secret: string): Promise<CryptoKey> {
-  if (!secret) {
-    throw new Error(
-      'SESSION_SECRET is empty. Set it in .dev.vars (local) or via `wrangler secret put SESSION_SECRET` (deployed).',
-    )
+// CryptoKey objects are immutable; cache across requests within the isolate
+// instead of re-importing on every sign/verify.
+let cachedKey: { secret: string; key: Promise<CryptoKey> } | null = null
+
+function importHmacKey(secret: string): Promise<CryptoKey> {
+  if (cachedKey?.secret !== secret) {
+    cachedKey = {
+      secret,
+      key: crypto.subtle.importKey(
+        'raw',
+        enc.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign', 'verify'],
+      ),
+    }
   }
-  return crypto.subtle.importKey(
-    'raw',
-    enc.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign', 'verify'],
-  )
+  return cachedKey.key
 }
 
 function constantTimeEq(a: Uint8Array, b: Uint8Array): boolean {

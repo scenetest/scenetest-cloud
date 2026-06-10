@@ -12,10 +12,6 @@ export const queryClient = new QueryClient({
         if (status != null && status >= 400 && status < 500) return false
         return failureCount < 2
       },
-      refetchOnWindowFocus: true,
-    },
-    mutations: {
-      retry: false,
     },
   },
 })

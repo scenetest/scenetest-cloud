@@ -1,49 +1,30 @@
-import type { Env } from '../env.ts'
 import type { Handler } from '../router.ts'
 import { verifyRunBearer } from '../middleware/bearer.ts'
+import { insertEvents, type RunEvent } from '../db.ts'
 
 // POST /api/events/:runId
-// Body: { seq: number, payload: unknown } | { events: Array<{seq, payload}> }
+// Body: { events: Array<{ seq: number, payload: unknown }> }
 // Payload is opaque JSON (scenetest-js wire format). We store and forward.
 export const postEvents: Handler = async (req, env, _ctx, params) => {
-  const runId = params.runId
-  if (!runId) return new Response('runId required', { status: 400 })
+  const runId = params.runId!
   const auth = await verifyRunBearer(req, env, runId)
   if (!auth.ok) return auth.response
 
-  const body = await req.json<{
-    seq?: number
-    payload?: unknown
-    events?: Array<{ seq: number; payload: unknown }>
-  }>()
-  const batch = body.events ?? (body.seq != null ? [{ seq: body.seq, payload: body.payload }] : [])
-  if (batch.length === 0) return new Response('No events', { status: 400 })
+  const body = await req.json<{ events?: RunEvent[] }>()
+  if (!body.events?.length) return new Response('No events', { status: 400 })
 
-  const now = Date.now()
-  const stmt = env.DB.prepare(
-    'INSERT INTO events (run_id, seq, payload, ts) VALUES (?1, ?2, ?3, ?4)',
-  )
-  await env.DB.batch(
-    batch.map((e) => stmt.bind(runId, e.seq, JSON.stringify(e.payload ?? null), now)),
-  )
-  return Response.json({ ok: true, count: batch.length })
+  await insertEvents(env.DB, runId, body.events)
+  return Response.json({ ok: true, count: body.events.length })
 }
 
 // POST /api/runs/:runId/scene-executions
 // Body: { executions: Array<SceneExecution> }
 // SceneExecution = { id, scene_id, scene_file, scene_name, status, started_at?, ended_at?, summary? }
 export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
-  const runId = params.runId
-  if (!runId) return new Response('runId required', { status: 400 })
+  const runId = params.runId!
   const auth = await verifyRunBearer(req, env, runId)
   if (!auth.ok) return auth.response
-
-  const run = await env.DB.prepare(
-    'SELECT repo, pr_number, head_sha FROM runs WHERE id = ?1',
-  )
-    .bind(runId)
-    .first<{ repo: string; pr_number: number; head_sha: string }>()
-  if (!run) return new Response('Run not found', { status: 404 })
+  const run = auth.run
 
   const body = await req.json<{
     executions: Array<{
@@ -93,17 +74,15 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
 // POST /api/runs/:runId/complete
 // Body: { status: 'passed' | 'failed' | 'cancelled' }
 export const postRunComplete: Handler = async (req, env, _ctx, params) => {
-  const runId = params.runId
-  if (!runId) return new Response('runId required', { status: 400 })
+  const runId = params.runId!
   const auth = await verifyRunBearer(req, env, runId)
   if (!auth.ok) return auth.response
 
   const body = await req.json<{ status: 'passed' | 'failed' | 'cancelled' }>()
-  const now = Date.now()
   await env.DB.prepare(
     'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3',
   )
-    .bind(body.status, now, runId)
+    .bind(body.status, Date.now(), runId)
     .run()
   return Response.json({ ok: true })
 }
