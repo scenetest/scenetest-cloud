@@ -13,8 +13,8 @@ not_found_handling = "single-page-application"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "scenetest-cloud"
-database_id = "REPLACE_AFTER_wrangler_d1_create"
+database_name = "scenetest-cloud-mhsnook"
+database_id = "59cdeb29-a690-46b8-a8f9-423be56ed4d8"
 migrations_dir = "migrations"
 
 [vars]
