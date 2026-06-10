@@ -21,6 +21,11 @@ function b64urlDecode(s: string): Uint8Array {
 }
 
 async function importHmacKey(secret: string): Promise<CryptoKey> {
+  if (!secret) {
+    throw new Error(
+      'SESSION_SECRET is empty. Set it in .dev.vars (local) or via `wrangler secret put SESSION_SECRET` (deployed).',
+    )
+  }
   return crypto.subtle.importKey(
     'raw',
     enc.encode(secret),
@@ -50,13 +55,13 @@ export async function verifyPayload<T>(token: string, secret: string): Promise<T
   if (dot < 0) return null
   const payloadB64 = token.slice(0, dot)
   const sigB64 = token.slice(dot + 1)
-  const key = await importHmacKey(secret)
-  const expected = new Uint8Array(
-    await crypto.subtle.sign('HMAC', key, enc.encode(payloadB64)),
-  )
-  const got = b64urlDecode(sigB64)
-  if (!constantTimeEq(expected, got)) return null
   try {
+    const key = await importHmacKey(secret)
+    const expected = new Uint8Array(
+      await crypto.subtle.sign('HMAC', key, enc.encode(payloadB64)),
+    )
+    const got = b64urlDecode(sigB64)
+    if (!constantTimeEq(expected, got)) return null
     return JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64))) as T
   } catch {
     return null

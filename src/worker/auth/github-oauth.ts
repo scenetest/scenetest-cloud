@@ -38,7 +38,17 @@ export function safeNext(input: string | null | undefined): string {
   return input
 }
 
+function missingConfigResponse(name: string): Response {
+  return new Response(
+    `${name} is not configured. Set it in .dev.vars (local) or via wrangler vars/secrets.`,
+    { status: 500, headers: { 'content-type': 'text/plain' } },
+  )
+}
+
 export async function getGithubLogin(req: Request, env: Env): Promise<Response> {
+  if (!env.GITHUB_OAUTH_CLIENT_ID) return missingConfigResponse('GITHUB_OAUTH_CLIENT_ID')
+  if (!env.SESSION_SECRET) return missingConfigResponse('SESSION_SECRET')
+
   const url = new URL(req.url)
   const next = safeNext(url.searchParams.get('next'))
   const nonce = randomHex(16)
@@ -72,6 +82,10 @@ export async function getGithubLogin(req: Request, env: Env): Promise<Response> 
 }
 
 export async function getGithubCallback(req: Request, env: Env): Promise<Response> {
+  if (!env.GITHUB_OAUTH_CLIENT_ID) return missingConfigResponse('GITHUB_OAUTH_CLIENT_ID')
+  if (!env.GITHUB_OAUTH_CLIENT_SECRET) return missingConfigResponse('GITHUB_OAUTH_CLIENT_SECRET')
+  if (!env.SESSION_SECRET) return missingConfigResponse('SESSION_SECRET')
+
   const url = new URL(req.url)
   const code = url.searchParams.get('code')
   const stateParam = url.searchParams.get('state')
