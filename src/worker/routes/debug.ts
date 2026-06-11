@@ -1,13 +1,12 @@
 import type { Handler } from '../router.ts'
-import { hashToken } from '../middleware/bearer.ts'
-import { localStubRunner } from '../runner/stub.ts'
+import { createRun } from '../runner/create-run.ts'
 
 // POST /api/debug/stub-run
 // Body: { prNumber?: number, subset?: string[] }
-// Creates a fake PR + run + spawns the local stub runner. DEV-ONLY.
-// Gated on ENABLE_DEBUG_ROUTES — must be explicitly enabled. The stub bypasses
-// bearer auth (writes events straight to D1), so this is a wide-open execution
-// path that must stay off in any environment with real users or real runners.
+// Upserts a fake PR and creates a run through the normal path (ensure box →
+// insert run → dispatch); with the stub provider this fabricates events
+// straight to D1. DEV-ONLY, gated on ENABLE_DEBUG_ROUTES — a wide-open
+// execution path that must stay off anywhere with real users or runners.
 export const debugStubRun: Handler = async (req, env, ctx) => {
   if (env.ENABLE_DEBUG_ROUTES !== '1') {
     return new Response('Not Found', { status: 404 })
@@ -28,36 +27,15 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
     .bind(repo, prNumber, headSha, now)
     .run()
 
-  const runId = crypto.randomUUID()
-  const bearerToken = crypto.randomUUID()
-  const bearerHash = await hashToken(bearerToken)
-
-  await env.DB.prepare(
-    `INSERT INTO runs (id, repo, pr_number, head_sha, trigger, subset_json, status, bearer_token_hash)
-     VALUES (?1, ?2, ?3, ?4, 'manual', ?5, 'queued', ?6)`,
-  )
-    .bind(runId, repo, prNumber, headSha, body.subset ? JSON.stringify(body.subset) : null, bearerHash)
-    .run()
-
-  await localStubRunner.spawn(
-    env,
-    ctx,
-    {
-      runId,
-      repo,
-      prNumber,
-      headSha,
-      baseSha: null,
-      baseRef: 'main',
-      imageVersion: 'stub',
-      subset: body.subset ?? null,
-    },
-    bearerToken,
-  )
-
-  return Response.json({
-    runId,
-    dashboardUrl: `/r/${runId}/dashboard/`,
-    bearerToken, // returned once for dev convenience
+  const { runId } = await createRun(env, ctx, {
+    repo,
+    prNumber,
+    headSha,
+    baseSha: null,
+    baseRef: 'main',
+    trigger: 'manual',
+    subset: body.subset ?? null,
   })
+
+  return Response.json({ runId, dashboardUrl: `/r/${runId}/dashboard/` })
 }
