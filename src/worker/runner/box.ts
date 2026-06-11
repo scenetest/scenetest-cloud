@@ -97,12 +97,21 @@ async function provisionBox(env: Env, ctx: ExecutionContext, pr: PrRef): Promise
   return { id: boxId, head_sha: pr.headSha, status }
 }
 
-// Mark the box for teardown. The reaper destroys the backing droplet on its
-// next pass (boxes with status 'destroyed' are swept regardless of age).
+// Mark the box for teardown and cancel its unfinished runs — latest wins:
+// when a new commit retires the box, the only state worth a verdict is the
+// new one, so in-flight batches for the old one stop counting immediately.
+// The reaper destroys the backing droplet on its next pass (boxes with
+// status 'destroyed' are swept regardless of age) and repeats the run
+// cancellation as an idempotent safety net.
 export async function retireBox(env: Env, boxId: string): Promise<void> {
-  await env.DB.prepare(
-    `UPDATE boxes SET status = 'destroyed', destroyed_at = ?1 WHERE id = ?2`,
-  )
-    .bind(Date.now(), boxId)
-    .run()
+  const now = Date.now()
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE boxes SET status = 'destroyed', destroyed_at = ?1 WHERE id = ?2`,
+    ).bind(now, boxId),
+    env.DB.prepare(
+      `UPDATE runs SET status = 'cancelled', ended_at = ?1
+         WHERE box_id = ?2 AND ended_at IS NULL`,
+    ).bind(now, boxId),
+  ])
 }

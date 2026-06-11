@@ -38,7 +38,9 @@ async function runStub(env: Env, run: RunSpec) {
     await insertEvents(env.DB, run.runId, [{ seq, payload }])
   }
 
-  await env.DB.prepare('UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3')
+  await env.DB.prepare(
+    'UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
+  )
     .bind('running', startTs, run.runId)
     .run()
 
@@ -68,6 +70,14 @@ async function runStub(env: Env, run: RunSpec) {
   let pass = 0
   let fail = 0
   for (const scene of targetScenes) {
+    // Latest wins: a new commit retiring the box cancels this run mid-batch
+    // (real boxes get the same signal over their command channel). Stop
+    // emitting and leave the remaining scenes queued.
+    const current = await env.DB.prepare('SELECT status FROM runs WHERE id = ?1')
+      .bind(run.runId)
+      .first<{ status: string }>()
+    if (current?.status === 'cancelled') return
+
     const sId = sceneId(scene.file, scene.name)
     const sceneStart = Date.now()
     await env.DB.prepare(
@@ -151,7 +161,9 @@ async function runStub(env: Env, run: RunSpec) {
     summary: { scenes: targetScenes.length, completed: pass, failed: fail },
   })
 
-  await env.DB.prepare('UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3')
+  await env.DB.prepare(
+    'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
+  )
     .bind(fail === 0 ? 'passed' : 'failed', endTs, run.runId)
     .run()
 }
