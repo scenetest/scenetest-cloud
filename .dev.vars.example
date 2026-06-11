@@ -1,0 +1,3 @@
+# Copy to .dev.vars (gitignored) for local `wrangler dev`.
+# Unlocks /api/debug/stub-run, which fabricates runs without bearer auth.
+ENABLE_DEBUG_ROUTES=1

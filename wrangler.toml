@@ -2,6 +2,9 @@ name = "scenetest-cloud"
 main = "src/worker/index.ts"
 compatibility_date = "2025-01-15"
 compatibility_flags = ["nodejs_compat"]
+# Upload source maps so stack traces in Workers Logs point at TypeScript
+# source instead of bundled positions.
+upload_source_maps = true
 
 [observability]
 enabled = false
@@ -40,14 +43,10 @@ GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
 # once allowed_user is non-empty).
 BOOTSTRAP_ALLOWED_LOGIN = "mhsnook"
 # DEV-ONLY: when "1", unlocks /api/debug/stub-run which fabricates runs
-# without bearer auth. MUST be unset / "0" in production.
-ENABLE_DEBUG_ROUTES = "1"
+# without bearer auth. Defaults off so `wrangler deploy` is safe; enable
+# locally via .dev.vars (see .dev.vars.example).
+ENABLE_DEBUG_ROUTES = "0"
 # Secrets (set via `wrangler secret put`):
 #   GITHUB_OAUTH_CLIENT_SECRET
 #   GITHUB_WEBHOOK_SECRET
 #   SESSION_SECRET
-
-# Production overrides — `wrangler deploy --env production` must NOT enable
-# debug routes. Override here when a production environment is wired up.
-# [env.production.vars]
-# ENABLE_DEBUG_ROUTES = "0"
