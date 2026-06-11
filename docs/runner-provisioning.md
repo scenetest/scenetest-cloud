@@ -44,21 +44,32 @@ Background in [architecture.md](./architecture.md); setup steps in
    (default 30), marking them `destroyed` (or `lost` if the API call fails)
    and cancelling any runs that never completed.
 
-## Building the image
+## The image builds itself
 
-```sh
-DO_API_TOKEN=... ./infra/image/build-image.sh
-```
+The runner image is the env-image stage of the build pipeline
+(architecture.md), and it is self-building: there is no manual snapshot
+step. `ensureImage()` (`src/worker/runner/image.ts`) keys the image by a
+content hash of its inputs — the toolchain config (base Ubuntu slug, node
+major, supabase CLI version), the builder cloud-init script, and the box
+agent source — and looks it up in the global `stage_cache` table.
 
-The script (`infra/image/`) boots a builder droplet whose cloud-init
-installs the toolchain — node 22 + pnpm, git, docker, the supabase CLI,
-Playwright *system* deps (browsers are version-coupled to the project's
-playwright, so the project installs its own at box-setup time) — bakes in
-the agent and its systemd unit, neutralizes the machine identity, and
-powers off; power-off is the "done" signal (we never SSH in). It then
-snapshots, destroys the builder, and prints the snapshot id plus the
-`wrangler.toml` lines to set. ~10–15 minutes; snapshot storage is
-~$0.06/GB/month.
+- **Hit:** boxes provision from the cached snapshot immediately.
+- **Miss** (first run ever, or any input changed): the worker boots a
+  builder droplet from stock `ubuntu-24-04-x64` whose cloud-init installs
+  the toolchain — node + pnpm, git, docker, the supabase CLI, Playwright
+  *system* deps (browsers are version-coupled to the project's playwright,
+  so the project installs its own at box-setup time) — bakes in the agent
+  and its systemd unit, neutralizes machine identity, and powers off.
+  Power-off is the "done" signal; nothing ever SSHes in. The cron tick
+  walks the build forward (off → snapshot → ready, builder destroyed),
+  then provisions every box that was waiting and re-mints their tokens.
+  ~10–15 minutes, once per toolchain change; meanwhile dispatched runs
+  queue in the PR coordinator, so the first PR after a toolchain change is
+  slow, not lost. Three failed attempts mark the hash `failed` and stop.
+
+`RUNNER_IMAGE` remains as an escape hatch: setting it pins a snapshot id
+and bypasses the self-built image entirely. To force a rebuild, delete the
+image's `stage_cache` row.
 
 The `scenetest-runner` unit is installed but deliberately **disabled** in
 the image: `run.env` doesn't exist yet, so an enabled unit would crash-loop
@@ -104,10 +115,11 @@ watched repo. Public repos work without either.
 | Name | Kind | Notes |
 |---|---|---|
 | `RUNNER_PROVIDER` | var | `stub` (default) or `digitalocean` |
-| `RUNNER_REGION`, `RUNNER_SIZE`, `RUNNER_IMAGE` | var | droplet parameters |
+| `RUNNER_REGION`, `RUNNER_SIZE` | var | droplet parameters |
+| `RUNNER_IMAGE` | var | optional pin; normally unset (image self-builds) |
 | `PUBLIC_BASE_URL` | var | this deployment's origin, for `SCENETEST_INGEST_URL` |
 | `RUNNER_MAX_AGE_MINUTES` | var | hard kill cap, default 30 |
-| `DO_API_TOKEN` | secret | droplet read/write scope |
+| `DO_API_TOKEN` | secret | droplet read/write + snapshot scope |
 
 The stub provider (`runner/stub.ts`) fabricates a plausible run in-worker
 and needs none of these; it is the default so a fresh deployment works
@@ -126,11 +138,12 @@ end-to-end before any DigitalOcean setup.
 
 ## Not built yet / untested
 
-- **Nothing in `infra/` has touched the live DigitalOcean API yet.** The
-  agent's channel behavior (ready, queue flush, command files, event relay)
-  is covered by `pnpm e2e`, which spawns it in test mode against the real
-  worker — but image build, droplet boot, checkout, and `box-setup.sh` runs
-  are exercised only by the first real `build-image.sh` + PR.
+- **Nothing DigitalOcean-side has touched the live API yet.** The agent's
+  channel behavior (ready, queue flush, command files, event relay) is
+  covered by `pnpm e2e`, which spawns it in test mode against the real
+  worker — but the self-building image (builder droplet, snapshot, tick
+  state machine), droplet boot, checkout, and `box-setup.sh` runs are
+  exercised only by the first real PR after `RUNNER_PROVIDER` flips.
 - Viewer WebSockets from the coordinator (viewers currently read D1-backed
   SSE; the coordinator already writes through to D1, so this is a fan-out
   optimization, not a correctness gap).

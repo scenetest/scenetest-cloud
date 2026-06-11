@@ -146,8 +146,9 @@ changes; a changed stage invalidates every stage after it. The chain is
 linear and short:
 
 1. Environment image — OS, node, supabase CLI, Postgres, browsers.
-   Watches tool-version declarations; cached as a registry image tagged by
-   its hash.
+   Watches tool-version declarations; cached as a provider snapshot (or a
+   registry image) whose id lives in `stage_cache` under the hash, and
+   self-built from a stock base image on a cache miss.
 2. Dependencies — `pnpm install` on top of 1. Watches the lockfile.
 3. Database state — migrate + seed. Watches the `supabase/` directory.
 4. Build and static analysis — typegen, build, typecheck, lint, bundle

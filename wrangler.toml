@@ -29,6 +29,14 @@ binding = "ASSETS"
 # handler's own 404 instead of letting the SPA render its own page.
 not_found_handling = "single-page-application"
 
+# The builder cloud-init script and the box agent are bundled as text: they
+# are inputs to the image stage (hashed into its cache key) and shipped to
+# DigitalOcean inside user_data.
+[[rules]]
+type = "Text"
+globs = ["**/*.sh", "**/agent.mjs"]
+fallthrough = true
+
 # One Durable Object per PR (SQLite-backed): terminates the box's outbound
 # WebSocket, queues commands/dispatches, writes events through to D1.
 [durable_objects]
@@ -56,7 +64,9 @@ GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
 RUNNER_PROVIDER = "stub"
 # RUNNER_REGION = "nyc3"
 # RUNNER_SIZE = "s-2vcpu-4gb"
-# RUNNER_IMAGE = "<snapshot id built per docs/runner-provisioning.md>"
+# RUNNER_IMAGE: do not set normally — the runner image builds and caches
+# itself (stage_cache). Setting it pins a specific snapshot id, bypassing
+# the self-built one (escape hatch; see docs/runner-provisioning.md).
 # PUBLIC_BASE_URL = "https://scenetest-cloud.<account>.workers.dev"
 # RUNNER_MAX_AGE_MINUTES = "30"
 # Bootstrap: first user whose GitHub login matches gets auto-inserted into

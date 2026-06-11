@@ -1,12 +1,15 @@
 #!/bin/bash
-# Cloud-init for the image builder droplet. Installs the runner toolchain,
-# bakes in the box agent + its systemd unit (installed but DISABLED — the
-# provision-time user_data written by src/worker/runner/digitalocean.ts
-# creates /etc/scenetest/run.env and starts the unit), cleans up, and powers
-# off — which build-image.sh treats as the "ready to snapshot" signal.
+# Cloud-init for an image-builder droplet. The worker's image stage
+# (src/worker/runner/image.ts) substitutes __AGENT_B64__, __NODE_MAJOR__,
+# and __SUPABASE_CLI_VERSION__, boots a stock Ubuntu droplet with this as
+# user_data, and treats poweroff as the "ready to snapshot" signal. This
+# file's content is part of the image stage's input hash — editing it
+# builds a new image.
 #
-# __AGENT_B64__ and __SUPABASE_CLI_VERSION__ are substituted by
-# build-image.sh; do not run this file directly.
+# Installs the runner toolchain, bakes in the box agent + its systemd unit
+# (installed but DISABLED — provision-time user_data written by
+# src/worker/runner/digitalocean.ts creates /etc/scenetest/run.env and
+# starts the unit), cleans up, and powers off.
 set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -14,8 +17,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y git curl ca-certificates docker.io docker-compose-v2
 
-# node 22 + pnpm via corepack
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+# node + pnpm via corepack
+curl -fsSL https://deb.nodesource.com/setup___NODE_MAJOR__.x | bash -
 apt-get install -y nodejs
 corepack enable
 
