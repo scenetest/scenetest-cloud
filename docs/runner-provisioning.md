@@ -1,5 +1,12 @@
 # Runner provisioning
 
+> This documents the implementation as it exists: one box per run. The
+> target model is one box per PR with a content-addressed build pipeline —
+> see the build pipeline and runner sections of
+> [architecture.md](./architecture.md). The bearer-token, user_data, and
+> reaper mechanics below carry over; the provisioning trigger and box
+> lifetime change.
+
 How a run goes from "GitHub said there's a new sha" to "an ephemeral
 DigitalOcean box is executing scenes and reporting back," and how that box is
 guaranteed to die. Background in [architecture.md](./architecture.md); setup
