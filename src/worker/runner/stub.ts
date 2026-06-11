@@ -1,9 +1,12 @@
 import type { Env } from '../env.ts'
-import type { JobSpec, Runner } from './types.ts'
+import type { RunSpec, Runner } from './types.ts'
 import { insertEvents } from '../db.ts'
 
-// LocalStubRunner: writes scenetest-shaped events + scene_executions directly to D1.
-// In production a real runner would POST via HTTP and authenticate with the bearer.
+// LocalStubRunner: fabricates a plausible run by writing scenetest-shaped
+// events + scene_executions straight to D1. It has no real machine, so
+// provision() is a no-op and dispatch() runs the fake batch in-worker.
+// A real runner provisions a droplet (provision) and sends batches to it over
+// the box's command channel (dispatch) — the Durable Object layer.
 // Wire format documented in packages/scenetest-js/.../dashboard.ts handleEvent().
 
 const FAKE_SCENES = [
@@ -14,29 +17,29 @@ const FAKE_SCENES = [
 ] as const
 
 export const localStubRunner: Runner = {
-  async spawn(env, ctx, spec, _bearerToken) {
-    const runnerId = `stub-${crypto.randomUUID()}`
-    ctx.waitUntil(runStub(env, spec, runnerId))
-    return { runnerId }
+  async provision(_env, _ctx, box, _bearerToken) {
+    return { runnerId: `stub-${box.boxId.slice(0, 8)}` }
+  },
+
+  async dispatch(env, ctx, run) {
+    ctx.waitUntil(runStub(env, run))
   },
 }
 
-async function runStub(env: Env, spec: JobSpec, runnerId: string) {
-  const targetScenes = spec.subset
-    ? FAKE_SCENES.filter((s) => spec.subset!.includes(sceneId(s.file, s.name)))
+async function runStub(env: Env, run: RunSpec) {
+  const targetScenes = run.subset
+    ? FAKE_SCENES.filter((s) => run.subset!.includes(sceneId(s.file, s.name)))
     : FAKE_SCENES
 
   const startTs = Date.now()
   let seq = 0
   const emit = async (payload: unknown) => {
     seq += 1
-    await insertEvents(env.DB, spec.runId, [{ seq, payload }])
+    await insertEvents(env.DB, run.runId, [{ seq, payload }])
   }
 
-  await env.DB.prepare(
-    'UPDATE runs SET status = ?1, started_at = ?2, runner_id = ?3 WHERE id = ?4',
-  )
-    .bind('running', startTs, runnerId, spec.runId)
+  await env.DB.prepare('UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3')
+    .bind('running', startTs, run.runId)
     .run()
 
   await emit({ type: 'run:start', timestamp: startTs, sceneCount: targetScenes.length })
@@ -51,13 +54,13 @@ async function runStub(env: Env, spec: JobSpec, runnerId: string) {
     targetScenes.map((s) =>
       seedStmt.bind(
         crypto.randomUUID(),
-        spec.runId,
-        spec.repo,
-        spec.prNumber,
+        run.runId,
+        run.repo,
+        run.prNumber,
         sceneId(s.file, s.name),
         s.file,
         s.name,
-        spec.headSha,
+        run.headSha,
       ),
     ),
   )
@@ -71,7 +74,7 @@ async function runStub(env: Env, spec: JobSpec, runnerId: string) {
       `UPDATE scene_executions SET status = 'running', started_at = ?1
          WHERE run_id = ?2 AND scene_id = ?3`,
     )
-      .bind(sceneStart, spec.runId, sId)
+      .bind(sceneStart, run.runId, sId)
       .run()
 
     await emit({
@@ -133,7 +136,7 @@ async function runStub(env: Env, spec: JobSpec, runnerId: string) {
     await env.DB.prepare(
       `UPDATE scene_executions SET status = ?1, ended_at = ?2 WHERE run_id = ?3 AND scene_id = ?4`,
     )
-      .bind(scene.pass ? 'passed' : 'failed', sceneEnd, spec.runId, sId)
+      .bind(scene.pass ? 'passed' : 'failed', sceneEnd, run.runId, sId)
       .run()
 
     if (scene.pass) pass += 1
@@ -148,10 +151,8 @@ async function runStub(env: Env, spec: JobSpec, runnerId: string) {
     summary: { scenes: targetScenes.length, completed: pass, failed: fail },
   })
 
-  await env.DB.prepare(
-    `UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3`,
-  )
-    .bind(fail === 0 ? 'passed' : 'failed', endTs, spec.runId)
+  await env.DB.prepare('UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3')
+    .bind(fail === 0 ? 'passed' : 'failed', endTs, run.runId)
     .run()
 }
 

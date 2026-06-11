@@ -1,12 +1,13 @@
 import type { Env } from '../env.ts'
-import type { JobSpec, Runner } from './types.ts'
+import type { BoxSpec, Runner } from './types.ts'
 
-// One ephemeral droplet per run. The droplet image (RUNNER_IMAGE, a snapshot)
-// ships the bootstrap: a `scenetest-runner` systemd unit that reads
-// /etc/scenetest/run.env, clones the repo at the requested sha, brings up the
-// app + db + seeds + Playwright, runs the scenes CLI, and POSTs results to
-// the ingest API. user_data only carries the per-run parameters; the image
-// contract is documented in docs/runner-provisioning.md.
+// One ephemeral droplet per PR box. The droplet image (RUNNER_IMAGE, a
+// snapshot) ships the bootstrap: a `scenetest-runner` systemd unit that reads
+// /etc/scenetest/run.env, clones the repo at the box's sha, brings up the
+// app + db + seeds + Playwright, and connects out to the PR's coordinator.
+// user_data carries only box-level parameters; scene batches arrive later over
+// the box's command channel. The image contract is in
+// docs/runner-provisioning.md.
 //
 // NOT yet exercised against the live DigitalOcean API.
 
@@ -24,16 +25,15 @@ function requireConfig(env: Env): string[] {
     .filter((k) => !env[k])
 }
 
-function userData(env: Env, spec: JobSpec, bearerToken: string): string {
-  // Shell-safe: every value here is either a uuid, a sha, an owner/name pair
-  // we resolved against the GitHub API, or JSON we serialized ourselves.
+function userData(env: Env, box: BoxSpec, bearerToken: string): string {
+  // Shell-safe: every value here is a uuid, a sha, an owner/name pair resolved
+  // against the GitHub API, or a value we control.
   const runEnv = [
-    `SCENETEST_RUN_ID=${spec.runId}`,
-    `SCENETEST_REPO=${spec.repo}`,
-    `SCENETEST_HEAD_SHA=${spec.headSha}`,
-    `SCENETEST_BASE_SHA=${spec.baseSha ?? ''}`,
-    `SCENETEST_BASE_REF=${spec.baseRef}`,
-    `SCENETEST_SUBSET=${spec.subset ? JSON.stringify(spec.subset) : ''}`,
+    `SCENETEST_BOX_ID=${box.boxId}`,
+    `SCENETEST_REPO=${box.repo}`,
+    `SCENETEST_HEAD_SHA=${box.headSha}`,
+    `SCENETEST_BASE_SHA=${box.baseSha ?? ''}`,
+    `SCENETEST_BASE_REF=${box.baseRef}`,
     `SCENETEST_INGEST_URL=${env.PUBLIC_BASE_URL}`,
     `SCENETEST_BEARER_TOKEN=${bearerToken}`,
   ].join('\n')
@@ -49,7 +49,7 @@ function userData(env: Env, spec: JobSpec, bearerToken: string): string {
 }
 
 export const digitalOceanRunner: Runner = {
-  async spawn(env, _ctx, spec, bearerToken) {
+  async provision(env, _ctx, box, bearerToken) {
     const missing = requireConfig(env)
     if (missing.length > 0) {
       throw new Error(`digitalocean runner missing config: ${missing.join(', ')}`)
@@ -59,12 +59,12 @@ export const digitalOceanRunner: Runner = {
       method: 'POST',
       headers: doHeaders(env),
       body: JSON.stringify({
-        name: `st-runner-${spec.runId.slice(0, 8)}`,
+        name: `st-box-${box.boxId.slice(0, 8)}`,
         region: env.RUNNER_REGION,
         size: env.RUNNER_SIZE,
         image: Number.isInteger(Number(env.RUNNER_IMAGE)) ? Number(env.RUNNER_IMAGE) : env.RUNNER_IMAGE,
-        user_data: userData(env, spec, bearerToken),
-        tags: ['scenetest-runner', `st-run-${spec.runId}`],
+        user_data: userData(env, box, bearerToken),
+        tags: ['scenetest-runner', `st-box-${box.boxId}`],
         // No ssh_keys: nothing should need to log in. Attach one temporarily
         // via the DO console when debugging an image.
       }),
@@ -76,13 +76,21 @@ export const digitalOceanRunner: Runner = {
     const runnerId = String(droplet.id)
 
     await env.DB.prepare(
-      `INSERT INTO runner_instances (id, run_id, provider, region, size, image, status, created_at)
+      `INSERT INTO runner_instances (id, box_id, provider, region, size, image, status, created_at)
        VALUES (?1, ?2, 'digitalocean', ?3, ?4, ?5, 'provisioning', ?6)`,
     )
-      .bind(runnerId, spec.runId, env.RUNNER_REGION!, env.RUNNER_SIZE!, env.RUNNER_IMAGE!, Date.now())
+      .bind(runnerId, box.boxId, env.RUNNER_REGION!, env.RUNNER_SIZE!, env.RUNNER_IMAGE!, Date.now())
       .run()
 
     return { runnerId }
+  },
+
+  async dispatch() {
+    // Sending a batch to a warm droplet requires the box's command channel
+    // (the PR Durable Object holding the box's outbound WebSocket), which is
+    // not built yet. Until then the digitalocean provider can provision but
+    // not run.
+    throw new Error('digitalocean dispatch requires the PR coordinator (not implemented)')
   },
 }
 
@@ -96,25 +104,25 @@ export async function destroyDroplet(env: Env, dropletId: string): Promise<boole
   return resp.status === 204 || resp.status === 404
 }
 
-// Called from the scheduled handler. Destroys instances whose run has ended,
-// and instances past the hard age cap (covers hung runs and lost boxes). A
-// box reaped purely on age belongs to a run that never reported completion,
-// so that run is cancelled here — otherwise its status would stay 'running'
-// forever after the box is gone.
+// Called from the scheduled handler. Destroys droplets whose box is retired
+// (status 'destroyed') and droplets past the hard age cap (covers hung builds
+// and lost boxes). A box reaped purely on age was never reported ready/idle,
+// so its still-running runs are cancelled here — otherwise their status would
+// stay 'running' forever after the box is gone.
 export async function reapRunners(env: Env): Promise<void> {
   if (!env.DO_API_TOKEN) return
   const maxAgeMs = Number(env.RUNNER_MAX_AGE_MINUTES ?? '30') * 60_000
   const cutoff = Date.now() - maxAgeMs
 
   const rows = await env.DB.prepare(
-    `SELECT ri.id, ri.run_id, r.ended_at FROM runner_instances ri
-       JOIN runs r ON r.id = ri.run_id
+    `SELECT ri.id, ri.box_id, b.status AS box_status FROM runner_instances ri
+       JOIN boxes b ON b.id = ri.box_id
      WHERE ri.provider = 'digitalocean'
        AND ri.status IN ('provisioning', 'active')
-       AND (r.ended_at IS NOT NULL OR ri.created_at < ?1)`,
+       AND (b.status = 'destroyed' OR ri.created_at < ?1)`,
   )
     .bind(cutoff)
-    .all<{ id: string; run_id: string; ended_at: number | null }>()
+    .all<{ id: string; box_id: string; box_status: string }>()
 
   for (const row of rows.results ?? []) {
     const ok = await destroyDroplet(env, row.id)
@@ -124,17 +132,20 @@ export async function reapRunners(env: Env): Promise<void> {
     )
       .bind(ok ? 'destroyed' : 'lost', now, row.id)
       .run()
-    if (row.ended_at === null) {
-      // Over-age kill of a run that never completed. CASE guards against a
-      // race with a final /complete landing between SELECT and UPDATE.
+    if (row.box_status !== 'destroyed') {
       await env.DB.prepare(
-        `UPDATE runs
-           SET status = 'cancelled', ended_at = ?1
-         WHERE id = ?2 AND ended_at IS NULL`,
+        `UPDATE boxes SET status = 'destroyed', destroyed_at = ?1 WHERE id = ?2`,
       )
-        .bind(now, row.run_id)
+        .bind(now, row.box_id)
         .run()
     }
+    // Cancel any of the box's runs that never completed.
+    await env.DB.prepare(
+      `UPDATE runs SET status = 'cancelled', ended_at = ?1
+         WHERE box_id = ?2 AND ended_at IS NULL`,
+    )
+      .bind(now, row.box_id)
+      .run()
     if (!ok) console.error(`reaper: failed to destroy droplet ${row.id}; marked lost`)
   }
 }

@@ -1,5 +1,5 @@
 import type { Handler } from '../router.ts'
-import { verifyRunBearer } from '../middleware/bearer.ts'
+import { verifyBoxToken } from '../middleware/bearer.ts'
 import { insertEvents, type RunEvent } from '../db.ts'
 
 // POST /api/events/:runId
@@ -7,7 +7,7 @@ import { insertEvents, type RunEvent } from '../db.ts'
 // Payload is opaque JSON (scenetest-js wire format). We store and forward.
 export const postEvents: Handler = async (req, env, _ctx, params) => {
   const runId = params.runId!
-  const auth = await verifyRunBearer(req, env, runId)
+  const auth = await verifyBoxToken(req, env, runId)
   if (!auth.ok) return auth.response
 
   const body = await req.json<{ events?: RunEvent[] }>()
@@ -22,7 +22,7 @@ export const postEvents: Handler = async (req, env, _ctx, params) => {
 // SceneExecution = { id, scene_id, scene_file, scene_name, status, started_at?, ended_at?, summary? }
 export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
   const runId = params.runId!
-  const auth = await verifyRunBearer(req, env, runId)
+  const auth = await verifyBoxToken(req, env, runId)
   if (!auth.ok) return auth.response
   const run = auth.run
 
@@ -75,7 +75,7 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
 // Body: { status: 'passed' | 'failed' | 'cancelled' }
 export const postRunComplete: Handler = async (req, env, _ctx, params) => {
   const runId = params.runId!
-  const auth = await verifyRunBearer(req, env, runId)
+  const auth = await verifyBoxToken(req, env, runId)
   if (!auth.ok) return auth.response
 
   const body = await req.json<{ status: 'passed' | 'failed' | 'cancelled' }>()

@@ -13,9 +13,10 @@ export interface BearerRun {
   head_sha: string
 }
 
-// Verifies the runner's bearer token and returns the run row, so handlers on
-// the ingest hot path don't re-query `runs` for the same request.
-export async function verifyRunBearer(
+// Verifies the box's bearer token for an ingest request scoped to a run. The
+// credential belongs to the run's box (one per PR), so we join run → box;
+// returning the run's repo/pr/sha also saves ingest handlers a re-query.
+export async function verifyBoxToken(
   req: Request,
   env: Env,
   runId: string,
@@ -26,7 +27,9 @@ export async function verifyRunBearer(
     return { ok: false, response: new Response('Unauthorized', { status: 401 }) }
   }
   const row = await env.DB.prepare(
-    'SELECT bearer_token_hash, repo, pr_number, head_sha FROM runs WHERE id = ?1',
+    `SELECT b.bearer_token_hash AS bearer_token_hash, r.repo, r.pr_number, r.head_sha
+       FROM runs r JOIN boxes b ON b.id = r.box_id
+     WHERE r.id = ?1`,
   )
     .bind(runId)
     .first<BearerRun & { bearer_token_hash: string }>()
