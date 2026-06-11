@@ -4,7 +4,10 @@ import { dashboardHtml, dashboardSse, postRunCommand } from './scenetest-bridge/
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
+import { boxChannel } from './routes/box-channel.ts'
 import { reapRunners } from './runner/digitalocean.ts'
+
+export { PrCoordinator } from './do/pr-coordinator.ts'
 import {
   getGithubLogin,
   getGithubCallback,
@@ -46,6 +49,8 @@ const router = new Router()
   .post('/api/runs/:runId/commands', withSession(postRunCommand))
   // GitHub webhooks (HMAC-authed inside the handler)
   .post('/webhook/github', postGithubWebhook)
+  // Box channel (bearer-authed WebSocket; auth inside the handler)
+  .get('/api/boxes/:boxId/channel', boxChannel)
   // Runner ingest (bearer-authed)
   .post('/api/events/:runId', postEvents)
   .post('/api/runs/:runId/scene-executions', postSceneExecutions)

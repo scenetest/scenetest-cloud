@@ -1,5 +1,6 @@
 import type { Env } from '../env.ts'
 import type { BoxSpec, Runner } from './types.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
 
 // One ephemeral droplet per PR box. The droplet image (RUNNER_IMAGE, a
 // snapshot) ships the bootstrap: a `scenetest-runner` systemd unit that reads
@@ -85,12 +86,15 @@ export const digitalOceanRunner: Runner = {
     return { runnerId }
   },
 
-  async dispatch() {
-    // Sending a batch to a warm droplet requires the box's command channel
-    // (the PR Durable Object holding the box's outbound WebSocket), which is
-    // not built yet. Until then the digitalocean provider can provision but
-    // not run.
-    throw new Error('digitalocean dispatch requires the PR coordinator (not implemented)')
+  async dispatch(env, _ctx, run) {
+    // The batch rides the box's command channel: the PR coordinator sends it
+    // down the connected WebSocket, or queues it — the normal case right
+    // after provision, when the droplet is still booting. The box receives
+    // every queued dispatch the moment it connects.
+    await prCoordinator(env, run.repo, run.prNumber).fetch('https://do/dispatch', {
+      method: 'POST',
+      body: JSON.stringify({ run }),
+    })
   },
 }
 
