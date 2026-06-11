@@ -1,3 +1,20 @@
-# Copy to .dev.vars (gitignored) for local `wrangler dev`.
+# Copy to .dev.vars (gitignored) for `wrangler dev`. Plain vars live in
+# wrangler.toml [vars]; only secrets and local overrides go here. See
+# docs/setup.md.
+
 # Unlocks /api/debug/stub-run, which fabricates runs without bearer auth.
 ENABLE_DEBUG_ROUTES=1
+
+# From the GitHub App / OAuth App that matches GITHUB_OAUTH_CLIENT_ID.
+GITHUB_OAUTH_CLIENT_SECRET=
+
+# Any long random string; signs session cookies. `openssl rand -hex 32`.
+SESSION_SECRET=
+
+# Shared secret configured on the GitHub webhook (docs/setup.md). The
+# /webhook/github route returns 503 until this is set.
+GITHUB_WEBHOOK_SECRET=
+
+# Only needed when RUNNER_PROVIDER = "digitalocean". A DO personal access
+# token with droplet read/write scope.
+# DO_API_TOKEN=

@@ -8,10 +8,27 @@ export interface Env {
   // login matches this value, they're inserted automatically. Subsequent
   // logins use the table normally.
   BOOTSTRAP_ALLOWED_LOGIN: string
-  // TODO: required once the /webhook/github handler lands.
+  // Required for /webhook/github; the route returns 503 until it is set.
   GITHUB_WEBHOOK_SECRET?: string
   SESSION_SECRET: string
   ENABLE_DEBUG_ROUTES?: string
+
+  // Runner provisioning. RUNNER_PROVIDER selects the implementation:
+  // 'stub' (default; writes fake events straight to D1) or 'digitalocean'.
+  RUNNER_PROVIDER?: string
+  // DigitalOcean provider config. DO_API_TOKEN is a secret; the rest are
+  // plain vars. RUNNER_IMAGE is a snapshot id whose contract is described in
+  // docs/runner-provisioning.md. PUBLIC_BASE_URL is this deployment's origin
+  // (e.g. https://scenetest-cloud.example.workers.dev) — the box needs it to
+  // reach the ingest API.
+  DO_API_TOKEN?: string
+  RUNNER_REGION?: string
+  RUNNER_SIZE?: string
+  RUNNER_IMAGE?: string
+  PUBLIC_BASE_URL?: string
+  // Hard cap on box lifetime in minutes (default 30). The reaper destroys
+  // anything older regardless of run state.
+  RUNNER_MAX_AGE_MINUTES?: string
 }
 
 export interface AuthedUser {

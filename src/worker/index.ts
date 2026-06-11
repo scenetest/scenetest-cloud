@@ -3,6 +3,8 @@ import { Router } from './router.ts'
 import { dashboardHtml, dashboardRedirectToSlash, dashboardSse, dashboardNoop } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun } from './routes/debug.ts'
+import { postGithubWebhook } from './routes/webhook-github.ts'
+import { reapRunners } from './runner/digitalocean.ts'
 import {
   getGithubLogin,
   getGithubCallback,
@@ -40,6 +42,8 @@ const router = new Router()
   .get('/r/:runId/dashboard/', withSession(dashboardHtml, 'redirect'))
   .get('/r/:runId/dashboard/__scenetest/events', withSession(dashboardSse))
   .post('/r/:runId/dashboard/__scenetest/:cmd', withSession(dashboardNoop))
+  // GitHub webhooks (HMAC-authed inside the handler)
+  .post('/webhook/github', postGithubWebhook)
   // Runner ingest (bearer-authed)
   .post('/api/events/:runId', postEvents)
   .post('/api/runs/:runId/scene-executions', postSceneExecutions)
@@ -80,5 +84,11 @@ export default {
       }
       return new Response(`Internal error (request ${requestId})`, { status: 500 })
     }
+  },
+
+  // Cron (see wrangler.toml [triggers]): destroy droplets whose run ended or
+  // whose age exceeds the cap. No-ops unless the DO provider is configured.
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(reapRunners(env))
   },
 }

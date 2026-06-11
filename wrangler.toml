@@ -35,8 +35,21 @@ database_name = "scenetest-cloud-mhsnook"
 database_id = "59cdeb29-a690-46b8-a8f9-423be56ed4d8"
 migrations_dir = "migrations"
 
+# Reaper for ephemeral runner boxes (no-op while RUNNER_PROVIDER = "stub").
+[triggers]
+crons = ["*/10 * * * *"]
+
 [vars]
 GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
+# Runner provisioning: "stub" fabricates events in-worker; "digitalocean"
+# spawns one droplet per run (requires the DO vars below + DO_API_TOKEN
+# secret — see docs/runner-provisioning.md).
+RUNNER_PROVIDER = "stub"
+# RUNNER_REGION = "nyc3"
+# RUNNER_SIZE = "s-2vcpu-4gb"
+# RUNNER_IMAGE = "<snapshot id built per docs/runner-provisioning.md>"
+# PUBLIC_BASE_URL = "https://scenetest-cloud.<account>.workers.dev"
+# RUNNER_MAX_AGE_MINUTES = "30"
 # Bootstrap: first user whose GitHub login matches gets auto-inserted into
 # allowed_user when the table is empty. Set this to your own login before the
 # first deploy; can be left as-is afterward (the bootstrap path is a no-op
@@ -46,7 +59,9 @@ BOOTSTRAP_ALLOWED_LOGIN = "mhsnook"
 # without bearer auth. Defaults off so `wrangler deploy` is safe; enable
 # locally via .dev.vars (see .dev.vars.example).
 ENABLE_DEBUG_ROUTES = "0"
-# Secrets (set via `wrangler secret put`):
+# Secrets (set via `wrangler secret put`; locally in .dev.vars — see
+# .dev.vars.example):
 #   GITHUB_OAUTH_CLIENT_SECRET
 #   GITHUB_WEBHOOK_SECRET
 #   SESSION_SECRET
+#   DO_API_TOKEN          (only when RUNNER_PROVIDER = "digitalocean")
