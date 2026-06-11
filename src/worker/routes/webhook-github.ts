@@ -72,14 +72,42 @@ interface HandleResult {
   prNumber?: number
 }
 
+// What an inbound event means, independent of any I/O. The route shell does
+// signature checking, dedup, the watched-repo lookup, and the DB writes; this
+// just decides which of those writes to make. Kept pure so every branch is
+// unit-testable without a database.
+export type WebhookDecision =
+  | { kind: 'ignore'; reason: string }
+  | { kind: 'pr-closed' }
+  | { kind: 'create-run' }
+
+export function classifyWebhook(
+  event: string,
+  action: string | undefined,
+  isWatched: boolean,
+): WebhookDecision {
+  if (event === 'ping') return { kind: 'ignore', reason: 'ping' }
+  if (event !== 'pull_request') return { kind: 'ignore', reason: `event:${event}` }
+  if (!isWatched) return { kind: 'ignore', reason: 'unwatched-repo' }
+  if (action === 'closed') return { kind: 'pr-closed' }
+  if (action === 'opened' || action === 'synchronize' || action === 'reopened') {
+    return { kind: 'create-run' }
+  }
+  return { kind: 'ignore', reason: `action:${action}` }
+}
+
 async function handleEvent(
   env: Env,
   ctx: ExecutionContext,
   event: string,
   rawBody: string,
 ): Promise<HandleResult> {
-  if (event === 'ping') return { result: 'ignored:ping' }
-  if (event !== 'pull_request') return { result: `ignored:event:${event}` }
+  // Cheap event-type gate before parsing or touching the DB. (isWatched is
+  // irrelevant here — classifyWebhook short-circuits on event type first.)
+  if (event !== 'pull_request') {
+    const d = classifyWebhook(event, undefined, false) as { kind: 'ignore'; reason: string }
+    return { result: `ignored:${d.reason}` }
+  }
 
   const payload = JSON.parse(rawBody) as PullRequestPayload
   const { action, number: prNumber } = payload
@@ -92,21 +120,21 @@ async function handleEvent(
   )
     .bind(owner ?? '', name ?? '')
     .first()
-  if (!watched) return { ...base, result: 'ignored:unwatched-repo' }
+
+  const decision = classifyWebhook(event, action, watched !== null)
+  if (decision.kind === 'ignore') {
+    return { ...base, result: `ignored:${decision.reason}` }
+  }
 
   const now = Date.now()
 
-  if (action === 'closed') {
+  if (decision.kind === 'pr-closed') {
     await env.DB.prepare(
       `UPDATE prs SET state = 'closed', updated_at = ?1 WHERE repo = ?2 AND pr_number = ?3`,
     )
       .bind(now, repo, prNumber)
       .run()
     return { ...base, result: 'pr-closed' }
-  }
-
-  if (action !== 'opened' && action !== 'synchronize' && action !== 'reopened') {
-    return { ...base, result: `ignored:action:${action}` }
   }
 
   const headSha = payload.pull_request.head.sha
