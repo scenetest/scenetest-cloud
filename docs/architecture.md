@@ -177,6 +177,11 @@ kinds of stages sit behind it:
   hashes it has realized; on each push the PR object diffs the desired
   vector against the realized one and runs from the first divergence.
 
+When a push rebuilds the box, in-flight runs on the old state are cancelled
+immediately — latest wins. The only state worth a verdict is the one that
+might merge, and a late completion report from the old box cannot overwrite
+the cancellation.
+
 Static-analysis reports — lint and typecheck deltas, bundle sizes,
 dependency changes — are stage outputs keyed the same way, stored in the
 overview tables. The PR comparison view is "report at base hash vs report

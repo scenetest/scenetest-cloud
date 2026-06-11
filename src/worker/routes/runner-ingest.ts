@@ -73,16 +73,19 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
 
 // POST /api/runs/:runId/complete
 // Body: { status: 'passed' | 'failed' | 'cancelled' }
+// `ended_at IS NULL` keeps this from resurrecting a run the worker already
+// ended — e.g. cancelled because a new commit retired its box while the old
+// box's completion report was still in flight.
 export const postRunComplete: Handler = async (req, env, _ctx, params) => {
   const runId = params.runId!
   const auth = await verifyBoxToken(req, env, runId)
   if (!auth.ok) return auth.response
 
   const body = await req.json<{ status: 'passed' | 'failed' | 'cancelled' }>()
-  await env.DB.prepare(
-    'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3',
+  const res = await env.DB.prepare(
+    'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
   )
     .bind(body.status, Date.now(), runId)
     .run()
-  return Response.json({ ok: true })
+  return Response.json({ ok: true, applied: res.meta.changes > 0 })
 }
