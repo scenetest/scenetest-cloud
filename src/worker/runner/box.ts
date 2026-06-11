@@ -2,6 +2,7 @@ import type { Env } from '../env.ts'
 import type { BoxSpec } from './types.ts'
 import { hashToken } from '../middleware/bearer.ts'
 import { getRunner } from './registry.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
 
 export interface PrRef {
   repo: string // 'owner/name'
@@ -100,10 +101,15 @@ async function provisionBox(env: Env, ctx: ExecutionContext, pr: PrRef): Promise
 // Mark the box for teardown and cancel its unfinished runs — latest wins:
 // when a new commit retires the box, the only state worth a verdict is the
 // new one, so in-flight batches for the old one stop counting immediately.
-// The reaper destroys the backing droplet on its next pass (boxes with
+// The PR coordinator closes the box's WebSocket and drops its queued work;
+// the reaper destroys the backing droplet on its next pass (boxes with
 // status 'destroyed' are swept regardless of age) and repeats the run
 // cancellation as an idempotent safety net.
 export async function retireBox(env: Env, boxId: string): Promise<void> {
+  const box = await env.DB.prepare('SELECT repo, pr_number FROM boxes WHERE id = ?1')
+    .bind(boxId)
+    .first<{ repo: string; pr_number: number }>()
+
   const now = Date.now()
   await env.DB.batch([
     env.DB.prepare(
@@ -114,4 +120,11 @@ export async function retireBox(env: Env, boxId: string): Promise<void> {
          WHERE box_id = ?2 AND ended_at IS NULL`,
     ).bind(now, boxId),
   ])
+
+  if (box) {
+    await prCoordinator(env, box.repo, box.pr_number).fetch('https://do/retire', {
+      method: 'POST',
+      body: JSON.stringify({ boxId }),
+    })
+  }
 }

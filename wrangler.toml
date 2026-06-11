@@ -29,6 +29,15 @@ binding = "ASSETS"
 # handler's own 404 instead of letting the SPA render its own page.
 not_found_handling = "single-page-application"
 
+# One Durable Object per PR (SQLite-backed): terminates the box's outbound
+# WebSocket, queues commands/dispatches, writes events through to D1.
+[durable_objects]
+bindings = [{ name = "PR_COORDINATOR", class_name = "PrCoordinator" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PrCoordinator"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "scenetest-cloud-mhsnook"

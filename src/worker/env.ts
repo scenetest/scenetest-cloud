@@ -1,6 +1,8 @@
 export interface Env {
   DB: D1Database
   ASSETS: Fetcher
+  // One Durable Object per PR: box channel, command queue, event write-through.
+  PR_COORDINATOR: DurableObjectNamespace
   // GitHub OAuth (identity)
   GITHUB_OAUTH_CLIENT_ID: string
   GITHUB_OAUTH_CLIENT_SECRET: string

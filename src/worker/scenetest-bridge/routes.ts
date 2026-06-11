@@ -2,6 +2,7 @@ import { decodeCommand } from '@scenetest/protocol'
 import type { Env } from '../env.ts'
 import type { AuthedHandler } from '../auth/session.ts'
 import { renderDashboard } from './html.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
 
 export const dashboardHtml: AuthedHandler = () =>
   new Response(renderDashboard(), {
@@ -13,13 +14,25 @@ export const dashboardSse: AuthedHandler = (req, env, _ctx, params) =>
 
 // POST /api/runs/:runId/commands — body is one encoded protocol command.
 // Validation is strict (decodeCommand): commands get acted on, so unknown
-// types are rejected rather than relayed. Delivery to a live box needs the
-// PR coordinator's command channel; until that lands, valid commands are
-// acknowledged and dropped.
-export const postRunCommand: AuthedHandler = async (req) => {
+// types are rejected rather than relayed. Valid commands go to the run's PR
+// coordinator, which sends them down the box's WebSocket — or queues them
+// until a box connects. 202 either way; `delivered` says which happened.
+export const postRunCommand: AuthedHandler = async (req, env, _ctx, params) => {
   const command = decodeCommand(await req.text())
   if (!command) return Response.json({ error: 'not a valid command' }, { status: 400 })
-  return new Response(null, { status: 204 })
+
+  const runId = params.runId!
+  const run = await env.DB.prepare('SELECT repo, pr_number FROM runs WHERE id = ?1')
+    .bind(runId)
+    .first<{ repo: string; pr_number: number }>()
+  if (!run) return Response.json({ error: 'run not found' }, { status: 404 })
+
+  const res = await prCoordinator(env, run.repo, run.pr_number).fetch('https://do/command', {
+    method: 'POST',
+    body: JSON.stringify({ runId, command }),
+  })
+  const { delivered } = (await res.json()) as { delivered: boolean }
+  return Response.json({ delivered }, { status: 202 })
 }
 
 const POLL_MIN_MS = 250

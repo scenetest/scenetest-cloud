@@ -138,6 +138,20 @@ async function main() {
   d1Query(persistDir, "INSERT INTO allowed_user (github_id, github_login, added_at) VALUES (1, 'e2e', 0)")
   d1Query(persistDir, "INSERT INTO watched_repo (owner, name, added_at, added_by) VALUES ('demo', 'watched', 0, 1)")
 
+  // Seed a PR + box + run so the script can play the box itself: connect the
+  // coordinator's WebSocket channel with this token and speak the box wire
+  // format, with no provider involved.
+  const boxToken = 'e2e-box-token'
+  const boxTokenHash = Buffer.from(
+    await crypto.subtle.digest('SHA-256', enc.encode(boxToken)),
+  ).toString('hex')
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 9, 'wsbox1', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-1', 'demo/watched', 9, 'wsbox1', 'ready', '${boxTokenHash}', 0)`)
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-ws-run', 'demo/watched', 9, 'wsbox1', 'manual', 'queued', 'e2e-box-1')")
+
   console.log('· starting wrangler dev')
   server = spawn(WRANGLER, [
     'dev', '--port', String(PORT), '--persist-to', persistDir,
@@ -230,7 +244,8 @@ async function main() {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'run:stop' }),
   })
-  check('valid protocol command → 204', cmdOk.status === 204)
+  // No box is connected for this PR, so the coordinator queues it.
+  check('valid protocol command → 202 accepted', cmdOk.status === 202)
   const cmdBad = await fetch(`${BASE}/api/runs/${webhookRunId}/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'rm -rf' }),
@@ -238,6 +253,75 @@ async function main() {
   check('garbage command → 400', cmdBad.status === 400)
   check('SSE with tampered session → 401',
     (await collectSse(`/api/runs/${webhookRunId}/events`, 'session=tampered.sig', 1500)).status === 401)
+
+  // --- PR coordinator: the script plays the box over the WebSocket channel --
+  console.log('· PR coordinator (box channel)')
+  const wsUrl = (token) => `ws://127.0.0.1:${PORT}/api/boxes/e2e-box-1/channel?token=${token}`
+
+  // Wrong token: the upgrade is refused, surfacing as an error/close event.
+  const badWs = new WebSocket(wsUrl('wrong-token'))
+  const badResult = await new Promise((resolve) => {
+    badWs.addEventListener('open', () => resolve('open'))
+    badWs.addEventListener('error', () => resolve('refused'))
+    badWs.addEventListener('close', () => resolve('refused'))
+  })
+  check('box channel rejects a bad token', badResult === 'refused')
+
+  // Command posted while no box is connected → queued, not delivered.
+  const queuedCmd = await fetch(`${BASE}/api/runs/e2e-ws-run/commands`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'run:pause' }),
+  })
+  check('command with no box connected → 202 queued',
+    queuedCmd.status === 202 && (await j(queuedCmd)).delivered === false)
+
+  // Connect as the box; collect everything the coordinator sends.
+  const box = new WebSocket(wsUrl(boxToken))
+  const inbox = []
+  box.addEventListener('message', (e) => inbox.push(JSON.parse(e.data)))
+  await new Promise((resolve, reject) => {
+    box.addEventListener('open', resolve)
+    box.addEventListener('error', () => reject(new Error('box channel refused valid token')))
+  })
+  const waitInbox = async (pred, maxMs = 4000) => {
+    const start = Date.now()
+    while (Date.now() - start < maxMs) {
+      const hit = inbox.find(pred)
+      if (hit) return hit
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return null
+  }
+
+  const flushed = await waitInbox((m) => m.kind === 'command')
+  check('queued command flushed to box on connect', flushed?.command?.type === 'run:pause',
+    JSON.stringify(inbox))
+
+  // Command posted while connected → delivered live.
+  const liveCmd = await fetch(`${BASE}/api/runs/e2e-ws-run/commands`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'run:resume' }),
+  })
+  check('command with box connected → 202 delivered',
+    liveCmd.status === 202 && (await j(liveCmd)).delivered === true)
+  check('live command arrived on the box socket',
+    (await waitInbox((m) => m.command?.type === 'run:resume')) !== null, JSON.stringify(inbox))
+
+  // Box streams events up the socket → coordinator writes through to D1 →
+  // the SSE endpoint (which reads D1) replays them to viewers.
+  box.send(JSON.stringify({
+    kind: 'events', runId: 'e2e-ws-run',
+    events: [
+      { seq: 1, payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: Date.now(), name: 'ws scene', file: 'x.scene.ts', actors: ['A'] } },
+    ],
+  }))
+  check('coordinator acked the events batch',
+    (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
+  const wsReplay = await collectSse('/api/runs/e2e-ws-run/events', cookie, 2500)
+  check('box events reached viewers via D1 → SSE',
+    wsReplay.events.some((e) => e.type === 'scene:start' && e.name === 'ws scene'))
+  box.close()
 
   // --- latest-wins: second push retires the box and cancels run 1 -----------
   // Timing assumption: the stub batch takes ≥600ms (5 × 120ms action sleeps),
