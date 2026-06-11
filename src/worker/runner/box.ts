@@ -91,9 +91,14 @@ async function provisionBox(env: Env, ctx: ExecutionContext, pr: PrRef): Promise
   }
   const { runnerId } = await getRunner(env).provision(env, ctx, spec, bearerToken)
 
-  await env.DB.prepare('UPDATE boxes SET runner_instance_id = ?1 WHERE id = ?2')
-    .bind(runnerId, boxId)
-    .run()
+  // null = provisioning is pending (e.g. the runner image is still
+  // building); the box row stays instance-less and the cron tick completes
+  // it with a freshly minted token once the blocker clears.
+  if (runnerId !== null) {
+    await env.DB.prepare('UPDATE boxes SET runner_instance_id = ?1 WHERE id = ?2')
+      .bind(runnerId, boxId)
+      .run()
+  }
 
   return { id: boxId, head_sha: pr.headSha, status }
 }

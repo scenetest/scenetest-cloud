@@ -25,13 +25,15 @@ export interface RunSpec {
 }
 
 export interface Runner {
-  // Bring a machine up for the box. Returns the provider instance id.
+  // Bring a machine up for the box. Returns the provider instance id, or
+  // null when provisioning is pending on something slow (e.g. the runner
+  // image still building) — the cron tick completes pending boxes.
   provision(
     env: Env,
     ctx: ExecutionContext,
     box: BoxSpec,
     bearerToken: string,
-  ): Promise<{ runnerId: string }>
+  ): Promise<{ runnerId: string | null }>
 
   // Send a batch of scene executions to the box.
   dispatch(env: Env, ctx: ExecutionContext, run: RunSpec): Promise<void>

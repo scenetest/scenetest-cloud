@@ -5,7 +5,7 @@ import { postEvents, postSceneExecutions, postRunComplete } from './routes/runne
 import { debugStubRun } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
 import { boxChannel, boxReady } from './routes/box-channel.ts'
-import { reapRunners } from './runner/digitalocean.ts'
+import { tick } from './runner/tick.ts'
 
 export { PrCoordinator } from './do/pr-coordinator.ts'
 import {
@@ -94,9 +94,10 @@ export default {
     }
   },
 
-  // Cron (see wrangler.toml [triggers]): destroy droplets whose run ended or
-  // whose age exceeds the cap. No-ops unless the DO provider is configured.
+  // Cron (see wrangler.toml [triggers]): advance image builds, provision
+  // boxes that were waiting on them, reap dead droplets. No-ops unless the
+  // DO provider is configured.
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(reapRunners(env))
+    ctx.waitUntil(tick(env))
   },
 }

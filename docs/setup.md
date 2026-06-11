@@ -69,14 +69,18 @@ pnpm db:migrate:local                        # local dev
 
 The default `RUNNER_PROVIDER = "stub"` needs nothing. To run real boxes:
 
-1. Build the runner snapshot per the image contract in
-   [runner-provisioning.md](./runner-provisioning.md).
-2. In `wrangler.toml`, set `RUNNER_PROVIDER = "digitalocean"` and fill in
-   `RUNNER_REGION`, `RUNNER_SIZE`, `RUNNER_IMAGE`, `PUBLIC_BASE_URL`.
-3. `wrangler secret put DO_API_TOKEN` (droplet read/write scope).
-4. The cron trigger (every 10 minutes, already in wrangler.toml) reaps
-   finished and over-age droplets; `RUNNER_MAX_AGE_MINUTES` (default 30)
-   is the hard cap.
+1. In `wrangler.toml`, set `RUNNER_PROVIDER = "digitalocean"` and fill in
+   `RUNNER_REGION`, `RUNNER_SIZE`, `PUBLIC_BASE_URL`.
+2. `wrangler secret put DO_API_TOKEN` (droplet read/write + snapshot scope).
+3. There is no image step: the runner snapshot builds and caches itself on
+   first need (~10–15 minutes; runs triggered meanwhile queue and start
+   when it's ready). See "The image builds itself" in
+   [runner-provisioning.md](./runner-provisioning.md). `RUNNER_IMAGE`
+   exists only to pin a snapshot manually.
+4. The cron trigger (every 10 minutes, already in wrangler.toml) advances
+   image builds, provisions boxes that waited on them, and reaps finished
+   and over-age droplets; `RUNNER_MAX_AGE_MINUTES` (default 30) is the
+   hard cap.
 
 ## Deploy
 

@@ -19,10 +19,11 @@ export interface Env {
   // 'stub' (default; writes fake events straight to D1) or 'digitalocean'.
   RUNNER_PROVIDER?: string
   // DigitalOcean provider config. DO_API_TOKEN is a secret; the rest are
-  // plain vars. RUNNER_IMAGE is a snapshot id whose contract is described in
-  // docs/runner-provisioning.md. PUBLIC_BASE_URL is this deployment's origin
-  // (e.g. https://scenetest-cloud.example.workers.dev) — the box needs it to
-  // reach the ingest API.
+  // plain vars. The runner image builds and caches itself from stock Ubuntu
+  // (src/worker/runner/image.ts); RUNNER_IMAGE is an OPTIONAL pin that
+  // bypasses the self-built snapshot — the escape hatch. PUBLIC_BASE_URL is
+  // this deployment's origin (e.g. https://scenetest-cloud.example.workers.dev)
+  // — the box needs it to reach the ingest API.
   DO_API_TOKEN?: string
   RUNNER_REGION?: string
   RUNNER_SIZE?: string
