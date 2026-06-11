@@ -14,7 +14,7 @@
 // this stage's watch globs.)
 
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -127,6 +127,7 @@ async function collectSse(path, cookie, maxMs = 8000) {
 
 const persistDir = mkdtempSync(join(tmpdir(), 'scenetest-e2e-'))
 let server = null
+let agent = null
 
 async function main() {
   console.log('· building dashboard assets')
@@ -151,6 +152,16 @@ async function main() {
     `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-1', 'demo/watched', 9, 'wsbox1', 'ready', '${boxTokenHash}', 0)`)
   d1Query(persistDir,
     "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-ws-run', 'demo/watched', 9, 'wsbox1', 'manual', 'queued', 'e2e-box-1')")
+
+  // A second PR + box for the real box agent (infra/box/agent.mjs), spawned
+  // below in test mode — separate so its channel doesn't fight the inline
+  // box-protocol checks. Starts 'provisioning'; the agent must flip it.
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 10, 'agbox1', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-2', 'demo/watched', 10, 'agbox1', 'provisioning', '${boxTokenHash}', 0)`)
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-agent-run', 'demo/watched', 10, 'agbox1', 'manual', 'queued', 'e2e-box-2')")
 
   console.log('· starting wrangler dev')
   server = spawn(WRANGLER, [
@@ -323,6 +334,67 @@ async function main() {
     wsReplay.events.some((e) => e.type === 'scene:start' && e.name === 'ws scene'))
   box.close()
 
+  // --- the real box agent, spawned in test mode -----------------------------
+  console.log('· box agent (infra/box/agent.mjs)')
+  const agentWork = mkdtempSync(join(tmpdir(), 'scenetest-agent-'))
+  // Queue a command before the agent exists; it must arrive via flush.
+  await fetch(`${BASE}/api/runs/e2e-agent-run/commands`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'run:pause' }),
+  })
+  check('agent: ready endpoint rejects bad token',
+    (await fetch(`${BASE}/api/boxes/e2e-box-2/ready`, {
+      method: 'POST', headers: { authorization: 'Bearer wrong' },
+    })).status === 401)
+
+  agent = spawn('node', [join(import.meta.dirname, '../infra/box/agent.mjs')], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      SCENETEST_BOX_ID: 'e2e-box-2',
+      SCENETEST_REPO: 'demo/watched',
+      SCENETEST_HEAD_SHA: 'agbox1',
+      SCENETEST_INGEST_URL: BASE,
+      SCENETEST_BEARER_TOKEN: boxToken,
+      SCENETEST_WORK_DIR: agentWork,
+      SCENETEST_LOCAL_PORT: '4998',
+      SCENETEST_SKIP_CHECKOUT: '1',
+      SCENETEST_NO_POWEROFF: '1',
+    },
+  })
+  let agentLog = ''
+  agent.stdout.on('data', (d) => { agentLog += d })
+  agent.stderr.on('data', (d) => { agentLog += d })
+
+  const waitFor = async (fn, maxMs = 6000) => {
+    const start = Date.now()
+    while (Date.now() - start < maxMs) {
+      if (await fn()) return true
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return false
+  }
+
+  check('agent connected its channel',
+    await waitFor(() => agentLog.includes('channel connected')), agentLog)
+  check('agent received the queued command (flush on connect)',
+    await waitFor(() => {
+      try { return readFileSync(join(agentWork, 'e2e-agent-run.commands.jsonl'), 'utf8').includes('run:pause') }
+      catch { return false }
+    }), agentLog)
+
+  // The scenes CLI on a box reports to the agent's local ingest; the agent
+  // relays up the channel and the coordinator writes through to D1/SSE.
+  const localIngest = await fetch('http://127.0.0.1:4998/events/e2e-agent-run', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ events: [{ payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } }] }),
+  })
+  check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
+  const agentReplay = await collectSse('/api/runs/e2e-agent-run/events', cookie, 2500)
+  check('agent-relayed event reached viewers via D1 → SSE',
+    agentReplay.events.some((e) => e.type === 'run:start'))
+  agent.kill('SIGTERM')
+
   // --- latest-wins: second push retires the box and cancels run 1 -----------
   // Timing assumption: the stub batch takes ≥600ms (5 × 120ms action sleeps),
   // and the second trigger lands within ~100ms of the first returning — so
@@ -345,6 +417,8 @@ async function main() {
   const live = d1Query(persistDir,
     "SELECT COUNT(*) AS n FROM boxes WHERE repo = 'demo/repo' AND pr_number = 1 AND status != 'destroyed'")
   check('exactly one live box per PR', live[0].n === 1, `got ${live[0].n}`)
+  const agentBox = d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-2'")
+  check('agent flipped its box provisioning → ready', agentBox[0].status === 'ready', `got ${agentBox[0].status}`)
 
   if (failures.length > 0 && serverErr) {
     console.error('\n--- wrangler dev stderr (tail) ---\n' + serverErr.split('\n').slice(-20).join('\n'))
@@ -357,6 +431,7 @@ main()
     console.error('script error:', err)
   })
   .finally(() => {
+    if (agent && agent.exitCode === null) agent.kill('SIGKILL')
     if (server && server.exitCode === null) server.kill('SIGTERM')
     rmSync(persistDir, { recursive: true, force: true })
     console.log(`\n${passed} passed, ${failures.length} failed`)

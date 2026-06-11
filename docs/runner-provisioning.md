@@ -24,10 +24,12 @@ Background in [architecture.md](./architecture.md); setup steps in
    parameters via `user_data`, and records it in `runner_instances`. The run
    itself is dispatched through the PR's Durable Object
    (`src/worker/do/pr-coordinator.ts`) — queued until the box connects.
-4. On the box, the image's `scenetest-runner` service reads
-   `/etc/scenetest/run.env`, clones the repo at `SCENETEST_HEAD_SHA`, brings
-   up the app, database, seeds, and Playwright — the same code path as a
-   developer's laptop — then connects out to the box channel.
+4. On the box, the image's `scenetest-runner` service runs the agent
+   (`infra/box/agent.mjs`): it reads `/etc/scenetest/run.env`, clones the
+   repo at `SCENETEST_HEAD_SHA`, runs the project's `scenetest/box-setup.sh`
+   (app, database, seeds — the same code path as a developer's laptop),
+   reports `POST /api/boxes/:boxId/ready`, and connects out to the box
+   channel.
 5. The box holds one outbound WebSocket to
    `GET /api/boxes/:boxId/channel` (bearer-authed; header or `?token=`).
    Down it come `{ kind: 'dispatch', run }` batches and
@@ -42,25 +44,42 @@ Background in [architecture.md](./architecture.md); setup steps in
    (default 30), marking them `destroyed` (or `lost` if the API call fails)
    and cancelling any runs that never completed.
 
-## The image contract
+## Building the image
 
-`RUNNER_IMAGE` is a DO snapshot we build (manually for now). It must contain:
+```sh
+DO_API_TOKEN=... ./infra/image/build-image.sh
+```
 
-- Node + pnpm, git, Playwright with browsers and OS deps.
-- A `scenetest-runner` systemd unit, enabled but not started, that:
-  1. sources `/etc/scenetest/run.env`,
-  2. clones `SCENETEST_REPO` at `SCENETEST_HEAD_SHA` (shallow),
-  3. runs the project's setup (install, db, seeds),
-  4. connects the box channel WebSocket and executes the scene batches it
-     dispatches, reporting events back up the socket (scene-execution
-     upserts and run completion via the HTTP ingest API),
-  5. powers off when its channel closes with "box retired" — the reaper
-     still destroys the droplet; poweroff just stops billing-relevant work
-     early.
+The script (`infra/image/`) boots a builder droplet whose cloud-init
+installs the toolchain — node 22 + pnpm, git, docker, the supabase CLI,
+Playwright *system* deps (browsers are version-coupled to the project's
+playwright, so the project installs its own at box-setup time) — bakes in
+the agent and its systemd unit, neutralizes the machine identity, and
+powers off; power-off is the "done" signal (we never SSH in). It then
+snapshots, destroys the builder, and prints the snapshot id plus the
+`wrangler.toml` lines to set. ~10–15 minutes; snapshot storage is
+~$0.06/GB/month.
 
-The worker writes `run.env` via `user_data` and starts the unit. Nothing
-else crosses the boundary: no SSH keys are attached, the box only ever
-connects outbound, and the bearer token it holds dies with the box.
+The `scenetest-runner` unit is installed but deliberately **disabled** in
+the image: `run.env` doesn't exist yet, so an enabled unit would crash-loop
+at first boot. Provision-time `user_data` (written by
+`src/worker/runner/digitalocean.ts`) creates `run.env` and starts it.
+
+Nothing else crosses the boundary: no SSH keys are attached, the box only
+ever connects outbound, and the bearer token it holds dies with the box.
+
+### Project hooks
+
+The agent drives the user's repo through two conventional scripts —
+explicitly placeholders for the pipeline-config format from architecture.md:
+
+- `scenetest/box-setup.sh` — bring up app, database, seeds (run once at
+  checkout).
+- `scenetest/box-run.sh` — execute one batch; receives `SCENETEST_RUN_ID`,
+  `SCENETEST_SUBSET`, and `SCENETEST_LOCAL_INGEST` (the agent's local
+  endpoint, which accepts the same body as the cloud ingest and relays up
+  the channel). A missing script or non-zero exit marks the run failed, so
+  no batch is left dangling.
 
 ### run.env variables
 
@@ -105,17 +124,22 @@ end-to-end before any DigitalOcean setup.
   are a signal to go look at the DigitalOcean console, not a steady state.
 - Webhook handling is idempotent per `X-GitHub-Delivery` id.
 
-## Not built yet
+## Not built yet / untested
 
-- The box bootstrap itself (the systemd unit's script — the cloud side of
-  the channel is live and exercised by `pnpm e2e`, which plays the box).
+- **Nothing in `infra/` has touched the live DigitalOcean API yet.** The
+  agent's channel behavior (ready, queue flush, command files, event relay)
+  is covered by `pnpm e2e`, which spawns it in test mode against the real
+  worker — but image build, droplet boot, checkout, and `box-setup.sh` runs
+  are exercised only by the first real `build-image.sh` + PR.
 - Viewer WebSockets from the coordinator (viewers currently read D1-backed
   SSE; the coordinator already writes through to D1, so this is a fan-out
   optimization, not a correctness gap).
-- `.jsonl` artifact upload to R2 at end of run.
+- `.jsonl` artifact upload to R2 at end of run (the agent already writes
+  `<runId>.jsonl` locally).
 - The content-addressed stage cache (`stage_cache` table exists; `ensureBox`
   still rebuilds on any sha change).
-- Image build automation (Packer or a build script; snapshots are manual
-  for now).
+- Richer command hand-off on the box: the agent appends commands to
+  `<runId>.commands.jsonl` for the run script to consume; wiring them into
+  the scenes CLI live comes with the receiver-core integration.
 - Queued-command TTL: commands for a box that never connects sit in the
   coordinator's queue until the box is retired (retiring clears the queue).
