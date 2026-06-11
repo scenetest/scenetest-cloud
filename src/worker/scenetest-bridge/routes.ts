@@ -1,15 +1,7 @@
+import { decodeCommand } from '@scenetest/protocol'
 import type { Env } from '../env.ts'
-import type { Handler } from '../router.ts'
 import type { AuthedHandler } from '../auth/session.ts'
 import { renderDashboard } from './html.ts'
-
-// The rewritten relative URLs ('./__scenetest/events') only resolve correctly
-// when the page URL ends in a slash, so /r/:id/dashboard redirects to .../
-export const dashboardRedirectToSlash: Handler = (req) => {
-  const url = new URL(req.url)
-  url.pathname += '/'
-  return Response.redirect(url.toString(), 301)
-}
 
 export const dashboardHtml: AuthedHandler = () =>
   new Response(renderDashboard(), {
@@ -19,7 +11,16 @@ export const dashboardHtml: AuthedHandler = () =>
 export const dashboardSse: AuthedHandler = (req, env, _ctx, params) =>
   streamRunEvents(req, env, params.runId!)
 
-export const dashboardNoop: AuthedHandler = () => new Response(null, { status: 204 })
+// POST /api/runs/:runId/commands — body is one encoded protocol command.
+// Validation is strict (decodeCommand): commands get acted on, so unknown
+// types are rejected rather than relayed. Delivery to a live box needs the
+// PR coordinator's command channel; until that lands, valid commands are
+// acknowledged and dropped.
+export const postRunCommand: AuthedHandler = async (req) => {
+  const command = decodeCommand(await req.text())
+  if (!command) return Response.json({ error: 'not a valid command' }, { status: 400 })
+  return new Response(null, { status: 204 })
+}
 
 const POLL_MIN_MS = 250
 const POLL_MAX_MS = 2000

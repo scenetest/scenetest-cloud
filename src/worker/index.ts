@@ -1,6 +1,6 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { dashboardHtml, dashboardRedirectToSlash, dashboardSse, dashboardNoop } from './scenetest-bridge/routes.ts'
+import { dashboardHtml, dashboardSse, postRunCommand } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
@@ -37,11 +37,13 @@ const router = new Router()
   .get('/api/admin/repos', withSession(listRepos))
   .post('/api/admin/repos', withSession(addRepo))
   .delete('/api/admin/repos/:owner/:name', withSession(deleteRepo))
-  // Run dashboard (served by the scenetest bridge)
-  .get('/r/:runId/dashboard', dashboardRedirectToSlash)
+  // Run dashboard: worker shell + @scenetest/dashboard widget. The widget's
+  // transport talks to the /api/runs/:runId endpoints below. Both slash
+  // variants serve the page — asset URLs are absolute, so it doesn't matter.
+  .get('/r/:runId/dashboard', withSession(dashboardHtml, 'redirect'))
   .get('/r/:runId/dashboard/', withSession(dashboardHtml, 'redirect'))
-  .get('/r/:runId/dashboard/__scenetest/events', withSession(dashboardSse))
-  .post('/r/:runId/dashboard/__scenetest/:cmd', withSession(dashboardNoop))
+  .get('/api/runs/:runId/events', withSession(dashboardSse))
+  .post('/api/runs/:runId/commands', withSession(postRunCommand))
   // GitHub webhooks (HMAC-authed inside the handler)
   .post('/webhook/github', postGithubWebhook)
   // Runner ingest (bearer-authed)
