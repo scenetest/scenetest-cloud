@@ -26,4 +26,6 @@ jobs:
 
       - run: pnpm build:dashboard
 
+      - run: pnpm e2e
+
       - run: pnpm exec wrangler deploy --dry-run
