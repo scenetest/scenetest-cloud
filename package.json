@@ -14,7 +14,8 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
     "@scenetest/dashboard": "^0.11.0",
