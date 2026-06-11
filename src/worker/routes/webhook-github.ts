@@ -115,8 +115,11 @@ async function handleEvent(
   const base = { result: '', action, repo, prNumber }
 
   const [owner, name] = repo.split('/')
+  // Case-insensitive: GitHub treats owner/repo names case-insensitively, and
+  // a row may have been registered with non-canonical casing (e.g. when the
+  // add-repo GitHub lookup was rate-limited and couldn't canonicalize it).
   const watched = await env.DB.prepare(
-    'SELECT 1 FROM watched_repo WHERE owner = ?1 AND name = ?2',
+    'SELECT 1 FROM watched_repo WHERE owner = ?1 COLLATE NOCASE AND name = ?2 COLLATE NOCASE',
   )
     .bind(owner ?? '', name ?? '')
     .first()

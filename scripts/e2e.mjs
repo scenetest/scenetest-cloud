@@ -193,6 +193,21 @@ async function main() {
   const webhookRunId = created.result?.startsWith('run-created:') ? created.result.slice('run-created:'.length) : null
   check('watched repo PR → run created', webhookRunId !== null, JSON.stringify(created))
 
+  // --- watching a repo survives an unreachable/rate-limited GitHub lookup ---
+  console.log('· add repo (resilient to GitHub lookup)')
+  const added = await fetch(BASE + '/api/admin/repos', {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ owner: 'demo', name: 'added-via-api' }),
+  })
+  check('add-repo returns 200 even when GitHub lookup fails', added.status === 200)
+  const watchedRow = d1Query(persistDir,
+    "SELECT COUNT(*) AS n FROM watched_repo WHERE owner = 'demo' AND name = 'added-via-api'")
+  check('watched_repo row written regardless of GitHub', watchedRow[0].n === 1)
+  // Casing differs from registration → still matches (NOCASE) and triggers.
+  const addedHook = await j(await hook('pull_request', prPayload('demo/Added-Via-API', 2, 'addr01')))
+  check('newly watched repo triggers a run (case-insensitive match)',
+    addedHook.result?.startsWith('run-created:'), JSON.stringify(addedHook))
+
   // --- the run that webhook triggered, observed through SSE ---
   console.log('· stub run → SSE')
   const replay = await collectSse(`/api/runs/${webhookRunId}/events`, cookie)

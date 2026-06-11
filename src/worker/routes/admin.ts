@@ -52,26 +52,46 @@ export const listRepos: AuthedHandler = async (_req, env) => {
 
 export const addRepo: AuthedHandler = async (req, env, _ctx, _params, me) => {
   const body = await readJson<{ owner?: string; name?: string }>(req)
-  const owner = body?.owner?.trim()
-  const name = body?.name?.trim()
+  let owner = body?.owner?.trim()
+  let name = body?.name?.trim()
   if (!owner || !name) return Response.json({ error: 'owner and name required' }, { status: 400 })
 
-  const resp = await fetch(
-    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
-    { headers: GH_API_HEADERS },
-  )
-  if (resp.status === 404) return Response.json({ error: 'GitHub repo not found' }, { status: 404 })
-  if (!resp.ok) return Response.json({ error: 'GitHub lookup failed' }, { status: 502 })
-  const gh = (await resp.json()) as { id: number; owner: { login: string }; name: string }
+  // The GitHub lookup is enrichment, not a gate. Unauthenticated
+  // api.github.com calls from a Worker share an egress IP and hit the 60/hr
+  // rate limit (403) constantly, and private repos 404 to unauthenticated
+  // requests — neither should stop you watching your own repo. On success we
+  // adopt GitHub's canonical casing and repo id; otherwise we trust the
+  // input. Webhook delivery is matched case-insensitively on owner/name and
+  // gated by HMAC regardless, so an unverified or mistyped row is harmless.
+  let githubRepoId: number | null = null
+  let verified = false
+  try {
+    const resp = await fetch(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+      { headers: GH_API_HEADERS },
+    )
+    if (resp.ok) {
+      const gh = (await resp.json()) as { id: number; owner: { login: string }; name: string }
+      owner = gh.owner.login
+      name = gh.name
+      githubRepoId = gh.id
+      verified = true
+    } else {
+      console.warn(`addRepo: GitHub lookup for ${owner}/${name} returned ${resp.status}; watching unverified`)
+    }
+  } catch (err) {
+    console.warn(`addRepo: GitHub lookup for ${owner}/${name} failed: ${err instanceof Error ? err.message : err}`)
+  }
 
   await env.DB.prepare(
     `INSERT INTO watched_repo (owner, name, github_repo_id, added_at, added_by)
      VALUES (?1, ?2, ?3, ?4, ?5)
-     ON CONFLICT(owner, name) DO UPDATE SET github_repo_id = excluded.github_repo_id`,
+     ON CONFLICT(owner, name) DO UPDATE SET
+       github_repo_id = COALESCE(excluded.github_repo_id, watched_repo.github_repo_id)`,
   )
-    .bind(gh.owner.login, gh.name, gh.id, Date.now(), me.github_id)
+    .bind(owner, name, githubRepoId, Date.now(), me.github_id)
     .run()
-  return Response.json({ owner: gh.owner.login, name: gh.name, github_repo_id: gh.id })
+  return Response.json({ owner, name, github_repo_id: githubRepoId, verified })
 }
 
 export const deleteRepo: AuthedHandler = async (_req, env, _ctx, params) => {
