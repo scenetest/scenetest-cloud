@@ -97,29 +97,44 @@ export async function destroyDroplet(env: Env, dropletId: string): Promise<boole
 }
 
 // Called from the scheduled handler. Destroys instances whose run has ended,
-// and instances past the hard age cap (covers hung runs and lost boxes).
+// and instances past the hard age cap (covers hung runs and lost boxes). A
+// box reaped purely on age belongs to a run that never reported completion,
+// so that run is cancelled here — otherwise its status would stay 'running'
+// forever after the box is gone.
 export async function reapRunners(env: Env): Promise<void> {
   if (!env.DO_API_TOKEN) return
   const maxAgeMs = Number(env.RUNNER_MAX_AGE_MINUTES ?? '30') * 60_000
   const cutoff = Date.now() - maxAgeMs
 
   const rows = await env.DB.prepare(
-    `SELECT ri.id FROM runner_instances ri
+    `SELECT ri.id, ri.run_id, r.ended_at FROM runner_instances ri
        JOIN runs r ON r.id = ri.run_id
      WHERE ri.provider = 'digitalocean'
        AND ri.status IN ('provisioning', 'active')
        AND (r.ended_at IS NOT NULL OR ri.created_at < ?1)`,
   )
     .bind(cutoff)
-    .all<{ id: string }>()
+    .all<{ id: string; run_id: string; ended_at: number | null }>()
 
   for (const row of rows.results ?? []) {
     const ok = await destroyDroplet(env, row.id)
+    const now = Date.now()
     await env.DB.prepare(
       `UPDATE runner_instances SET status = ?1, destroyed_at = ?2 WHERE id = ?3`,
     )
-      .bind(ok ? 'destroyed' : 'lost', Date.now(), row.id)
+      .bind(ok ? 'destroyed' : 'lost', now, row.id)
       .run()
+    if (row.ended_at === null) {
+      // Over-age kill of a run that never completed. CASE guards against a
+      // race with a final /complete landing between SELECT and UPDATE.
+      await env.DB.prepare(
+        `UPDATE runs
+           SET status = 'cancelled', ended_at = ?1
+         WHERE id = ?2 AND ended_at IS NULL`,
+      )
+        .bind(now, row.run_id)
+        .run()
+    }
     if (!ok) console.error(`reaper: failed to destroy droplet ${row.id}; marked lost`)
   }
 }
