@@ -17,7 +17,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@scenetest/vite-plugin": "^0.10.0",
+    "@scenetest/dashboard": "^0.11.0",
+    "@scenetest/protocol": "^0.11.0",
     "@tanstack/react-query": "^5.101.0",
     "preact": "^10.29.2"
   },
@@ -30,9 +31,6 @@
     "wrangler": "^4.99.0"
   },
   "pnpm": {
-    "patchedDependencies": {
-      "@scenetest/vite-plugin": "patches/@scenetest__vite-plugin.patch"
-    },
     "onlyBuiltDependencies": [
       "esbuild",
       "workerd"
