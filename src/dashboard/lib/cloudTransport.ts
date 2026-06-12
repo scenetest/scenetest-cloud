@@ -40,19 +40,16 @@ export function createCloudTransport(runId: string): Transport {
         }
 
         ws.onmessage = (e) => {
-          let frame: unknown
-          try { frame = JSON.parse(e.data as string) } catch { return }
-          if (
-            frame == null ||
-            typeof frame !== 'object' ||
-            (frame as Record<string, unknown>).kind !== 'event' ||
-            typeof (frame as Record<string, unknown>).seq !== 'number'
-          ) return
-          const seq = (frame as Record<string, unknown>).seq as number
+          let raw: unknown
+          try { raw = JSON.parse(e.data as string) } catch { return }
+          if (!raw || typeof raw !== 'object') return
+          const frame = raw as Record<string, unknown>
+          if (frame.kind !== 'event' || typeof frame.seq !== 'number') return
+          const seq = frame.seq as number
           if (seq <= lastSeq) return  // dedupe replay/live overlap
           lastSeq = seq
           let payload: unknown
-          try { payload = JSON.parse((frame as Record<string, unknown>).payload as string) } catch { return }
+          try { payload = JSON.parse(frame.payload as string) } catch { return }
           if (isEventShaped(payload)) onEvent(payload as Parameters<typeof onEvent>[0])
         }
 
