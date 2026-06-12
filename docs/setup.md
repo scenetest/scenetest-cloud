@@ -53,7 +53,7 @@ wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
 wrangler secret put SESSION_SECRET          # openssl rand -hex 32
 wrangler secret put GITHUB_WEBHOOK_SECRET
 wrangler secret put DO_API_TOKEN            # only for RUNNER_PROVIDER=digitalocean
-wrangler secret put GITHUB_API_TOKEN        # optional: lifts GitHub API rate limits for pipeline stage-hashing
+wrangler secret put GITHUB_API_TOKEN        # optional: a GitHub PAT (public_repo scope) from the operator's account; lifts API rate limits for pipeline stage-hashing
 ```
 
 Locally, the same names go in `.dev.vars` (see `.dev.vars.example`).
