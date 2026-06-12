@@ -77,14 +77,14 @@
 body { @apply m-0 bg-paper text-ink font-mono; }
 
 /* ---- Nav ---- */
-.nav-bar { @apply flex items-center gap-6 px-10 h-16 bg-paper border-b border-border sticky top-0 z-20; }
+.nav-bar { @apply flex items-center gap-4 sm:gap-6 px-5 sm:px-10 h-16 bg-paper border-b border-border sticky top-0 z-20; }
 .nav-bar a { @apply font-mono text-sm text-muted no-underline; }
 .nav-bar a.active { @apply text-indigo-600; }
 .cloud-tag { @apply font-mono text-2xs text-faint border border-border rounded-sm px-2 py-0.5; }
 
 /* ---- Page shells ---- */
-.page-shell        { @apply max-w-[1000px] mx-auto px-10 pt-12 pb-24; }
-.page-shell-narrow { @apply max-w-[820px]  mx-auto px-10 pt-9  pb-24; }
+.page-shell        { @apply max-w-[1000px] mx-auto px-5 sm:px-10 pt-8 sm:pt-12 pb-24; }
+.page-shell-narrow { @apply max-w-[820px]  mx-auto px-5 sm:px-10 pt-9  pb-24; }
 
 /* ---- Stat card ---- */
 .stat-card  { @apply bg-card border border-border rounded-lg p-5; }

@@ -1,6 +1,7 @@
 import { useLocation } from 'preact-iso'
 import { useRepo } from '../hooks/useRepo.ts'
 import { paths } from '../lib/paths.ts'
+import { relativeTime, absoluteTime } from '../lib/time.ts'
 import { StatusPip } from './StatusPip.tsx'
 import { Badge } from './Badge.tsx'
 import { Button } from './Button.tsx'
@@ -41,8 +42,8 @@ export function RepoDetail({ owner, name }: Props) {
               <StatusPip status={pr.latest_status ?? 'queued'} />
               <div class='flex-1 min-w-0'>
                 <div class='font-serif text-lg text-ink'>PR #{pr.pr_number}</div>
-                <div class='font-mono text-2xs text-faint mt-1'>
-                  {pr.base_ref} · {pr.run_count} run{pr.run_count !== 1 ? 's' : ''} · updated {new Date(pr.updated_at).toLocaleDateString()}
+                <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(pr.updated_at)}>
+                  {pr.base_ref} · {pr.run_count} run{pr.run_count !== 1 ? 's' : ''} · updated {relativeTime(pr.updated_at)}
                 </div>
               </div>
               <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
@@ -57,23 +58,27 @@ export function RepoDetail({ owner, name }: Props) {
         <p class='font-serif text-base text-muted'>No runs yet.</p>
       ) : (
         <div class='list-panel'>
-          {d.recent_runs.map((run) => (
-            <div key={run.id} class='list-row'>
-              <StatusPip status={run.status} />
-              <div class='flex-1 min-w-0'>
-                <div class='font-mono text-sm text-ink'>
-                  PR #{run.pr_number} · <span class='text-faint'>{run.head_sha.slice(0, 7)}</span>
-                </div>
-                {run.started_at && (
-                  <div class='font-mono text-2xs text-faint mt-1'>
-                    {new Date(run.started_at).toLocaleString()}
-                    {run.ended_at != null ? ` · ${Math.round((run.ended_at - run.started_at) / 1000)}s` : ''}
+          {d.recent_runs.map((run) => {
+            const when = run.started_at ?? run.ended_at
+            const ran = run.started_at != null && run.ended_at != null
+            return (
+              <div key={run.id} class='list-row'>
+                <StatusPip status={run.status} />
+                <div class='flex-1 min-w-0'>
+                  <div class='font-mono text-sm text-ink'>
+                    PR #{run.pr_number} · <span class='text-faint'>{run.head_sha.slice(0, 7)}</span>
                   </div>
-                )}
+                  {when != null && (
+                    <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(when)}>
+                      {relativeTime(when)}
+                      {ran ? ` · ${Math.round((run.ended_at! - run.started_at!) / 1000)}s` : ''}
+                    </div>
+                  )}
+                </div>
+                <Button variant='secondary' size='sm' href={`/r/${run.id}/dashboard`}>View →</Button>
               </div>
-              <Button variant='secondary' size='sm' href={`/r/${run.id}/dashboard`}>View →</Button>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

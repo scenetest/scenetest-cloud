@@ -58,7 +58,7 @@ export function ProjectsView() {
                   />
                 ))}
               </span>
-              <div class='flex-1 min-w-0 font-mono text-md text-ink'>{repo.owner}/{repo.name}</div>
+              <div class='flex-1 min-w-0 font-mono text-md text-ink truncate'>{repo.owner}/{repo.name}</div>
               <span class='w-18 font-mono text-sm text-muted text-right'>{passRate}</span>
               <span class='w-5 font-mono text-faint text-right'>→</span>
             </a>

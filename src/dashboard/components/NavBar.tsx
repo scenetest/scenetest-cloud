@@ -21,7 +21,7 @@ export function NavBar({ me }: Props) {
         <a href={paths.projects()} class={path === paths.projects() ? 'active' : ''}>Projects</a>
       </nav>
       <div class='flex items-center gap-4 ml-auto'>
-        <span class='font-mono text-sm text-muted'>{me.github_login}</span>
+        <span class='font-mono text-sm text-muted hidden sm:inline'>{me.github_login}</span>
         <form method='POST' action='/auth/logout' style={{ margin: 0 }}>
           <Button variant='secondary' size='sm' type='submit'>Sign out</Button>
         </form>
