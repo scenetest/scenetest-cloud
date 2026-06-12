@@ -3,11 +3,18 @@ import type { BoxSpec } from './types.ts'
 import { hashToken } from '../middleware/bearer.ts'
 import { advanceImageBuilds, ensureImage } from './image.ts'
 import { provisionDroplet, reapRunners } from './digitalocean.ts'
+import { sweepArtifacts } from '../artifacts.ts'
 
 // The scheduled heartbeat (wrangler.toml [triggers]): walk every async chain
 // forward one step. Order matters — builds first (they may unblock boxes),
 // then pending boxes, then the reaper.
 export async function tick(env: Env): Promise<void> {
+  // Event-log durability is provider-independent: the stub provider writes to
+  // D1 just like a real box, so the artifact/prune sweep runs first, before
+  // the DigitalOcean-only provisioning machinery early-returns below.
+  await sweepArtifacts(env).catch((err) => {
+    console.error(`tick: sweep failed: ${err instanceof Error ? err.message : err}`)
+  })
   if (env.RUNNER_PROVIDER !== 'digitalocean' || !env.DO_API_TOKEN) return
   await advanceImageBuilds(env)
   await provisionPendingBoxes(env)

@@ -126,12 +126,21 @@ Each Cloudflare primitive has one job:
   and link into R2 — and never log lines. D1 caps at 10 GB, so append-heavy
   event logs are kept out of it by design rather than as a later
   optimization.
-- R2 holds the durable record: at end of run the event log becomes a
-  `.jsonl` object — the source of truth for raw events, with historical
-  detail views reading it through the worker. The local file is not a
-  backup of the database — persisting it is the point. *(Designed, not yet
-  built — today events accumulate in D1, which violates the rule above and
-  is the next build item.)*
+- R2 holds the durable record (`ARTIFACTS` bucket): at end of run the event
+  log becomes a `.jsonl` object — the source of truth for raw events, with
+  historical detail views reading it through the worker. The local file is
+  not a backup of the database — persisting it is the point. The worker
+  assembles the artifact from D1 (every event already transits it) rather
+  than the box uploading directly; presigned-URL box uploads can replace
+  this if event volume ever outgrows D1 transit. Mechanics: at completion
+  (stub finish and `postRunComplete`, best-effort via `waitUntil`) the run's
+  events are written to `runs/<repo>/<runId>.jsonl` and `runs.artifact_key`
+  is set. The cron sweep is the guarantee — terminal runs missing a key get
+  one, then the `events` rows of artifacted runs older than
+  `EVENTS_RETENTION_HOURS` (default 24) are pruned, so D1 holds metadata and
+  never accumulates log lines. Once a run's rows are gone the viewer replay
+  (WS and SSE) and `GET /api/runs/:runId/log` serve from the artifact
+  instead — same frames, transparent to the client.
 - Queues (optional) decouple Durable Object write-through from D1 metadata
   updates and absorb webhook bursts. They are not on the live path.
 
@@ -289,12 +298,14 @@ The cloud path, end to end. Steps 1–3 are identical on a laptop in dev mode.
 │     ├─ .jsonl sink          │      │     • cmd queue  │      └────────────┘
 │     └─ upstream sink ───────┘      │     • (Queue→D1)*│
 │                                    │  end of run:     │
-│                                    │  .jsonl → R2*    │
+│                                    │  .jsonl → R2     │
 └────────────────────────────────────┴──────────────────┘
 ```
 
-(* designed, not yet built: the R2 artifact upload and the optional Queue
-leg.)
+(* the optional Queue leg is designed, not yet built. The R2 artifact upload
+is built: the worker assembles each run's events from D1 into a `.jsonl`
+object at completion, and a cron sweep prunes the D1 rows once the artifact
+exists — see the R2 bullet above.)
 
 1. In the Playwright-driven browser on the box, a `should()` check in the
    app under test resolves. The injected listener captures it and POSTs it

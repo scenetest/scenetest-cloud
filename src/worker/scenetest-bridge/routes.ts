@@ -3,6 +3,7 @@ import type { Env } from '../env.ts'
 import type { AuthedHandler } from '../auth/session.ts'
 import { renderDashboard } from './html.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
+import { buildJsonl, getArtifactKey, readArtifactEvents } from '../artifacts.ts'
 
 export const dashboardHtml: AuthedHandler = () =>
   new Response(renderDashboard(), {
@@ -11,6 +12,30 @@ export const dashboardHtml: AuthedHandler = () =>
 
 export const dashboardSse: AuthedHandler = (req, env, _ctx, params) =>
   streamRunEvents(req, env, params.runId!)
+
+// GET /api/runs/:runId/log — download the raw event log as .jsonl. Serves the
+// R2 artifact once it exists; before then (run in flight, or sweep pending) it
+// assembles the log from D1 on the fly without persisting. Pruned runs always
+// have an artifact, so the log survives the events being deleted from D1.
+export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
+  const runId = params.runId!
+  const run = await env.DB.prepare('SELECT artifact_key FROM runs WHERE id = ?1')
+    .bind(runId)
+    .first<{ artifact_key: string | null }>()
+  if (!run) return new Response('run not found', { status: 404 })
+
+  const headers = {
+    'content-type': 'application/x-ndjson; charset=utf-8',
+    'content-disposition': `attachment; filename="${runId}.jsonl"`,
+  }
+
+  if (run.artifact_key && env.ARTIFACTS) {
+    const obj = await env.ARTIFACTS.get(run.artifact_key)
+    // Key recorded but object missing: fall through to D1 rather than 404.
+    if (obj) return new Response(obj.body, { headers })
+  }
+  return new Response(await buildJsonl(env, runId), { headers })
+}
 
 // GET /api/runs/:runId/ws — viewer WebSocket. Cookie auth (same-origin WS
 // handshakes carry cookies), then forward the upgrade to the PR's DO where
@@ -68,6 +93,9 @@ function streamRunEvents(req: Request, env: Env, runId: string): Response {
   const startedAt = Date.now()
   const encoder = new TextEncoder()
   let cancelled = false
+  // A fresh connection (no last-event-id) that never sees a D1 row may be a
+  // terminal run whose events were pruned after its artifact was written.
+  let streamedAny = lastSeq > 0
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -88,6 +116,7 @@ function streamRunEvents(req: Request, env: Env, runId: string): Response {
         for (const row of rows) {
           send(`id: ${row.seq}\ndata: ${row.payload}\n\n`)
           lastSeq = row.seq
+          streamedAny = true
         }
 
         const status = (run!.results?.[0] as { status: string } | undefined)?.status
@@ -95,11 +124,26 @@ function streamRunEvents(req: Request, env: Env, runId: string): Response {
         return { done: terminal && rows.length === 0, sawEvents: rows.length > 0 }
       }
 
+      // Serve the R2 artifact when D1 has nothing because the run's events were
+      // pruned. Same `id:`/`data:` framing as the D1 path, so the client is
+      // none the wiser.
+      const streamArtifact = async (): Promise<void> => {
+        const key = await getArtifactKey(env, runId)
+        if (!key) return
+        for (const e of await readArtifactEvents(env, key, lastSeq)) {
+          send(`id: ${e.seq}\ndata: ${e.payload}\n\n`)
+          lastSeq = e.seq
+        }
+      }
+
       try {
         let pollMs = POLL_MIN_MS
         while (!cancelled && !req.signal.aborted && Date.now() - startedAt < MAX_DURATION_MS) {
           const { done, sawEvents } = await tick()
-          if (done) break
+          if (done) {
+            if (!streamedAny) await streamArtifact()
+            break
+          }
           // Back off while idle; snap back when events flow.
           pollMs = sawEvents ? POLL_MIN_MS : Math.min(pollMs * 2, POLL_MAX_MS)
           await new Promise((r) => setTimeout(r, pollMs))

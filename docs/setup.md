@@ -66,6 +66,23 @@ pnpm db:migrate                              # remote
 pnpm db:migrate:local                        # local dev
 ```
 
+## Artifacts bucket (R2)
+
+Run event logs are persisted as `.jsonl` objects in R2 (the `ARTIFACTS`
+binding in wrangler.toml); D1 keeps only metadata. Create the bucket once:
+
+```sh
+wrangler r2 bucket create scenetest-cloud-artifacts
+```
+
+`wrangler dev` simulates R2 locally, so local dev and `pnpm e2e` need no
+setup. At end of run the worker writes `runs/<repo>/<runId>.jsonl` and the
+cron sweep (every 10 minutes, already configured) prunes the run's rows from
+the `events` table once the artifact exists and the run is older than
+`EVENTS_RETENTION_HOURS` (default 24; set it in `[vars]` to change). After a
+prune the viewer replay and `GET /api/runs/<runId>/log` (session-authed raw
+download) serve from the artifact.
+
 ## DigitalOcean runner
 
 The default `RUNNER_PROVIDER = "stub"` needs nothing. To run real boxes:

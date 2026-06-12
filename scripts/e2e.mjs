@@ -563,6 +563,59 @@ async function main() {
     failedBox[0].status === 'destroyed' && failedBox[0].run_status === 'cancelled',
     JSON.stringify(failedBox[0]))
 
+  // --- R2 durable artifacts: assemble, prune, replay-from-artifact ----------
+  // A terminal run with events but no artifact_key, ended long ago so it falls
+  // outside the default 24h retention window. The cron sweep should write its
+  // R2 artifact and then prune its events from D1; the log endpoint and the
+  // viewer replay must keep working from the artifact afterward.
+  console.log('· R2 artifacts (assemble → prune → replay)')
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id, ended_at) VALUES ('e2e-artifact-run', 'demo/watched', 9, 'artif1', 'manual', 'passed', 'e2e-box-1', 1)")
+  d1Query(persistDir,
+    `INSERT INTO events (run_id, seq, payload, ts) VALUES ('e2e-artifact-run', 1, '{"type":"run:start","timestamp":1,"sceneCount":1}', 1)`)
+  d1Query(persistDir,
+    `INSERT INTO events (run_id, seq, payload, ts) VALUES ('e2e-artifact-run', 2, '{"type":"scene:start","timestamp":1,"name":"artifact scene","file":"a.scene.ts","actors":["A"]}', 1)`)
+  d1Query(persistDir,
+    `INSERT INTO events (run_id, seq, payload, ts) VALUES ('e2e-artifact-run', 3, '{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":1,"failed":0}}', 1)`)
+
+  check('run log anonymous → 401', (await fetch(`${BASE}/api/runs/e2e-artifact-run/log`)).status === 401)
+  const logPre = await fetch(`${BASE}/api/runs/e2e-artifact-run/log`, { headers: { cookie } })
+  const logPreText = await logPre.text()
+  check('run log serves jsonl from D1 before sweep',
+    logPre.status === 200 && logPreText.includes('run:start') && logPreText.includes('run:end'),
+    `${logPre.status} ${logPreText.slice(0, 120)}`)
+
+  // Trigger the cron the way wrangler dev exposes it.
+  const sched = await fetch(`${BASE}/cdn-cgi/handler/scheduled`)
+  check('scheduled handler reachable', sched.status === 200, `got ${sched.status}`)
+
+  check('cron sweep wrote the artifact_key', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT artifact_key FROM runs WHERE id = 'e2e-artifact-run'")
+    return r[0].artifact_key != null
+  }), 'artifact_key never set')
+  check('cron sweep pruned the run\'s events from D1', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT COUNT(*) AS n FROM events WHERE run_id = 'e2e-artifact-run'")
+    return r[0].n === 0
+  }), 'events not pruned')
+
+  const logPost = await fetch(`${BASE}/api/runs/e2e-artifact-run/log`, { headers: { cookie } })
+  const logPostText = await logPost.text()
+  check('run log serves from R2 after the prune',
+    logPost.status === 200 && logPostText.includes('run:start') && logPostText.includes('run:end'),
+    `${logPost.status} ${logPostText.slice(0, 120)}`)
+
+  const artifactReplay = await collectWs('/api/runs/e2e-artifact-run/ws', cookie, 2500)
+  const artTypes = artifactReplay.events.map((e) => e.type)
+  check('viewer replay survives the D1 prune (served from artifact)',
+    artTypes.includes('run:start') && artTypes.includes('run:end'), JSON.stringify(artTypes))
+  check('artifact replay has no duplicate seq',
+    artifactReplay.seqs.length === new Set(artifactReplay.seqs).size, JSON.stringify(artifactReplay.seqs))
+  // Real completed runs (recent ended_at) keep their events — prune is scoped
+  // to the retention window, not "every artifacted run."
+  const liveEvents = d1Query(persistDir,
+    `SELECT COUNT(*) AS n FROM events WHERE run_id = '${webhookRunId}'`)
+  check('recent run\'s events are not pruned', liveEvents[0].n > 0, `got ${liveEvents[0].n}`)
+
   if (failures.length > 0 && serverErr) {
     console.error('\n--- wrangler dev stderr (tail) ---\n' + serverErr.split('\n').slice(-20).join('\n'))
   }

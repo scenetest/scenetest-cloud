@@ -2,6 +2,7 @@ import type { Handler } from '../router.ts'
 import { verifyBoxToken } from '../middleware/bearer.ts'
 import type { RunEvent } from '../db.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
+import { assembleArtifact } from '../artifacts.ts'
 
 // POST /api/events/:runId
 // Body: { events: Array<{ seq: number, payload: unknown }> }
@@ -85,7 +86,7 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
 // `ended_at IS NULL` keeps this from resurrecting a run the worker already
 // ended — e.g. cancelled because a new commit retired its box while the old
 // box's completion report was still in flight.
-export const postRunComplete: Handler = async (req, env, _ctx, params) => {
+export const postRunComplete: Handler = async (req, env, ctx, params) => {
   const runId = params.runId!
   const auth = await verifyBoxToken(req, env, runId)
   if (!auth.ok) return auth.response
@@ -96,5 +97,14 @@ export const postRunComplete: Handler = async (req, env, _ctx, params) => {
   )
     .bind(body.status, Date.now(), runId)
     .run()
+  // The run just reached a terminal state: write its durable R2 artifact.
+  // Best-effort via waitUntil — the cron sweep is the guarantee if this drops.
+  if (res.meta.changes > 0) {
+    ctx.waitUntil(
+      assembleArtifact(env, runId).catch((err) =>
+        console.error(`artifact(${runId}) failed: ${err instanceof Error ? err.message : err}`),
+      ),
+    )
+  }
   return Response.json({ ok: true, applied: res.meta.changes > 0 })
 }
