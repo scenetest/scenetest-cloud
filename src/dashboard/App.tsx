@@ -1,4 +1,4 @@
-import { useState } from 'preact/hooks'
+import { Router, Route, useLocation } from 'preact-iso'
 import { useMe, type Me } from './hooks/useMe.ts'
 import { NavBar } from './components/NavBar.tsx'
 import { Overview } from './components/Overview.tsx'
@@ -6,18 +6,15 @@ import { ProjectsView } from './components/ProjectsView.tsx'
 import { RepoDetail } from './components/RepoDetail.tsx'
 import { Button } from './components/Button.tsx'
 
-type View =
-  | { name: 'overview' }
-  | { name: 'projects' }
-  | { name: 'repo'; owner: string; repoName: string }
+// The SPA owns exactly these paths. preact-iso intercepts in-app link clicks
+// only within this scope; worker-served routes (/auth/*, /r/:runId/dashboard,
+// /api/*) fall outside it and reach the worker normally. This set must agree
+// with the worker's shell fall-through in src/worker/index.ts — repo views use
+// /repo/* rather than /r/* precisely to avoid colliding with the run-dashboard
+// /r/ prefix.
+export const spaScope = /^\/($|projects|repo\/)/
 
 export function App() {
-  const path = window.location.pathname
-  if (path !== '/') return <NotFound path={path} />
-  return <Home />
-}
-
-function Home() {
   const me = useMe()
   if (me.kind === 'loading') return <LoadingScreen />
   if (me.kind === 'signed-out') return <SignedOut />
@@ -26,27 +23,47 @@ function Home() {
 }
 
 function Dashboard({ me }: { me: Me }) {
-  const [view, setView] = useState<View>({ name: 'overview' })
-
-  const handleNavigate = (v: string) => {
-    if (v === 'overview') setView({ name: 'overview' })
-    else if (v === 'projects') setView({ name: 'projects' })
-  }
+  const { path, route } = useLocation()
+  const currentView = path === '/projects' ? 'projects' : path === '/' ? 'overview' : ''
 
   return (
     <div class='min-h-screen bg-paper'>
-      <NavBar me={me} currentView={view.name} onNavigate={handleNavigate} />
-      {view.name === 'overview' && (
-        <Overview onOpenRepo={(owner, repoName) => setView({ name: 'repo', owner, repoName })} />
-      )}
-      {view.name === 'projects' && (
-        <ProjectsView onOpenRepo={(owner, repoName) => setView({ name: 'repo', owner, repoName })} />
-      )}
-      {view.name === 'repo' && (
-        <RepoDetail owner={view.owner} name={view.repoName} onBack={() => setView({ name: 'overview' })} />
-      )}
+      <NavBar
+        me={me}
+        currentView={currentView}
+        onNavigate={(v) => route(v === 'projects' ? '/projects' : '/')}
+      />
+      <Router>
+        <Route path='/' component={OverviewRoute} />
+        <Route path='/projects' component={ProjectsRoute} />
+        <Route path='/repo/:owner/:name' component={RepoRoute} />
+        <Route default component={NotFoundRoute} />
+      </Router>
     </div>
   )
+}
+
+const openRepo = (route: (url: string) => void) => (owner: string, name: string) =>
+  route(`/repo/${owner}/${name}`)
+
+function OverviewRoute() {
+  const { route } = useLocation()
+  return <Overview onOpenRepo={openRepo(route)} />
+}
+
+function ProjectsRoute() {
+  const { route } = useLocation()
+  return <ProjectsView onOpenRepo={openRepo(route)} />
+}
+
+function RepoRoute({ owner, name }: { owner: string; name: string }) {
+  const { route } = useLocation()
+  return <RepoDetail owner={owner} name={name} onBack={() => route('/')} />
+}
+
+function NotFoundRoute() {
+  const { path } = useLocation()
+  return <NotFound path={path} />
 }
 
 function LoadingScreen() {
@@ -88,7 +105,7 @@ function ErrorPanel({ message }: { message: string }) {
 
 function NotFound({ path }: { path: string }) {
   return (
-    <div class='min-h-screen bg-paper flex items-center justify-center'>
+    <div class='page-shell'>
       <div class='card p-8 max-w-md'>
         <h2 class='font-mono text-xl font-medium text-ink mt-0'>404 — page not found</h2>
         <p class='font-serif text-base text-muted'>No route matches <code>{path}</code>.</p>
