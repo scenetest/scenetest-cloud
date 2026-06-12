@@ -46,6 +46,22 @@ function userData(env: Env, box: BoxSpec, bearerToken: string): string {
   ].join('\n')
 }
 
+// DigitalOcean tags allow letters, numbers, colons, dashes, and underscores.
+// Colon is the separator since it can't appear in GitHub owner/repo names;
+// anything else illegal (the '/' in 'owner/name') becomes a dash.
+function doTag(...parts: Array<string | number>): string {
+  return parts.map((p) => String(p).replace(/[^A-Za-z0-9_-]/g, '-')).join(':').slice(0, 255)
+}
+
+export function boxTags(box: BoxSpec): string[] {
+  return [
+    'scenetest-runner',
+    `st-box-${box.boxId}`,
+    doTag('st-repo', box.repo),
+    doTag('st-pr', box.repo, box.prNumber),
+  ]
+}
+
 // Create the droplet for a box from a ready image. Shared by the inline
 // provision path and the cron's pending-box completion.
 export async function provisionDroplet(
@@ -60,7 +76,7 @@ export async function provisionDroplet(
     size: env.RUNNER_SIZE,
     image: Number.isInteger(Number(imageId)) ? Number(imageId) : imageId,
     user_data: userData(env, box, bearerToken),
-    tags: ['scenetest-runner', `st-box-${box.boxId}`],
+    tags: boxTags(box),
     // No ssh_keys: nothing should need to log in. Attach one temporarily
     // via the DO console when debugging an image.
   })
