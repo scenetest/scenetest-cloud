@@ -208,6 +208,12 @@ async function main() {
 
   check('bad signature → 401', (await hook('ping', {}, { badSig: true })).status === 401)
   check('ping → ignored', (await j(await hook('ping', { zen: 'ok' }))).result === 'ignored:ping')
+  // A webhook-creation ping records its repo: the "wiring verified" signal
+  // for project onboarding.
+  await hook('ping', { zen: 'ok', repository: { full_name: 'demo/watched' } })
+  const pingRow = d1Query(persistDir,
+    "SELECT COUNT(*) AS n FROM webhook_deliveries WHERE event = 'ping' AND repo = 'demo/watched'")
+  check('ping delivery attributed to its repo', pingRow[0].n === 1)
   const dupId = crypto.randomUUID()
   await hook('ping', { zen: 'ok' }, { delivery: dupId })
   check('duplicate delivery → dropped', (await j(await hook('ping', { zen: 'ok' }, { delivery: dupId }))).result === 'duplicate')
