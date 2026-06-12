@@ -12,9 +12,15 @@ interface Props {
 }
 
 export function RepoDetail({ owner, name }: Props) {
-  const { route } = useLocation()
+  const { route, query } = useLocation()
   const q = useRepo(owner, name)
   const back = () => route(paths.overview())
+
+  // The selected PR (from ?pr=N) filters the runs list below. Clicking a PR
+  // toggles it; the param keeps the filter deep-linkable and on back/forward.
+  const selectedPr = query.pr ? Number(query.pr) : null
+  const base = paths.repo(owner, name)
+  const togglePr = (n: number) => route(n === selectedPr ? base : `${base}?pr=${n}`)
 
   if (q.isPending) return <div class='page-shell'><p class='font-mono text-muted'>Loading…</p></div>
   if (q.isError) return (
@@ -25,6 +31,9 @@ export function RepoDetail({ owner, name }: Props) {
   )
 
   const d = q.data
+  const runs = selectedPr != null
+    ? d.recent_runs.filter((r) => r.pr_number === selectedPr)
+    : d.recent_runs
 
   return (
     <div class='page-shell'>
@@ -37,28 +46,48 @@ export function RepoDetail({ owner, name }: Props) {
         <p class='font-serif text-base text-muted mb-12'>No open pull requests.</p>
       ) : (
         <div class='list-panel mb-12'>
-          {d.open_prs.map((pr) => (
-            <div key={pr.pr_number} class='list-row cursor-default'>
-              <StatusPip status={pr.latest_status ?? 'queued'} />
-              <div class='flex-1 min-w-0'>
-                <div class='font-serif text-lg text-ink'>PR #{pr.pr_number}</div>
-                <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(pr.updated_at)}>
-                  {pr.base_ref} · {pr.run_count} run{pr.run_count !== 1 ? 's' : ''} · updated {relativeTime(pr.updated_at)}
+          {d.open_prs.map((pr) => {
+            const selected = pr.pr_number === selectedPr
+            return (
+              <div
+                key={pr.pr_number}
+                onClick={() => togglePr(pr.pr_number)}
+                aria-pressed={selected}
+                title={selected ? 'Showing this PR — click to clear' : 'Filter runs to this PR'}
+                class='list-row'
+                style={selected ? { boxShadow: 'inset 3px 0 0 var(--color-indigo-500)', background: 'var(--color-card)' } : undefined}
+              >
+                <StatusPip status={pr.latest_status ?? 'queued'} />
+                <div class='flex-1 min-w-0'>
+                  <div class='font-serif text-lg text-ink truncate'>{pr.title ?? `PR #${pr.pr_number}`}</div>
+                  <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(pr.updated_at)}>
+                    #{pr.pr_number} · {pr.base_ref} · {pr.run_count} run{pr.run_count !== 1 ? 's' : ''} · updated {relativeTime(pr.updated_at)}
+                  </div>
                 </div>
+                <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
+                <Badge tone={(pr.fail_count ?? 0) > 0 ? 'fail' : 'neutral'}>✗ {pr.fail_count ?? 0}</Badge>
               </div>
-              <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
-              <Badge tone={(pr.fail_count ?? 0) > 0 ? 'fail' : 'neutral'}>✗ {pr.fail_count ?? 0}</Badge>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
-      <h2 class='font-mono text-xl font-medium text-ink mb-3'>Recent runs</h2>
-      {d.recent_runs.length === 0 ? (
-        <p class='font-serif text-base text-muted'>No runs yet.</p>
+      <h2 class='font-mono text-xl font-medium text-ink mb-3'>
+        Recent runs
+        {selectedPr != null && (
+          <>
+            {' '}<span class='text-faint font-normal'>· PR #{selectedPr}</span>
+            <button onClick={() => route(base)} class='ml-3 font-mono text-sm text-accent bg-transparent border-0 cursor-pointer p-0'>clear</button>
+          </>
+        )}
+      </h2>
+      {runs.length === 0 ? (
+        <p class='font-serif text-base text-muted'>
+          {selectedPr != null ? `No runs for PR #${selectedPr} yet.` : 'No runs yet.'}
+        </p>
       ) : (
         <div class='list-panel'>
-          {d.recent_runs.map((run) => {
+          {runs.map((run) => {
             const when = run.started_at ?? run.ended_at
             const ran = run.started_at != null && run.ended_at != null
             return (

@@ -2,6 +2,7 @@ import { useOverview } from '../hooks/useOverview.ts'
 import { paths } from '../lib/paths.ts'
 import { relativeTime, absoluteTime } from '../lib/time.ts'
 import { StatusPip } from './StatusPip.tsx'
+import { SetupDots } from './SetupDots.tsx'
 import { Badge } from './Badge.tsx'
 
 export function Overview() {
@@ -47,7 +48,9 @@ export function Overview() {
               <a key={key} href={paths.repo(repo.owner, repo.name)} class='card-2 card-interactive p-5 block no-underline'>
                 <div class='flex items-center justify-between gap-2 mb-3'>
                   <strong class='font-mono text-lg font-medium text-ink truncate min-w-0'>{repo.name}</strong>
-                  <StatusPip status={status} className='shrink-0' />
+                  {repo.ready
+                    ? <StatusPip status={status} className='shrink-0' />
+                    : <span class='shrink-0'><SetupDots setup={repo.setup} /></span>}
                 </div>
                 <p class='font-mono text-2xs text-faint m-0'>{repo.owner}</p>
                 <div class='flex items-center gap-4 font-mono text-2xs text-faint mt-3'>
@@ -72,9 +75,9 @@ export function Overview() {
               <a key={`${pr.repo}#${pr.pr_number}`} href={paths.repo(owner, name)} class='list-row no-underline'>
                 <StatusPip status={pr.latest_status ?? 'queued'} />
                 <div class='flex-1 min-w-0'>
-                  <div class='font-serif text-lg text-ink truncate'>{pr.repo} #{pr.pr_number}</div>
+                  <div class='font-serif text-lg text-ink truncate'>{pr.title ?? `${pr.repo} #${pr.pr_number}`}</div>
                   <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(pr.updated_at)}>
-                    {pr.base_ref} · {relativeTime(pr.updated_at)}
+                    {pr.repo} #{pr.pr_number} · {pr.base_ref} · {relativeTime(pr.updated_at)}
                   </div>
                 </div>
                 <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
