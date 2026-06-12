@@ -1,5 +1,6 @@
 import type { Env } from '../env.ts'
-import { GH_API_HEADERS } from '../github.ts'
+import { ghHeaders } from '../github.ts'
+import { sha256Hex } from '../hash.ts'
 import { imageStageHash } from './image.ts'
 
 // The pipeline file: scenetest/pipeline.json in the user's repo. v0 fields
@@ -57,7 +58,10 @@ export function defaultPipeline(): PipelineConfig {
     version: 1,
     stages: [
       {
-        name: 'setup',
+        // Reserved name: '*' can't appear in user stage names (parsePipeline
+        // rejects it), so system pseudo-stages are unambiguous downstream
+        // (e.g. repoStatus telling "real pipeline" from "coarse default").
+        name: '*setup*',
         watch: ['**'],
         run: 'if [ -f scenetest/box-setup.sh ]; then bash scenetest/box-setup.sh; fi',
       },
@@ -124,12 +128,6 @@ export function matchesAny(path: string, globs: string[]): boolean {
   return globs.some((g) => globToRegExp(g).test(path))
 }
 
-const enc = new TextEncoder()
-async function sha256hex16(input: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', enc.encode(input))
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16)
-}
-
 export interface TreeEntry {
   path: string
   sha: string
@@ -146,12 +144,15 @@ export async function computeVector(
   const vector: Record<string, string> = {}
   let prev = rootHash
   for (const stage of config.stages) {
+    // Compile each stage's globs once, not once per tree entry — large
+    // repos have tens of thousands of blobs.
+    const globs = stage.watch.map(globToRegExp)
     const matched = tree
-      .filter((e) => matchesAny(e.path, stage.watch))
+      .filter((e) => globs.some((g) => g.test(e.path)))
       .map((e) => `${e.path}:${e.sha}`)
       .sort()
     const input = [JSON.stringify({ name: stage.name, run: stage.run ?? null, watch: stage.watch }), prev, pipelineFileSha, ...matched].join('\n')
-    const hash = await sha256hex16(input)
+    const hash = (await sha256Hex(input)).slice(0, 16)
     vector[stage.name] = hash
     prev = hash
   }
@@ -161,17 +162,12 @@ export async function computeVector(
   }
 }
 
-function ghHeaders(env: Env): Record<string, string> {
-  return env.GITHUB_API_TOKEN
-    ? { ...GH_API_HEADERS, authorization: `Bearer ${env.GITHUB_API_TOKEN}` }
-    : { ...GH_API_HEADERS }
-}
-
 function coarsePlan(headSha: string): StagePlan {
+  const fallback = defaultPipeline()
   return {
     vector: { '*coarse*': headSha },
-    stages: defaultPipeline().stages.map((s) => ({ name: s.name, run: s.run })),
-    scenes: DEFAULT_SCENES_COMMAND,
+    stages: fallback.stages.map((s) => ({ name: s.name, run: s.run })),
+    scenes: fallback.scenes,
     coarse: true,
   }
 }
