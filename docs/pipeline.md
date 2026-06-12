@@ -60,9 +60,17 @@ The box runs this command at the repo root and sets these for it:
 
 `@scenetest/scenes` ≥ 0.15 reads `SCENETEST_REPORT_URL` (or `--report-url
 <url>`) and POSTs its protocol events there as the run executes — so the
-command is just `pnpm exec scenetest`, no HTTP plumbing of your own. A
-non-zero exit marks the run failed; otherwise the `run:end` event the CLI
-emits settles passed/failed from its summary.
+command is just `pnpm exec scenetest`, no HTTP plumbing of your own.
+
+The **exit code is the verdict**: non-zero = failed (failing scenes, or a
+crashed/misconfigured run). The streamed `run:end` event carries the same
+summary for the dashboard, but its arrival is best-effort enrichment, not a
+gate — report delivery is fail-soft, so on a green run it may never arrive
+and the box still records a pass from the clean exit.
+
+`pnpm exec scenetest` runs all discovered scenes and **ignores
+`SCENETEST_SUBSET`**. To honor a subset dispatch, make `scenes` a command
+that expands `$SCENETEST_SUBSET` into positional scene paths.
 
 Per stage:
 
@@ -127,12 +135,16 @@ Do this, in order:
    files (`src/**`, `*.config.*`, `tsconfig*.json`, `public/**` if used).
 4. Add a `serve` stage that starts the app on a port in the background and
    returns (the run line must exit; `(cmd &)` + a readiness sleep or
-   wait-on is fine).
+   wait-on is fine). The port must match your scenes' configured `baseUrl`,
+   or the run connects to nothing and comes back empty.
 5. Set top-level `scenes`: run the scenes CLI (`pnpm exec scenetest`). The
    box sets `SCENETEST_REPORT_URL`, so the CLI (`@scenetest/scenes` ≥ 0.15)
    streams events to the dashboard automatically — no flag, no event file.
-   Point the scenes at the served app via your Playwright/scene config, not
-   a CLI flag.
+   The CLI's exit code is the verdict (non-zero = failed); the streamed
+   events are for the live view. Point the scenes at the served app via your
+   Playwright/scene config, not a CLI flag — and the `serve` port must match
+   that config's `baseUrl`. `pnpm exec scenetest` ignores `SCENETEST_SUBSET`;
+   only write a subset-expanding command if you actually need subsets.
 6. Do **not**: watch generated/output paths; combine unrelated concerns
    into one stage; write conditionals into `run` lines to simulate
    branching (the watch globs are the conditional); invent stages the repo

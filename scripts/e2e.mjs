@@ -415,10 +415,10 @@ async function main() {
       vector: { setup: 'hash-setup-1' },
       stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
       // The scenes command from pipeline.json rides the update. This stands
-      // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
-      // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
-      // run:end the agent settles the verdict from (1 failed → run failed).
-      scenes: `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'`,
+      // in for the 0.15 CLI: POST the batched {events:[{seq,payload}]} envelope
+      // to $SCENETEST_REPORT_URL, then exit non-zero like a failing run does —
+      // the exit code is the verdict, run:end is just relayed to the dashboard.
+      scenes: `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'; exit 1`,
     }),
   })
   check('debug box-update queued (no box connected yet)',
@@ -496,7 +496,7 @@ async function main() {
       const replay = await collectWs('/api/runs/e2e-agent-run/ws', cookie, 1200)
       return replay.events.some((e) => e.type === 'run:end')
     }, 8000))
-  check('agent settled the verdict from run:end (1 failing scene → failed)',
+  check('agent settled the verdict from the exit code (non-zero → failed)',
     await waitFor(async () => {
       const rows = d1Query(persistDir, "SELECT status FROM runs WHERE id = 'e2e-agent-run'")
       return rows[0].status === 'failed'

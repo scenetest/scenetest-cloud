@@ -97,9 +97,10 @@ the legacy `bash scenetest/box-run.sh` hook), delivered to the agent with
 every update. It receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET` (advisory;
 the CLI has no `--subset`), `SCENETEST_LOCAL_INGEST` (base of the agent's
 local relay), and `SCENETEST_REPORT_URL` — `@scenetest/scenes` ≥ 0.15 POSTs
-its event batches there (`{events:[{seq,payload}]}`), the agent relays them
-live, and a `run:end` event settles the verdict from its summary. A
-non-zero exit marks the run failed, so no batch is left dangling.
+its event batches there (`{events:[{seq,payload}]}`) and the agent relays
+them live. The command's exit code is the verdict (non-zero = failed); the
+`run:end` event is relayed for the dashboard but doesn't gate it (report
+delivery is fail-soft).
 
 ### run.env variables
 

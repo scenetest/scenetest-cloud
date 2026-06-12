@@ -57,8 +57,8 @@ of the contract —
 - **`scenes`** (top-level): how one batch of scenes executes against the
   served app — usually just `pnpm exec scenetest`. The box sets
   `SCENETEST_REPORT_URL`, so `@scenetest/scenes` ≥ 0.15 streams its events
-  to the dashboard live (and the `run:end` event settles the verdict). No
-  HTTP plumbing of your own.
+  to the dashboard live; the run's exit code is the verdict (non-zero =
+  failed). No HTTP plumbing of your own.
 
 Full spec, rules of thumb, and a step-by-step checklist written for LLMs
 in [pipeline.md](./pipeline.md) — hand that page to your assistant with

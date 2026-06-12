@@ -13,8 +13,8 @@
 //      also carries the pipeline's scenes command.
 //   3. On {kind:'dispatch'}: run the scenes command with the batch's env
 //      (incl. SCENETEST_REPORT_URL → the local ingest). The scenes CLI POSTs
-//      its event batches there; a run:end event settles the verdict, and a
-//      non-zero exit is the failed backstop.
+//      its event batches there for the dashboard; the command's exit code is
+//      the verdict (non-zero = failed).
 //   4. Relay events: the local HTTP ingest on 127.0.0.1:4999 accepts the
 //      scenes CLI's report body (POST /events/:runId, the same
 //      {events:[{seq,payload}]} shape as the cloud ingest); envelopes go up
@@ -57,7 +57,6 @@ const log = (...args) => console.log(new Date().toISOString(), ...args)
 let ws = null
 let currentScenes = null // from the latest pipeline update
 const seqByRun = new Map()
-const runEndByRun = new Map() // runId -> run:end payload (settles the verdict)
 
 // ---------- checkout + project setup -----------------------------------------
 
@@ -125,19 +124,15 @@ async function applyUpdate(update, repoDir) {
 
 // ---------- event relay -------------------------------------------------------
 
-// Assign sequence numbers (preserving any the caller provided), note any
-// run:end (it settles the batch's verdict), and relay. The only event entry
-// point now — the scenes CLI POSTs its batches here via --report-url.
+// Assign sequence numbers (preserving any the caller provided) and relay.
+// The only event entry point now — the scenes CLI POSTs its batches here via
+// --report-url. (The verdict comes from the command's exit code, not these.)
 function ingestEvents(runId, rawEvents) {
   let seq = seqByRun.get(runId) ?? 0
   const numbered = rawEvents.map((e) =>
     typeof e.seq === 'number' ? ((seq = Math.max(seq, e.seq)), e) : { seq: ++seq, payload: e.payload ?? e },
   )
   seqByRun.set(runId, seq)
-  for (const e of numbered) {
-    const p = e.payload ?? e
-    if (p && p.type === 'run:end') runEndByRun.set(runId, p)
-  }
   return relayEvents(runId, numbered)
 }
 
@@ -224,18 +219,15 @@ function runBatch(run, repoDir) {
 
   child.on('exit', (code) => {
     log(`batch ${run.runId} exited ${code}`)
-    const end = runEndByRun.get(run.runId)
-    runEndByRun.delete(run.runId)
-    if (code !== 0) {
-      // Backstop: no batch is left dangling.
-      void completeRun(run.runId, 'failed')
-    } else if (end) {
-      // The verdict comes from the run's own summary when it reported one.
-      const failed = end.summary?.failed ?? 0
-      void completeRun(run.runId, failed > 0 ? 'failed' : 'passed')
-    }
-    // Exit 0 with no run:end: the command reported through the ingest /
-    // /complete itself; leave it be.
+    // The exit code is the verdict. The scenes CLI exits non-zero exactly
+    // when the run failed (failing scenes/assertions, or a crash); exit 0
+    // means an all-passing summary. We don't wait on a run:end event for
+    // this — --report-url delivery is fail-soft, so run:end may never arrive
+    // on a green run; it streams to the dashboard but doesn't gate the
+    // verdict. completeRun is first-writer-wins (ended_at IS NULL), so a
+    // cancelled run, or a legacy box-run.sh that reported its own verdict,
+    // is not overwritten.
+    void completeRun(run.runId, code === 0 ? 'passed' : 'failed')
   })
 }
 

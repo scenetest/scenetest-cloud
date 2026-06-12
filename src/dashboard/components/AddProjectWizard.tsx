@@ -230,8 +230,8 @@ Build it like this:
 1. deps — watch the lockfile only; run the frozen-lockfile install.
 2. db — watch the database dir (supabase/, prisma/, migrations/); run the reset+seed command (supabase: "supabase start && supabase db reset").
 3. build — watch source + config (src/**, *.config.*, tsconfig*.json); run the build (+ typegen if any).
-4. serve — watch []; start the app on a port in the background and exit (e.g. "(pnpm preview --port 4173 &) && sleep 2").
-5. scenes (top-level field, NOT a stage) — run the scenes CLI: "pnpm exec scenetest" (binary is scenetest; there is no "run" subcommand). The box sets SCENETEST_REPORT_URL, so @scenetest/scenes >=0.15 streams its events to the dashboard automatically — no --report-url flag and no event file needed. Point scenes at the served app via your Playwright/scene config, not a CLI flag. Non-zero exit marks the run failed; otherwise the run:end event settles the verdict.
+4. serve — watch []; start the app on a port in the background and exit (e.g. "(pnpm preview --port 4173 &) && sleep 2"). The port must match the scenes' configured baseUrl, or the run connects to nothing.
+5. scenes (top-level field, NOT a stage) — run the scenes CLI: "pnpm exec scenetest" (binary is scenetest; there is no "run" subcommand). The box sets SCENETEST_REPORT_URL, so @scenetest/scenes >=0.15 streams its events to the dashboard automatically — no --report-url flag and no event file needed. Point scenes at the served app via your Playwright/scene config, not a CLI flag. The CLI's exit code is the verdict (non-zero = failed); the streamed events are for the live dashboard, not the verdict.
 
 Rules: watch inputs never outputs (lockfile not node_modules, src/** not dist/**); stage names [a-z0-9_-]; when unsure widen the glob; strict JSON, version must be the number 1. There is no --subset flag — run a subset with positional scene paths.
 
