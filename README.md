@@ -10,5 +10,7 @@ DigitalOcean droplets.
 - [docs/architecture.md](docs/architecture.md) — how the pieces fit, and how
   this repo relates to the scenetest-js monorepo
 - [docs/setup.md](docs/setup.md) — zero to deployed
+- [docs/pipeline.md](docs/pipeline.md) — the pipeline file users put in
+  their repos (what rebuilds when, and why)
 - [docs/runner-provisioning.md](docs/runner-provisioning.md) — the ephemeral
   runner lifecycle, image contract, and secrets

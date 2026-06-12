@@ -62,19 +62,59 @@ function checkout() {
   mkdirSync(WORK_DIR, { recursive: true })
   log(`cloning ${REPO} @ ${HEAD_SHA}`)
   // Public repos only for now (docs/runner-provisioning.md tracks the
-  // credential question). Fetch the single sha, shallow.
+  // credential question). Fetch the single sha, shallow. Project setup is no
+  // longer run here: it arrives as pipeline stages in an 'update' message
+  // (the default pipeline's stage runs scenetest/box-setup.sh, so hook-era
+  // repos behave the same).
   execFileSync('git', ['init', '-q', dir])
   execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', `https://github.com/${REPO}.git`])
   execFileSync('git', ['-C', dir, 'fetch', '-q', '--depth', '1', 'origin', HEAD_SHA])
   execFileSync('git', ['-C', dir, 'checkout', '-q', 'FETCH_HEAD'])
-  const setup = join(dir, 'scenetest', 'box-setup.sh')
-  if (existsSync(setup)) {
-    log('running scenetest/box-setup.sh')
-    execFileSync('bash', [setup], { cwd: dir, stdio: 'inherit' })
-  } else {
-    log('no scenetest/box-setup.sh in repo; skipping project setup')
-  }
   return dir
+}
+
+// Move the checkout to a new sha (warm-box pipeline update).
+function checkoutSha(repoDir, sha) {
+  execFileSync('git', ['-C', repoDir, 'fetch', '-q', '--depth', '1', 'origin', sha])
+  execFileSync('git', ['-C', repoDir, 'checkout', '-q', 'FETCH_HEAD'])
+}
+
+// ---------- pipeline updates --------------------------------------------------
+
+// { kind: 'update', update: { headSha, vector, stages: [{name, run}] } }:
+// checkout the sha, run the stages in order, and report the realized vector
+// back through /api/boxes/:id/ready. The vector is computed worker-side; the
+// agent just echoes it after the work succeeds. A failed stage reports
+// ok:false — the worker retires this box and the next push starts fresh.
+async function applyUpdate(update, repoDir) {
+  const { headSha, vector, stages } = update ?? {}
+  if (!Array.isArray(stages)) return
+  log(`update: ${stages.length} stage(s) at ${headSha}`)
+  let current = 'checkout'
+  try {
+    if (repoDir && headSha && process.env.SCENETEST_SKIP_CHECKOUT !== '1') {
+      checkoutSha(repoDir, headSha)
+    }
+    for (const stage of stages) {
+      current = stage.name
+      if (!stage.run) continue
+      log(`stage ${stage.name}: ${stage.run}`)
+      execFileSync('bash', ['-c', stage.run], { cwd: repoDir ?? WORK_DIR, stdio: 'inherit' })
+    }
+    await fetch(`${INGEST_URL}/api/boxes/${BOX_ID}/ready`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ ok: true, realized: vector ?? null, head_sha: headSha ?? null }),
+    })
+    log('update complete; reported ready')
+  } catch (err) {
+    log(`update failed at stage '${current}': ${err.message}`)
+    await fetch(`${INGEST_URL}/api/boxes/${BOX_ID}/ready`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ ok: false, failed_stage: current }),
+    }).catch(() => {})
+  }
 }
 
 // ---------- event relay -------------------------------------------------------
@@ -183,6 +223,7 @@ function connectChannel(repoDir, attempt = 0) {
       return
     }
     if (msg.kind === 'dispatch' && msg.run?.runId) runBatch(msg.run, repoDir)
+    else if (msg.kind === 'update') void applyUpdate(msg.update, repoDir)
     else if (msg.kind === 'command' && msg.runId) {
       appendFileSync(
         join(WORK_DIR, `${msg.runId}.commands.jsonl`),
@@ -215,10 +256,7 @@ mkdirSync(WORK_DIR, { recursive: true })
 const repoDir = process.env.SCENETEST_SKIP_CHECKOUT === '1' ? null : checkout()
 startLocalIngest()
 
-const ready = await fetch(`${INGEST_URL}/api/boxes/${BOX_ID}/ready`, {
-  method: 'POST',
-  headers: AUTH,
-})
-log(`reported ready: ${ready.status}`)
-
+// No bare "ready" on boot: readiness is the outcome of the queued pipeline
+// update, which arrives the moment the channel connects (FIFO, ahead of any
+// dispatches) and reports through /ready with the realized stage vector.
 connectChannel(repoDir)

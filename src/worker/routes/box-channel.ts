@@ -2,6 +2,7 @@ import type { Handler } from '../router.ts'
 import type { Env } from '../env.ts'
 import { hashToken } from '../middleware/bearer.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
+import { retireBox } from '../runner/box.ts'
 
 interface BoxRow {
   repo: string
@@ -44,20 +45,44 @@ export const boxChannel: Handler = async (req, env, _ctx, params) => {
   return prCoordinator(env, box.repo, box.pr_number).fetch(new Request(doUrl, req))
 }
 
-// POST /api/boxes/:boxId/ready — the agent reports its build pipeline done
-// (checkout, setup, app up). Until this lands, a DigitalOcean box sits in
-// 'provisioning'; the stub provider marks its boxes ready directly.
+// POST /api/boxes/:boxId/ready — the agent reports a pipeline update's
+// outcome. Success carries the realized stage vector (echoed from the
+// update message) and the sha it now embodies; ensureBox diffs future
+// pushes against it. `ok: false` means a stage failed: the box can't serve
+// runs for this state, so it's retired (reaper destroys the droplet, queued
+// runs cancel) and the next push provisions fresh.
+// Body is optional for backward compatibility (bare ready, no vector).
 export const boxReady: Handler = async (req, env, _ctx, params) => {
   const boxId = params.boxId!
   const headerToken = /^Bearer\s+(.+)$/.exec(req.headers.get('authorization') ?? '')?.[1]
   const box = await verifyBox(env, boxId, headerToken ?? null)
   if (!box) return new Response('Unauthorized', { status: 401 })
 
+  const body = (await req.json().catch(() => ({}))) as {
+    ok?: boolean
+    realized?: Record<string, string>
+    head_sha?: string
+    failed_stage?: string
+  }
+
+  if (body.ok === false) {
+    console.error(`box ${boxId}: pipeline stage '${body.failed_stage ?? '?'}' failed; retiring`)
+    await retireBox(env, boxId)
+    return Response.json({ ok: true, retired: true })
+  }
+
   await env.DB.prepare(
-    `UPDATE boxes SET status = 'ready', ready_at = ?1
-       WHERE id = ?2 AND status = 'provisioning'`,
+    `UPDATE boxes SET status = 'ready', ready_at = ?1,
+        realized_stages = COALESCE(?2, realized_stages),
+        head_sha = COALESCE(?3, head_sha)
+      WHERE id = ?4 AND status IN ('provisioning', 'rebuilding', 'ready')`,
   )
-    .bind(Date.now(), boxId)
+    .bind(
+      Date.now(),
+      body.realized ? JSON.stringify(body.realized) : null,
+      body.head_sha ?? null,
+      boxId,
+    )
     .run()
   return Response.json({ ok: true })
 }

@@ -12,6 +12,11 @@ export interface Env {
   BOOTSTRAP_ALLOWED_LOGIN: string
   // Required for /webhook/github; the route returns 503 until it is set.
   GITHUB_WEBHOOK_SECRET?: string
+  // Optional GitHub token (secret) for the trees/blobs/contents lookups the
+  // pipeline stage-hashing makes at webhook time. Without it, unauthenticated
+  // calls share the worker egress IP's 60/hr limit and hashing degrades to
+  // the coarse rebuild-everything plan more often.
+  GITHUB_API_TOKEN?: string
   SESSION_SECRET: string
   ENABLE_DEBUG_ROUTES?: string
 

@@ -3,6 +3,7 @@ import type { BoxSpec } from './types.ts'
 import { hashToken } from '../middleware/bearer.ts'
 import { getRunner } from './registry.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
+import { computeStagePlan, firstDivergentStage, type StagePlan } from './pipeline.ts'
 
 export interface PrRef {
   repo: string // 'owner/name'
@@ -18,40 +19,90 @@ export interface BoxRow {
   status: string
 }
 
-// Ensure a usable box exists for this PR at pr.headSha, provisioning one if
-// the live box is missing or built for a different commit.
+// Ensure a usable box exists for this PR at pr.headSha.
 //
-// First cut: a box is reused only when its head_sha matches exactly. The
-// staged content-hash diff from architecture.md ("The build pipeline") —
-// reuse the image when only deps changed, reuse deps when only the database
-// changed, and so on — replaces this equality check once the pipeline-config
-// file format is defined. That file is the next load-bearing design decision
-// and is deliberately not invented here; until then, any code change rebuilds
-// the whole box, which is correct, just not yet fast.
+// DigitalOcean path: the pipeline stage diff (docs/pipeline.md). The desired
+// stage vector for the new commit is compared against what the live box has
+// realized; no divergence = full reuse (a docs-only push does nothing), a
+// divergence at stage k = the warm box re-runs stages k..end at the new sha,
+// and only a missing/failed box provisions fresh hardware.
+//
+// Stub path: the original sha-equality model (fake boxes do no real work, so
+// staged updates have nothing to optimize).
 export async function ensureBox(
   env: Env,
   ctx: ExecutionContext,
   pr: PrRef,
 ): Promise<BoxRow> {
   const live = await env.DB.prepare(
-    `SELECT id, head_sha, status FROM boxes
+    `SELECT id, head_sha, status, realized_stages FROM boxes
        WHERE repo = ?1 AND pr_number = ?2 AND status != 'destroyed'`,
   )
     .bind(pr.repo, pr.prNumber)
-    .first<BoxRow>()
+    .first<BoxRow & { realized_stages: string | null }>()
 
-  if (live && live.head_sha === pr.headSha) {
-    await env.DB.prepare('UPDATE boxes SET last_used_at = ?1 WHERE id = ?2')
-      .bind(Date.now(), live.id)
-      .run()
-    return live
+  if (env.RUNNER_PROVIDER !== 'digitalocean') {
+    if (live && live.head_sha === pr.headSha) {
+      await env.DB.prepare('UPDATE boxes SET last_used_at = ?1 WHERE id = ?2')
+        .bind(Date.now(), live.id)
+        .run()
+      return live
+    }
+    if (live) await retireBox(env, live.id)
+    return provisionBox(env, ctx, pr)
   }
 
-  // Code changed (new commit) or no box yet: provision fresh. Retire any
-  // prior box so the unique live-box index stays satisfied and the reaper
-  // destroys its droplet.
-  if (live) await retireBox(env, live.id)
-  return provisionBox(env, ctx, pr)
+  const plan = await computeStagePlan(env, pr.repo, pr.headSha)
+
+  if (live) {
+    const realized = live.realized_stages
+      ? (JSON.parse(live.realized_stages) as Record<string, string>)
+      : null
+    const divergeAt = firstDivergentStage(plan, realized)
+
+    if (divergeAt === null) {
+      // Nothing the pipeline watches changed (rebases, docs-only pushes).
+      // The box's checkout may lag the literal head sha, but its content is
+      // identical in every watched respect — record the new sha and reuse.
+      await env.DB.prepare('UPDATE boxes SET last_used_at = ?1, head_sha = ?2 WHERE id = ?3')
+        .bind(Date.now(), pr.headSha, live.id)
+        .run()
+      return { ...live, head_sha: pr.headSha }
+    }
+
+    // Latest wins: verdicts in flight are for a state that no longer
+    // matters. Cancel them, then have the warm box re-run from the first
+    // divergent stage — the box survives; only the work repeats.
+    const now = Date.now()
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE runs SET status = 'cancelled', ended_at = ?1
+           WHERE box_id = ?2 AND ended_at IS NULL`,
+      ).bind(now, live.id),
+      env.DB.prepare(
+        `UPDATE boxes SET status = 'rebuilding', head_sha = ?1, last_used_at = ?2 WHERE id = ?3`,
+      ).bind(pr.headSha, now, live.id),
+    ])
+    await queueUpdate(env, pr, plan, divergeAt)
+    return { id: live.id, head_sha: pr.headSha, status: 'rebuilding' }
+  }
+
+  const box = await provisionBox(env, ctx, pr)
+  // The fresh box runs every stage; the update waits in the coordinator's
+  // FIFO queue ahead of any dispatches, delivered when the agent connects.
+  await queueUpdate(env, pr, plan, 0)
+  return box
+}
+
+async function queueUpdate(env: Env, pr: PrRef, plan: StagePlan, fromStage: number): Promise<void> {
+  await prCoordinator(env, pr.repo, pr.prNumber).fetch('https://do/update', {
+    method: 'POST',
+    body: JSON.stringify({
+      headSha: pr.headSha,
+      vector: plan.vector,
+      stages: plan.stages.slice(fromStage),
+    }),
+  })
 }
 
 async function provisionBox(env: Env, ctx: ExecutionContext, pr: PrRef): Promise<BoxRow> {

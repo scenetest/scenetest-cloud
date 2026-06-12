@@ -16,6 +16,8 @@ import { insertEvents, type RunEvent } from '../db.ts'
 //       (envelope-grade checks only, so newer event types relay through).
 //   cloud → box: { kind: 'command', runId, command }   (a protocol Command)
 //                { kind: 'dispatch', run }              (a RunSpec batch)
+//                { kind: 'update', update }             (checkout + run
+//                  pipeline stages: { headSha, vector, stages: [{name,run}] })
 //
 // Internal HTTP surface (reachable only via the binding, never publicly):
 //   GET  /box-connect?boxId=…  — WebSocket upgrade for the box channel
@@ -65,6 +67,15 @@ export class PrCoordinator implements DurableObject {
     if (url.pathname === '/dispatch' && req.method === 'POST') {
       const { run } = (await req.json()) as { run: unknown }
       const delivered = await this.sendOrQueue({ kind: 'dispatch', run })
+      return Response.json({ delivered })
+    }
+
+    if (url.pathname === '/update' && req.method === 'POST') {
+      // Pipeline update: checkout this sha and run these stages, then report
+      // ready with the vector. Queued like everything else so a still-booting
+      // box receives it first (FIFO), before any dispatches.
+      const update = (await req.json()) as unknown
+      const delivered = await this.sendOrQueue({ kind: 'update', update })
       return Response.json({ delivered })
     }
 
