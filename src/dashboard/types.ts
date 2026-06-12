@@ -1,8 +1,18 @@
+// Onboarding progress for a repo (registered is implicit — the row exists).
+// Drives the "setting up" step dots while a repo isn't live yet.
+export interface RepoSetup {
+  webhook: boolean
+  pipeline: boolean
+  first_run: boolean
+}
+
 export interface Repo {
   owner: string
   name: string
   github_repo_id: number | null
   added_at: number
+  setup: RepoSetup
+  ready: boolean
 }
 
 export interface PrSummary {
@@ -11,6 +21,7 @@ export interface PrSummary {
   head_sha: string
   base_ref: string
   state: string
+  title: string | null
   updated_at: number
   run_count: number
   pass_count: number

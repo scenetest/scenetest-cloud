@@ -2,6 +2,7 @@ import { useState } from 'preact/hooks'
 import { useOverview } from '../hooks/useOverview.ts'
 import { paths } from '../lib/paths.ts'
 import { Button } from './Button.tsx'
+import { SetupDots } from './SetupDots.tsx'
 import { AddProjectWizard } from './AddProjectWizard.tsx'
 
 export function ProjectsView() {
@@ -43,8 +44,11 @@ export function ProjectsView() {
           return (
             <a key={key} href={paths.repo(repo.owner, repo.name)} class='list-row no-underline'>
               <span class='w-32 inline-flex items-center gap-1'>
-                {repoPrs.length === 0 && <span class='font-mono text-3xs text-faint'>no open PRs</span>}
-                {repoPrs.map((pr) => (
+                {!repo.ready ? (
+                  <SetupDots setup={repo.setup} />
+                ) : repoPrs.length === 0 ? (
+                  <span class='font-mono text-3xs text-faint'>no open PRs</span>
+                ) : repoPrs.map((pr) => (
                   <span
                     key={pr.pr_number}
                     class={`w-2.5 h-2.5 rounded-full shrink-0 ${
@@ -58,7 +62,10 @@ export function ProjectsView() {
                   />
                 ))}
               </span>
-              <div class='flex-1 min-w-0 font-mono text-md text-ink truncate'>{repo.owner}/{repo.name}</div>
+              <div class='flex-1 min-w-0'>
+                <div class='font-mono text-md text-ink truncate'>{repo.name}</div>
+                <div class='font-mono text-3xs text-faint truncate'>{repo.owner}</div>
+              </div>
               <span class='w-18 font-mono text-sm text-muted text-right'>{passRate}</span>
               <span class='w-5 font-mono text-faint text-right'>→</span>
             </a>

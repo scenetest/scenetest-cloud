@@ -20,6 +20,7 @@ interface PullRequestPayload {
   repository: { full_name: string }
   pull_request: {
     state: string
+    title?: string
     head: { sha: string }
     base: { ref: string; sha: string }
   }
@@ -152,15 +153,16 @@ async function handleEvent(
   const headSha = payload.pull_request.head.sha
   const baseRef = payload.pull_request.base.ref
   const baseSha = payload.pull_request.base.sha
+  const title = payload.pull_request.title ?? null
 
   await env.DB.prepare(
-    `INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?5)
+    `INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, title, opened_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?6)
      ON CONFLICT(repo, pr_number) DO UPDATE SET
        head_sha = excluded.head_sha, base_ref = excluded.base_ref,
-       state = 'open', updated_at = ?5`,
+       title = excluded.title, state = 'open', updated_at = ?6`,
   )
-    .bind(repo, prNumber, headSha, baseRef, now)
+    .bind(repo, prNumber, headSha, baseRef, title, now)
     .run()
 
   // A queued filter ("on the next push, only re-run these scenes") is
