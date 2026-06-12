@@ -48,12 +48,27 @@ repo.
 
 ### Receiver core
 
-A framework-agnostic Hono app that accepts protocol events and hands them to
-a pluggable sink. Because a Hono app is just a `fetch` handler, the same
-routes and handlers run in both environments: mounted into Vite's connect
-server in dev (via the node adapter), and natively on the Worker and inside
-Durable Objects in cloud. Hono's RPC client (`hono/client`) gives the
-transport adapter end-to-end types on top of the protocol types.
+`@scenetest/receiver` is the server-side listening half of the event
+pipeline — accepts protocol-event POSTs, hands them to a pluggable sink —
+extracted from the Vite plugin and published in 0.11. Dev mode runs it: the
+`/__scenetest` middleware is the receiver mounted in Vite's connect server.
+
+The cloud deliberately does **not** run it, which is a revision of this
+document's original plan (a shared Hono app on the Worker and in Durable
+Objects). What the two environments actually share is the **wire
+contract** — the protocol package and its envelope-grade relay rule — not
+the server code. The cloud's ingest surfaces turned out to be mostly glue
+around that contract: bearer auth via a D1 join, forwarding to the PR
+coordinator, sequence bookkeeping. The shareable parsing inside them is a
+few lines, kept deliberately minimal so events newer than the relay pass
+through. The worker keeps its small hand-rolled router for the same reason.
+
+Conditions for revisiting: the box agent (whose local relay hand-rolls the
+receiver's job in ~40 lines) adopts the package if it ever grows a bundling
+step for other reasons — the agent is single-file, zero-dependency by
+design, and that property currently outweighs the dedupe. And any future
+standalone or self-hosted relay should be the receiver package outright;
+that is its design center.
 
 ### Dashboard widget
 
@@ -111,10 +126,12 @@ Each Cloudflare primitive has one job:
   and link into R2 — and never log lines. D1 caps at 10 GB, so append-heavy
   event logs are kept out of it by design rather than as a later
   optimization.
-- R2 holds the durable record. The runner box's complete `.jsonl` is
-  uploaded at end of run and becomes the source of truth for raw events;
-  historical detail views read it through the worker. The local file is not
-  a backup of the database — uploading it is the persistence step.
+- R2 holds the durable record: at end of run the event log becomes a
+  `.jsonl` object — the source of truth for raw events, with historical
+  detail views reading it through the worker. The local file is not a
+  backup of the database — persisting it is the point. *(Designed, not yet
+  built — today events accumulate in D1, which violates the rule above and
+  is the next build item.)*
 - Queues (optional) decouple Durable Object write-through from D1 metadata
   updates and absorb webhook bursts. They are not on the live path.
 
@@ -122,8 +139,8 @@ Each Cloudflare primitive has one job:
 
 One ephemeral DigitalOcean box per PR — not per run. The box runs the same
 code path as a developer's laptop: app under test, database, seeds,
-Playwright, CLI, receiver core — all local to the box, so scene executions
-stay atomic. A laptop is a persistent environment you run tests against
+Playwright, the scenes CLI, the agent's local relay — all local to the box,
+so scene executions stay atomic. A laptop is a persistent environment you run tests against
 repeatedly; the per-PR box is the faithful analog of that, and a re-run
 against a warm box costs seconds, not a provisioning cycle.
 
@@ -132,11 +149,18 @@ the local `.jsonl` (debug + artifact) and also streams events up the box's
 single outbound WebSocket to the PR's Durable Object. Outbound-only means
 no inbound firewall holes; commands ride the same socket back down.
 
-Powered-off droplets still bill, so idle boxes are destroyed, not parked:
-the PR object's alarm tears down after an idle window, and the build
-pipeline's cache makes resurrection cheap (boot the cached image, fetch
-artifacts, replay state stages). The warm box is a performance
+Powered-off droplets still bill, so idle boxes are destroyed, not parked,
+and the build pipeline's cache makes resurrection cheap (boot the cached
+image, replay invalidated stages). The warm box is a performance
 optimization; the cache is the correctness story.
+
+Today's teardown is cruder than the target: the reaper's hard age cap
+(`RUNNER_MAX_AGE_MINUTES`, default 30) destroys *every* box past it,
+healthy-and-warm included — so warm reuse only exists inside that window,
+and a long-lived PR rebuilds its box twice an hour. The target is an
+idle-based teardown owned by the PR object (a Durable Object alarm reset on
+activity), with the age cap demoted to the hung-box backstop it should be.
+Unbuilt; the cap is the placeholder.
 
 ### The build pipeline
 
@@ -236,9 +260,15 @@ weirdness.
 
 Three surfaces:
 
-1. Humans: Cloudflare Access in front of the worker for the solo phase (no
-   auth code). GitHub OAuth via a library (e.g. `better-auth` on Workers/D1)
-   when multi-user. OAuth-only; no passwords stored.
+1. Humans: GitHub OAuth, implemented in this repo (stateless HMAC-signed
+   session cookies, an `allowed_user` allowlist, first-login bootstrap via
+   `BOOTSTRAP_ALLOWED_LOGIN`). The original plan here was Cloudflare Access
+   for the solo phase and a library (`better-auth`) for multi-user; the
+   hand-rolled flow shipped first, keeps the part of the principle that
+   matters — OAuth-only, no passwords stored, sessions are signed not
+   stored — and is covered by crypto unit tests, so it stays. A library
+   becomes worth revisiting if auth grows surface (orgs, multiple
+   providers).
 2. Runner box and CLI: a bearer token minted when the box is provisioned,
    scoped to that box and dead when the box is destroyed; the PR's Durable
    Object validates it on the WebSocket handshake. Scoped API keys for CI
@@ -255,20 +285,24 @@ The cloud path, end to end. Steps 1–3 are identical on a laptop in dev mode.
 │ Playwright-driven browser   │      │                  │      │ dashboard  │
 │   └─ injected listener ──┐  │      │  Worker (Hono)   │      │ widget     │
 │ CLI / Playwright events ─┤  │  WS  │    └─ PR DO ─────┼──WS──┼─ transport │
-│   receiver core (Hono) ◄─┘  ├──────┼──►  • fan-out    │      │  adapter   │
+│   agent local relay ◄────┘  ├──────┼──►  • fan-out    │      │  adapter   │
 │     ├─ .jsonl sink          │      │     • cmd queue  │      └────────────┘
-│     └─ upstream sink ───────┘      │     • (Queue→D1) │
+│     └─ upstream sink ───────┘      │     • (Queue→D1)*│
 │                                    │  end of run:     │
-│                                    │  .jsonl → R2     │
+│                                    │  .jsonl → R2*    │
 └────────────────────────────────────┴──────────────────┘
 ```
+
+(* designed, not yet built: the R2 artifact upload and the optional Queue
+leg.)
 
 1. In the Playwright-driven browser on the box, a `should()` check in the
    app under test resolves. The injected listener captures it and POSTs it
    same-origin to the box-local dev server.
-2. The receiver core validates it into a protocol event. CLI events —
-   Playwright actions, "can't click this element" — enter at the same point,
-   directly from the CLI process.
+2. The agent's local relay (the box-side counterpart of the receiver —
+   see "Receiver core" above) accepts it as a protocol event. CLI events —
+   Playwright actions, "can't click this element" — enter at the same
+   point, streamed by the scenes CLI via `SCENETEST_REPORT_URL`.
 3. The event goes to both sinks: appended to the local `.jsonl`, and handed
    to the upstream sink, which sends it over the box's authenticated
    outbound WebSocket.
