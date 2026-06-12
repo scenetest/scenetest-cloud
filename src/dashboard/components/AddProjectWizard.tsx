@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api.ts'
+import { paths } from '../lib/paths.ts'
 import { useRepoStatus } from '../hooks/useRepoStatus.ts'
 import { Button } from './Button.tsx'
 
@@ -12,10 +13,9 @@ import { Button } from './Button.tsx'
 
 interface Props {
   onClose: () => void
-  onOpenRepo?: (owner: string, name: string) => void
 }
 
-export function AddProjectWizard({ onClose, onOpenRepo }: Props) {
+export function AddProjectWizard({ onClose }: Props) {
   const [repo, setRepo] = useState<{ owner: string; name: string } | null>(null)
 
   return (
@@ -34,7 +34,7 @@ export function AddProjectWizard({ onClose, onOpenRepo }: Props) {
         </div>
 
         {repo
-          ? <Checklist owner={repo.owner} name={repo.name} onOpenRepo={onOpenRepo} />
+          ? <Checklist owner={repo.owner} name={repo.name} />
           : <RegisterForm onRegistered={(owner, name) => setRepo({ owner, name })} />}
 
         <div class='flex justify-end px-6 py-4 border-t border-border'>
@@ -99,7 +99,7 @@ function RegisterForm({ onRegistered }: { onRegistered: (owner: string, name: st
   )
 }
 
-function Checklist({ owner, name, onOpenRepo }: { owner: string; name: string; onOpenRepo?: (owner: string, name: string) => void }) {
+function Checklist({ owner, name }: { owner: string; name: string }) {
   const status = useRepoStatus(owner, name, true)
   const s = status.data
   const origin = window.location.origin
@@ -162,9 +162,7 @@ function Checklist({ owner, name, onOpenRepo }: { owner: string; name: string; o
       {s?.first_run && (
         <div class='flex gap-2'>
           <Button variant='primary' size='md' href={`/r/${s.first_run.id}/dashboard/`}>Open run dashboard</Button>
-          {onOpenRepo && (
-            <Button variant='secondary' size='md' onClick={() => onOpenRepo(owner, name)}>Project page</Button>
-          )}
+          <Button variant='secondary' size='md' href={paths.repo(owner, name)}>Project page</Button>
         </div>
       )}
     </div>

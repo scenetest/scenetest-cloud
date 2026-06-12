@@ -11,7 +11,7 @@ import { Button } from './components/Button.tsx'
 // /api/*) fall outside it and reach the worker normally. This set must agree
 // with the worker's shell fall-through in src/worker/index.ts — repo views use
 // /repo/* rather than /r/* precisely to avoid colliding with the run-dashboard
-// /r/ prefix.
+// /r/ prefix. The concrete URLs are built in ./lib/paths.ts.
 export const spaScope = /^\/($|projects|repo\/)/
 
 export function App() {
@@ -23,47 +23,19 @@ export function App() {
 }
 
 function Dashboard({ me }: { me: Me }) {
-  const { path, route } = useLocation()
-  const currentView = path === '/projects' ? 'projects' : path === '/' ? 'overview' : ''
-
+  // The chrome (nav bar) lives above the <Router>, so it persists across route
+  // changes. The views below own their own navigation as links — see paths.ts.
   return (
     <div class='min-h-screen bg-paper'>
-      <NavBar
-        me={me}
-        currentView={currentView}
-        onNavigate={(v) => route(v === 'projects' ? '/projects' : '/')}
-      />
+      <NavBar me={me} />
       <Router>
-        <Route path='/' component={OverviewRoute} />
-        <Route path='/projects' component={ProjectsRoute} />
-        <Route path='/repo/:owner/:name' component={RepoRoute} />
-        <Route default component={NotFoundRoute} />
+        <Route path='/' component={Overview} />
+        <Route path='/projects' component={ProjectsView} />
+        <Route path='/repo/:owner/:name' component={RepoDetail} />
+        <Route default component={NotFound} />
       </Router>
     </div>
   )
-}
-
-const openRepo = (route: (url: string) => void) => (owner: string, name: string) =>
-  route(`/repo/${owner}/${name}`)
-
-function OverviewRoute() {
-  const { route } = useLocation()
-  return <Overview onOpenRepo={openRepo(route)} />
-}
-
-function ProjectsRoute() {
-  const { route } = useLocation()
-  return <ProjectsView onOpenRepo={openRepo(route)} />
-}
-
-function RepoRoute({ owner, name }: { owner: string; name: string }) {
-  const { route } = useLocation()
-  return <RepoDetail owner={owner} name={name} onBack={() => route('/')} />
-}
-
-function NotFoundRoute() {
-  const { path } = useLocation()
-  return <NotFound path={path} />
 }
 
 function LoadingScreen() {
@@ -103,7 +75,8 @@ function ErrorPanel({ message }: { message: string }) {
   )
 }
 
-function NotFound({ path }: { path: string }) {
+function NotFound() {
+  const { path } = useLocation()
   return (
     <div class='page-shell'>
       <div class='card p-8 max-w-md'>
