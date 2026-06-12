@@ -492,7 +492,7 @@ async function main() {
   })
   check('scenes command ran and its events relayed (run:end via events file)',
     await waitFor(async () => {
-      const replay = await collectSse('/api/runs/e2e-agent-run/events', cookie, 1200)
+      const replay = await collectWs('/api/runs/e2e-agent-run/ws', cookie, 1200)
       return replay.events.some((e) => e.type === 'run:end')
     }, 8000))
   check('agent settled the verdict from run:end (1 failing scene → failed)',
