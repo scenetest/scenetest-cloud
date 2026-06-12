@@ -37,7 +37,7 @@ tool — call it from a `run` line.
     { "name": "build", "watch": ["src/**", "*.config.*"],      "run": "pnpm build" },
     { "name": "serve", "watch": [],                            "run": "(pnpm preview --port 4173 &) && sleep 2" }
   ],
-  "scenes": "pnpm exec scenes run --base-url http://localhost:4173"
+  "scenes": "pnpm exec scenetest"
 }
 ```
 
@@ -49,20 +49,20 @@ one repo-side contract; editing it re-runs the pipeline like any other edit
 to this file. When omitted it falls back to the legacy hook,
 `bash scenetest/box-run.sh`.
 
-The scenes command runs at the repo root with:
+The box runs this command at the repo root and sets these for it:
 
 | Variable | Meaning |
 |---|---|
 | `SCENETEST_RUN_ID` | id of this batch |
-| `SCENETEST_SUBSET` | JSON array of scene ids, empty = all |
-| `SCENETEST_LOCAL_INGEST` | local HTTP ingest (same body as the cloud API) |
-| `SCENETEST_EVENTS_FILE` | append protocol events here, one JSON object per line — they are tailed and relayed live, and a `run:end` event settles the run's verdict from its summary |
+| `SCENETEST_REPORT_URL` | where the scenes CLI streams its events — already wired to the box's live relay, so `pnpm exec scenetest` reports to the dashboard with no flags |
+| `SCENETEST_SUBSET` | JSON array of scene ids this batch wants, empty = all (advisory; the CLI has no `--subset`, so a command that subsets expands this to positional scene paths) |
+| `SCENETEST_LOCAL_INGEST` | base of the local relay (same body as the cloud API), for commands that POST events themselves |
 
-So the simplest correct command is "run the CLI, tee its event log to
-`$SCENETEST_EVENTS_FILE`" — no HTTP plumbing. A non-zero exit marks the run
-failed; exit 0 with a `run:end` event reports passed/failed from the
-summary. (When the scenes CLI grows a report-URL flag, even the tee
-disappears.)
+`@scenetest/scenes` ≥ 0.15 reads `SCENETEST_REPORT_URL` (or `--report-url
+<url>`) and POSTs its protocol events there as the run executes — so the
+command is just `pnpm exec scenetest`, no HTTP plumbing of your own. A
+non-zero exit marks the run failed; otherwise the `run:end` event the CLI
+emits settles passed/failed from its summary.
 
 Per stage:
 
@@ -108,7 +108,8 @@ What stages can rely on: repo checked out at the PR's head commit (cwd =
 repo root, public repos only for now), previous stages' effects present
 (warm box) or freshly re-run, and a non-zero exit failing the box — the
 next push provisions a fresh one. Scene batches arrive separately after
-the pipeline is ready, via the top-level `scenes` command above.
+the pipeline is ready, via the top-level `scenes` command above (the box
+sets `SCENETEST_REPORT_URL` so the CLI streams results back).
 
 ## For LLMs setting up a repo
 
@@ -127,9 +128,11 @@ Do this, in order:
 4. Add a `serve` stage that starts the app on a port in the background and
    returns (the run line must exit; `(cmd &)` + a readiness sleep or
    wait-on is fine).
-5. Set top-level `scenes`: run the scenes CLI against the served port and
-   tee/append its event log (one JSON event per line) to
-   `$SCENETEST_EVENTS_FILE`.
+5. Set top-level `scenes`: run the scenes CLI (`pnpm exec scenetest`). The
+   box sets `SCENETEST_REPORT_URL`, so the CLI (`@scenetest/scenes` ≥ 0.15)
+   streams events to the dashboard automatically — no flag, no event file.
+   Point the scenes at the served app via your Playwright/scene config, not
+   a CLI flag.
 6. Do **not**: watch generated/output paths; combine unrelated concerns
    into one stage; write conditionals into `run` lines to simulate
    branching (the watch globs are the conditional); invent stages the repo
