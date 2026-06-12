@@ -66,11 +66,20 @@ async function signWebhook(body) {
 // ---------- wrangler plumbing ------------------------------------------------
 
 function d1(persistDir, args) {
-  return execFileSync(
-    WRANGLER,
-    ['d1', ...args, '--local', '--persist-to', persistDir],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  )
+  // The CLI opens the same SQLite file the dev server holds; under load
+  // (CI) that can collide as SQLITE_BUSY. Transient by nature — retry.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return execFileSync(
+        WRANGLER,
+        ['d1', ...args, '--local', '--persist-to', persistDir],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+      )
+    } catch (err) {
+      if (attempt >= 5) throw err
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300 * attempt)
+    }
+  }
 }
 
 function d1Query(persistDir, sql) {
@@ -231,9 +240,9 @@ async function main() {
     body: JSON.stringify({ owner: 'demo', name: 'added-via-api' }),
   })
   check('add-repo returns 200 even when GitHub lookup fails', added.status === 200)
-  const watchedRow = d1Query(persistDir,
-    "SELECT COUNT(*) AS n FROM watched_repo WHERE owner = 'demo' AND name = 'added-via-api'")
-  check('watched_repo row written regardless of GitHub', watchedRow[0].n === 1)
+  const repoList = await j(await fetch(BASE + '/api/admin/repos', { headers: { cookie } }))
+  check('watched repo listed regardless of GitHub',
+    repoList.repos.some((r) => r.owner === 'demo' && r.name === 'added-via-api'))
   // Casing differs from registration → still matches (NOCASE) and triggers.
   const addedHook = await j(await hook('pull_request', prPayload('demo/Added-Via-API', 2, 'addr01')))
   check('newly watched repo triggers a run (case-insensitive match)',
