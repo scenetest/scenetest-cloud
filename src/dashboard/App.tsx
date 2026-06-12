@@ -1,4 +1,14 @@
+import { useState } from 'preact/hooks'
 import { useMe, type Me } from './hooks/useMe.ts'
+import { NavBar } from './components/NavBar.tsx'
+import { Overview } from './components/Overview.tsx'
+import { ProjectsView } from './components/ProjectsView.tsx'
+import { RepoDetail } from './components/RepoDetail.tsx'
+
+type View =
+  | { name: 'overview' }
+  | { name: 'projects' }
+  | { name: 'repo'; owner: string; repoName: string }
 
 export function App() {
   const path = window.location.pathname
@@ -8,107 +18,86 @@ export function App() {
 
 function Home() {
   const me = useMe()
+
+  if (me.kind === 'loading') return <LoadingScreen />
+  if (me.kind === 'signed-out') return <SignedOut />
+  if (me.kind === 'error') return <ErrorPanel message={me.message} />
+  return <Dashboard me={me.me} />
+}
+
+function Dashboard({ me }: { me: Me }) {
+  const [view, setView] = useState<View>({ name: 'overview' })
+
+  const handleNavigate = (v: string) => {
+    if (v === 'overview') setView({ name: 'overview' })
+    else if (v === 'projects') setView({ name: 'projects' })
+  }
+
+  const handleOpenRepo = (owner: string, repoName: string) => {
+    setView({ name: 'repo', owner, repoName })
+  }
+
   return (
-    <main style={containerStyle}>
-      <Header />
-      {me.kind === 'loading' && <p>Loading…</p>}
-      {me.kind === 'signed-out' && <SignedOut />}
-      {me.kind === 'signed-in' && <SignedIn me={me.me} />}
-      {me.kind === 'error' && <ErrorPanel message={me.message} />}
-    </main>
+    <div style={{ minHeight: '100vh', background: 'var(--paper-bg)' }}>
+      <NavBar me={me} currentView={view.name} onNavigate={handleNavigate} />
+      {view.name === 'overview' && <Overview onOpenRepo={handleOpenRepo} />}
+      {view.name === 'projects' && <ProjectsView onOpenRepo={handleOpenRepo} />}
+      {view.name === 'repo' && (
+        <RepoDetail
+          owner={view.owner}
+          name={view.repoName}
+          onBack={() => setView({ name: 'overview' })}
+        />
+      )}
+    </div>
   )
 }
 
-function Header() {
+function LoadingScreen() {
   return (
-    <header style={{ marginBottom: '1.5rem' }}>
-      <h1 style={{ margin: 0, fontSize: '1.4rem' }}>scenetest-cloud</h1>
-    </header>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <span className='font-mono text-muted'>Loading…</span>
+    </div>
   )
 }
 
 function SignedOut() {
   return (
-    <section>
-      <p>You're not signed in.</p>
-      <p>
-        <a href="/auth/github/login" style={buttonLinkStyle}>
-          Sign in with GitHub
-        </a>
-      </p>
-    </section>
-  )
-}
-
-function SignedIn({ me }: { me: Me }) {
-  return (
-    <section>
-      <p>
-        Signed in as <strong>{me.github_login}</strong>.
-      </p>
-      <form method="POST" action="/auth/logout" style={{ marginTop: '1rem' }}>
-        <button type="submit">Sign out</button>
-      </form>
-    </section>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ textAlign: 'center' }}>
+        <div className='font-mono text-2xl font-medium tracking-hero text-ink' style={{ marginBottom: 8 }}>
+          scenetest <span className='cloud-tag' style={{ verticalAlign: 'middle' }}>cloud</span>
+        </div>
+        <p className='font-serif text-lg text-muted' style={{ marginBottom: 24 }}>Sign in to view your CI dashboard.</p>
+        <a href='/auth/github/login' className='btn btn-primary btn-lg'>Sign in with GitHub</a>
+      </div>
+    </div>
   )
 }
 
 function ErrorPanel({ message }: { message: string }) {
   return (
-    <section role="alert" style={errorStyle}>
-      <h2 style={{ marginTop: 0 }}>Something went wrong</h2>
-      <p>The dashboard couldn't load. Try refreshing.</p>
-      <details>
-        <summary>Details</summary>
-        <pre style={preStyle}>{message}</pre>
-      </details>
-    </section>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className='card' style={{ padding: '2rem', maxWidth: '28rem' }}>
+        <h2 className='font-mono text-xl font-medium text-fail' style={{ marginTop: 0 }}>Something went wrong</h2>
+        <p className='font-serif text-base text-muted'>The dashboard couldn't load. Try refreshing.</p>
+        <details>
+          <summary className='font-mono text-sm text-muted cursor-pointer'>Details</summary>
+          <pre className='font-mono text-xs text-muted' style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>{message}</pre>
+        </details>
+      </div>
+    </div>
   )
 }
 
 function NotFound({ path }: { path: string }) {
   return (
-    <main style={containerStyle}>
-      <Header />
-      <section>
-        <h2 style={{ marginTop: 0 }}>404 — page not found</h2>
-        <p>
-          No route matches <code>{path}</code>.
-        </p>
-        <p>
-          <a href="/">← Back to dashboard</a>
-        </p>
-      </section>
-    </main>
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div className='card' style={{ padding: '2rem', maxWidth: '28rem' }}>
+        <h2 className='font-mono text-xl font-medium text-ink' style={{ marginTop: 0 }}>404 — page not found</h2>
+        <p className='font-serif text-base text-muted'>No route matches <code>{path}</code>.</p>
+        <a href='/' className='font-mono text-sm text-accent'>← Back to dashboard</a>
+      </div>
+    </div>
   )
 }
-
-const containerStyle = {
-  maxWidth: '40rem',
-  margin: '3rem auto',
-  padding: '0 1.25rem',
-  fontFamily:
-    'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-  lineHeight: 1.5,
-} as const
-
-const buttonLinkStyle = {
-  display: 'inline-block',
-  padding: '0.5rem 0.9rem',
-  border: '1px solid #333',
-  borderRadius: '6px',
-  textDecoration: 'none',
-  color: 'inherit',
-} as const
-
-const errorStyle = {
-  padding: '1rem',
-  border: '1px solid #c33',
-  borderRadius: '6px',
-  background: '#fff5f5',
-} as const
-
-const preStyle = {
-  whiteSpace: 'pre-wrap',
-  fontSize: '0.85rem',
-} as const

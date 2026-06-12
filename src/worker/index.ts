@@ -22,6 +22,7 @@ import {
   listUsers,
 } from './routes/admin.ts'
 import { withSession } from './auth/session.ts'
+import { getOverview, getRepoPrs } from './routes/cloud.ts'
 
 // Auth is declared per route: withSession() for cookie-authed routes (json
 // 401 or login redirect on failure); everything else is either public by
@@ -40,6 +41,9 @@ const router = new Router()
   .get('/api/admin/repos', withSession(listRepos))
   .post('/api/admin/repos', withSession(addRepo))
   .delete('/api/admin/repos/:owner/:name', withSession(deleteRepo))
+  // Cloud dashboard data
+  .get('/api/cloud/overview', withSession(getOverview))
+  .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))
   // Run dashboard: worker shell + @scenetest/dashboard widget. The widget's
   // transport talks to the /api/runs/:runId endpoints below. Both slash
   // variants serve the page — asset URLs are absolute, so it doesn't matter.
