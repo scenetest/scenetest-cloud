@@ -1,4 +1,5 @@
 import type { Me } from '../hooks/useMe.ts'
+import { Button } from './Button.tsx'
 
 interface Props {
   me: Me
@@ -8,33 +9,27 @@ interface Props {
 
 export function NavBar({ me, currentView, onNavigate }: Props) {
   return (
-    <header className='nav-bar'>
-      <span
-        onClick={() => onNavigate('overview')}
-        className='cursor-pointer'
-        style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-      >
-        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: '1rem', letterSpacing: '-0.02em', color: 'var(--ink-900)' }}>
-          scenetest
-        </span>
+    <header class='nav-bar'>
+      <span onClick={() => onNavigate('overview')} class='cursor-pointer font-mono font-semibold text-base tracking-hero text-ink'>
+        scenetest
       </span>
-      <span className='cloud-tag'>cloud</span>
-      <nav className='flex gap-6' style={{ marginLeft: 8 }}>
+      <span class='cloud-tag'>cloud</span>
+      <nav class='flex gap-6 ml-2'>
         {(['overview', 'projects'] as const).map((view) => (
           <a
             key={view}
             href='#'
             onClick={(e) => { e.preventDefault(); onNavigate(view) }}
-            className={currentView === view ? 'active' : ''}
+            class={currentView === view ? 'active' : ''}
           >
             {view === 'overview' ? 'Overview' : 'Projects'}
           </a>
         ))}
       </nav>
-      <div className='flex items-center gap-4 ml-auto'>
-        <span className='font-mono text-sm text-muted'>{me.github_login}</span>
+      <div class='flex items-center gap-4 ml-auto'>
+        <span class='font-mono text-sm text-muted'>{me.github_login}</span>
         <form method='POST' action='/auth/logout' style={{ margin: 0 }}>
-          <button type='submit' className='btn btn-sm btn-secondary'>Sign out</button>
+          <Button variant='secondary' size='sm' type='submit'>Sign out</Button>
         </form>
       </div>
     </header>
