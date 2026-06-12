@@ -94,12 +94,12 @@ Repos without a pipeline file get the coarse default, which runs
 
 Scene batches run the pipeline file's top-level `scenes` command (default:
 the legacy `bash scenetest/box-run.sh` hook), delivered to the agent with
-every update. It receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`,
-`SCENETEST_LOCAL_INGEST` (the agent's local endpoint, same body as the
-cloud ingest), and `SCENETEST_EVENTS_FILE` — protocol events appended
-there are tailed and relayed live, and a `run:end` event settles the
-verdict from its summary. A non-zero exit marks the run failed, so no
-batch is left dangling.
+every update. It receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET` (advisory;
+the CLI has no `--subset`), `SCENETEST_LOCAL_INGEST` (base of the agent's
+local relay), and `SCENETEST_REPORT_URL` — `@scenetest/scenes` ≥ 0.15 POSTs
+its event batches there (`{events:[{seq,payload}]}`), the agent relays them
+live, and a `run:end` event settles the verdict from its summary. A
+non-zero exit marks the run failed, so no batch is left dangling.
 
 ### run.env variables
 

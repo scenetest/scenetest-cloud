@@ -414,10 +414,11 @@ async function main() {
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
       stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
-      // The scenes command from pipeline.json rides the update. This one
-      // writes protocol events to the events file; the agent must tail-relay
-      // them and settle the verdict from run:end (1 failed → run failed).
-      scenes: `printf '%s\\n%s\\n' '{"type":"run:start","timestamp":1,"sceneCount":1}' '{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}' >> "$SCENETEST_EVENTS_FILE"`,
+      // The scenes command from pipeline.json rides the update. This stands
+      // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
+      // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
+      // run:end the agent settles the verdict from (1 failed → run failed).
+      scenes: `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'`,
     }),
   })
   check('debug box-update queued (no box connected yet)',
@@ -481,8 +482,8 @@ async function main() {
     agentReplay.events.some((e) => e.type === 'run:start'))
 
   // Dispatch a batch: the agent runs the scenes command from the update,
-  // tails $SCENETEST_EVENTS_FILE, relays the events, and settles the verdict
-  // from run:end's summary.
+  // which POSTs its event batch to $SCENETEST_REPORT_URL (the agent's local
+  // ingest); the agent relays the events and settles the verdict from run:end.
   await fetch(`${BASE}/api/debug/box-dispatch`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -490,7 +491,7 @@ async function main() {
       run: { runId: 'e2e-agent-run', boxId: 'e2e-box-2', repo: 'demo/watched', prNumber: 10, headSha: 'agbox1', subset: null },
     }),
   })
-  check('scenes command ran and its events relayed (run:end via events file)',
+  check('scenes command ran and its events relayed (run:end via report-url)',
     await waitFor(async () => {
       const replay = await collectWs('/api/runs/e2e-agent-run/ws', cookie, 1200)
       return replay.events.some((e) => e.type === 'run:end')

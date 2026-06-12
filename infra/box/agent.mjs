@@ -11,13 +11,13 @@
 //   2. On {kind:'update'}: checkout the sha, run the pipeline stages, report
 //      the realized vector via /ready (failure retires the box). The update
 //      also carries the pipeline's scenes command.
-//   3. On {kind:'dispatch'}: run the scenes command with the batch's env.
-//      Events land two ways: POSTed to the local ingest, or appended to
-//      $SCENETEST_EVENTS_FILE (protocol events, one JSON per line), which is
-//      tailed and relayed live; a run:end event settles the verdict, and a
+//   3. On {kind:'dispatch'}: run the scenes command with the batch's env
+//      (incl. SCENETEST_REPORT_URL → the local ingest). The scenes CLI POSTs
+//      its event batches there; a run:end event settles the verdict, and a
 //      non-zero exit is the failed backstop.
 //   4. Relay events: the local HTTP ingest on 127.0.0.1:4999 accepts the
-//      same body as the cloud ingest (POST /events/:runId); envelopes go up
+//      scenes CLI's report body (POST /events/:runId, the same
+//      {events:[{seq,payload}]} shape as the cloud ingest); envelopes go up
 //      the socket and into runs/<runId>.jsonl (debug trail + future R2
 //      artifact).
 //   5. On {kind:'command'}: append to runs/<runId>.commands.jsonl where the
@@ -30,7 +30,7 @@
 // SCENETEST_NO_POWEROFF=1 logs instead of powering off.
 
 import { spawn, execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 
@@ -57,6 +57,7 @@ const log = (...args) => console.log(new Date().toISOString(), ...args)
 let ws = null
 let currentScenes = null // from the latest pipeline update
 const seqByRun = new Map()
+const runEndByRun = new Map() // runId -> run:end payload (settles the verdict)
 
 // ---------- checkout + project setup -----------------------------------------
 
@@ -124,15 +125,19 @@ async function applyUpdate(update, repoDir) {
 
 // ---------- event relay -------------------------------------------------------
 
-// Assign sequence numbers (preserving any the caller provided) and relay.
-// Shared by the local HTTP ingest and the events-file tail so the two entry
-// points can't drift on numbering.
+// Assign sequence numbers (preserving any the caller provided), note any
+// run:end (it settles the batch's verdict), and relay. The only event entry
+// point now — the scenes CLI POSTs its batches here via --report-url.
 function ingestEvents(runId, rawEvents) {
   let seq = seqByRun.get(runId) ?? 0
   const numbered = rawEvents.map((e) =>
     typeof e.seq === 'number' ? ((seq = Math.max(seq, e.seq)), e) : { seq: ++seq, payload: e.payload ?? e },
   )
   seqByRun.set(runId, seq)
+  for (const e of numbered) {
+    const p = e.payload ?? e
+    if (p && p.type === 'run:end') runEndByRun.set(runId, p)
+  }
   return relayEvents(runId, numbered)
 }
 
@@ -191,15 +196,14 @@ async function completeRun(runId, status) {
 }
 
 // The scenes command comes from the pipeline file via the latest update
-// (default: the legacy box-run.sh hook). Its event side-channel: anything
-// the command appends to $SCENETEST_EVENTS_FILE (protocol events, one JSON
-// per line — e.g. tee the scenes CLI's jsonl there) is tailed and relayed
-// live; a run:end event also settles the run's verdict, so the command
-// doesn't have to call /complete itself.
+// (default: the legacy box-run.sh hook). The scenes CLI streams its events
+// to SCENETEST_REPORT_URL (@scenetest/scenes >=0.15 --report-url), which
+// points at this agent's local ingest; a run:end event settles the
+// verdict, so the command never has to call /complete itself.
 function runBatch(run, repoDir) {
   const command = currentScenes ?? 'bash scenetest/box-run.sh'
-  const eventsFile = join(WORK_DIR, `${run.runId}.events.jsonl`)
   log(`running batch ${run.runId} (subset: ${run.subset ? run.subset.length : 'all'}): ${command}`)
+  const localIngest = `http://127.0.0.1:${LOCAL_PORT}`
 
   const child = spawn('bash', ['-c', command], {
     cwd: repoDir ?? WORK_DIR,
@@ -207,53 +211,27 @@ function runBatch(run, repoDir) {
     env: {
       ...process.env,
       SCENETEST_RUN_ID: run.runId,
+      // Carries dispatch intent (run all / a subset of scene ids). The CLI
+      // has no --subset flag; a scenes command that wants subsetting expands
+      // this to positional scene paths itself.
       SCENETEST_SUBSET: run.subset ? JSON.stringify(run.subset) : '',
-      SCENETEST_LOCAL_INGEST: `http://127.0.0.1:${LOCAL_PORT}`,
-      SCENETEST_EVENTS_FILE: eventsFile,
+      SCENETEST_LOCAL_INGEST: localIngest,
+      // Where the scenes CLI POSTs its event batches; the box wires it so a
+      // bare `scenetest` reports to the dashboard.
+      SCENETEST_REPORT_URL: `${localIngest}/events/${run.runId}`,
     },
   })
 
-  // Tail the events file while the batch runs (and one final sweep after
-  // exit, since the command may write it in one go at the end).
-  let offset = 0
-  let sawEnd = null
-  const sweep = () => {
-    if (!existsSync(eventsFile)) return
-    // Cheap stat guard: most 250ms ticks see no growth, so don't re-read the
-    // file. (Byte size vs char offset can differ on multibyte content — the
-    // guard only ever errs toward an extra read, never a missed one.)
-    if (statSync(eventsFile).size <= offset) return
-    const text = readFileSync(eventsFile, 'utf8')
-    if (text.length <= offset) return
-    const chunk = text.slice(offset)
-    const lastNl = chunk.lastIndexOf('\n')
-    if (lastNl < 0) return // partial line; next sweep
-    offset += lastNl + 1
-    const events = []
-    for (const line of chunk.slice(0, lastNl).split('\n')) {
-      if (!line.trim()) continue
-      try {
-        const payload = JSON.parse(line)
-        events.push({ payload })
-        if (payload?.type === 'run:end') sawEnd = payload
-      } catch {
-        // not JSON; skip the line rather than poison the batch
-      }
-    }
-    if (events.length > 0) ingestEvents(run.runId, events)
-  }
-  const tail = setInterval(sweep, 250)
-
   child.on('exit', (code) => {
-    clearInterval(tail)
-    sweep()
     log(`batch ${run.runId} exited ${code}`)
+    const end = runEndByRun.get(run.runId)
+    runEndByRun.delete(run.runId)
     if (code !== 0) {
       // Backstop: no batch is left dangling.
       void completeRun(run.runId, 'failed')
-    } else if (sawEnd) {
+    } else if (end) {
       // The verdict comes from the run's own summary when it reported one.
-      const failed = sawEnd.summary?.failed ?? 0
+      const failed = end.summary?.failed ?? 0
       void completeRun(run.runId, failed > 0 ? 'failed' : 'passed')
     }
     // Exit 0 with no run:end: the command reported through the ingest /

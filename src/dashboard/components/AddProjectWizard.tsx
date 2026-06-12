@@ -231,8 +231,8 @@ Build it like this:
 2. db — watch the database dir (supabase/, prisma/, migrations/); run the reset+seed command (supabase: "supabase start && supabase db reset").
 3. build — watch source + config (src/**, *.config.*, tsconfig*.json); run the build (+ typegen if any).
 4. serve — watch []; start the app on a port in the background and exit (e.g. "(pnpm preview --port 4173 &) && sleep 2").
-5. scenes (top-level field, NOT a stage) — run the scenes CLI against the served port and append its event log (one JSON protocol event per line) to "$SCENETEST_EVENTS_FILE"; those events stream to the dashboard live and the run:end event settles the verdict. The command also receives SCENETEST_RUN_ID and SCENETEST_SUBSET (JSON array, empty = all). Non-zero exit marks the run failed.
+5. scenes (top-level field, NOT a stage) — run the scenes CLI: "pnpm exec scenetest" (binary is scenetest; there is no "run" subcommand). The box sets SCENETEST_REPORT_URL, so @scenetest/scenes >=0.15 streams its events to the dashboard automatically — no --report-url flag and no event file needed. Point scenes at the served app via your Playwright/scene config, not a CLI flag. Non-zero exit marks the run failed; otherwise the run:end event settles the verdict.
 
-Rules: watch inputs never outputs (lockfile not node_modules, src/** not dist/**); stage names [a-z0-9_-]; when unsure widen the glob; strict JSON, version must be the number 1.
+Rules: watch inputs never outputs (lockfile not node_modules, src/** not dist/**); stage names [a-z0-9_-]; when unsure widen the glob; strict JSON, version must be the number 1. There is no --subset flag — run a subset with positional scene paths.
 
 Sanity-check before finishing: a lockfile change should re-run everything; a src/ change only build+serve; a docs change nothing.`

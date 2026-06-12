@@ -55,10 +55,10 @@ of the contract —
   reset + seed the database, build, serve), each with watch globs so only
   invalidated work re-runs;
 - **`scenes`** (top-level): how one batch of scenes executes against the
-  served app. Its command receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`,
-  and `SCENETEST_EVENTS_FILE` — append the CLI's protocol events there
-  (one JSON per line) and they're relayed to the dashboard live, with the
-  verdict settled from `run:end`. No HTTP plumbing needed.
+  served app — usually just `pnpm exec scenetest`. The box sets
+  `SCENETEST_REPORT_URL`, so `@scenetest/scenes` ≥ 0.15 streams its events
+  to the dashboard live (and the `run:end` event settles the verdict). No
+  HTTP plumbing of your own.
 
 Full spec, rules of thumb, and a step-by-step checklist written for LLMs
 in [pipeline.md](./pipeline.md) — hand that page to your assistant with
