@@ -1,13 +1,10 @@
 import { useState } from 'preact/hooks'
 import { useOverview } from '../hooks/useOverview.ts'
+import { paths } from '../lib/paths.ts'
 import { Button } from './Button.tsx'
 import { AddProjectWizard } from './AddProjectWizard.tsx'
 
-interface Props {
-  onOpenRepo: (owner: string, name: string) => void
-}
-
-export function ProjectsView({ onOpenRepo }: Props) {
+export function ProjectsView() {
   const q = useOverview()
   const [showAdd, setShowAdd] = useState(false)
 
@@ -44,7 +41,7 @@ export function ProjectsView({ onOpenRepo }: Props) {
           const passedRuns = repoPrs.filter((pr) => pr.latest_status === 'passed').length
           const passRate = repoPrs.length > 0 ? `${Math.round((passedRuns / repoPrs.length) * 100)}%` : '—'
           return (
-            <div key={key} onClick={() => onOpenRepo(repo.owner, repo.name)} class='list-row'>
+            <a key={key} href={paths.repo(repo.owner, repo.name)} class='list-row no-underline'>
               <span class='w-32 inline-flex items-center gap-1'>
                 {repoPrs.length === 0 && <span class='font-mono text-3xs text-faint'>no open PRs</span>}
                 {repoPrs.map((pr) => (
@@ -64,12 +61,12 @@ export function ProjectsView({ onOpenRepo }: Props) {
               <div class='flex-1 min-w-0 font-mono text-md text-ink'>{repo.owner}/{repo.name}</div>
               <span class='w-18 font-mono text-sm text-muted text-right'>{passRate}</span>
               <span class='w-5 font-mono text-faint text-right'>→</span>
-            </div>
+            </a>
           )
         })}
       </div>
 
-      {showAdd && <AddProjectWizard onClose={() => setShowAdd(false)} onOpenRepo={onOpenRepo} />}
+      {showAdd && <AddProjectWizard onClose={() => setShowAdd(false)} />}
     </div>
   )
 }

@@ -1,4 +1,6 @@
+import { useLocation } from 'preact-iso'
 import { useRepo } from '../hooks/useRepo.ts'
+import { paths } from '../lib/paths.ts'
 import { StatusPip } from './StatusPip.tsx'
 import { Badge } from './Badge.tsx'
 import { Button } from './Button.tsx'
@@ -6,16 +8,17 @@ import { Button } from './Button.tsx'
 interface Props {
   owner: string
   name: string
-  onBack: () => void
 }
 
-export function RepoDetail({ owner, name, onBack }: Props) {
+export function RepoDetail({ owner, name }: Props) {
+  const { route } = useLocation()
   const q = useRepo(owner, name)
+  const back = () => route(paths.overview())
 
   if (q.isPending) return <div class='page-shell'><p class='font-mono text-muted'>Loading…</p></div>
   if (q.isError) return (
     <div class='page-shell'>
-      <button onClick={onBack} class='btn-back'>← Overview</button>
+      <button onClick={back} class='btn-back'>← Overview</button>
       <p class='font-mono text-fail'>Failed to load repo.</p>
     </div>
   )
@@ -24,7 +27,7 @@ export function RepoDetail({ owner, name, onBack }: Props) {
 
   return (
     <div class='page-shell'>
-      <button onClick={onBack} class='btn-back'>← Overview</button>
+      <button onClick={back} class='btn-back'>← Overview</button>
       <h1 class='font-mono text-2xl font-medium tracking-hero text-ink m-0 mb-1'>{owner}/{name}</h1>
       <p class='font-serif text-lg text-muted mt-0 mb-8'>Pull requests and run history.</p>
 

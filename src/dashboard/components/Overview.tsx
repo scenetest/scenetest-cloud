@@ -1,12 +1,9 @@
 import { useOverview } from '../hooks/useOverview.ts'
+import { paths } from '../lib/paths.ts'
 import { StatusPip } from './StatusPip.tsx'
 import { Badge } from './Badge.tsx'
 
-interface Props {
-  onOpenRepo: (owner: string, name: string) => void
-}
-
-export function Overview({ onOpenRepo }: Props) {
+export function Overview() {
   const q = useOverview()
 
   if (q.isPending) return <div class='page-shell'><p class='font-mono text-muted'>Loading…</p></div>
@@ -46,7 +43,7 @@ export function Overview({ onOpenRepo }: Props) {
             const hasRunning  = repoPrs.some((pr) => pr.latest_status === 'running')
             const status = hasFailures ? 'fail' : hasRunning ? 'running' : 'pass'
             return (
-              <div key={key} onClick={() => onOpenRepo(repo.owner, repo.name)} class='card-2 card-interactive p-5'>
+              <a key={key} href={paths.repo(repo.owner, repo.name)} class='card-2 card-interactive p-5 block no-underline'>
                 <div class='flex items-center justify-between mb-3'>
                   <strong class='font-mono text-lg font-medium text-ink'>{repo.name}</strong>
                   <StatusPip status={status} />
@@ -55,7 +52,7 @@ export function Overview({ onOpenRepo }: Props) {
                 <div class='flex items-center gap-4 font-mono text-2xs text-faint mt-3'>
                   <span class='ml-auto'>{repoPrs.length} open PR{repoPrs.length !== 1 ? 's' : ''}</span>
                 </div>
-              </div>
+              </a>
             )
           })}
         </div>
@@ -71,7 +68,7 @@ export function Overview({ onOpenRepo }: Props) {
             const owner = pr.repo.slice(0, slash)
             const name  = pr.repo.slice(slash + 1)
             return (
-              <div key={`${pr.repo}#${pr.pr_number}`} onClick={() => onOpenRepo(owner, name)} class='list-row'>
+              <a key={`${pr.repo}#${pr.pr_number}`} href={paths.repo(owner, name)} class='list-row no-underline'>
                 <StatusPip status={pr.latest_status ?? 'queued'} />
                 <div class='flex-1 min-w-0'>
                   <div class='font-serif text-lg text-ink'>{pr.repo} #{pr.pr_number}</div>
@@ -82,7 +79,7 @@ export function Overview({ onOpenRepo }: Props) {
                 <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
                 <Badge tone={(pr.fail_count ?? 0) > 0 ? 'fail' : 'neutral'}>✗ {pr.fail_count ?? 0}</Badge>
                 <span class='text-faint font-mono'>→</span>
-              </div>
+              </a>
             )
           })}
         </div>
