@@ -48,7 +48,7 @@ export interface RecentRun {
 
 export interface RepoDetail {
   repo: Repo
-  open_prs: PrSummary[]
+  prs: PrSummary[]
   recent_runs: RecentRun[]
 }
 

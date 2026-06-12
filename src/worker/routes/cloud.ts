@@ -104,28 +104,38 @@ export const getRepoPrs: AuthedHandler = async (_req, env, _ctx, params) => {
   const name = params.name!
   const repo = `${owner}/${name}`
 
-  const [repoRow, openPrsResult, recentRunsResult] = await Promise.all([
+  // The PR list always shows every open PR; when there are fewer than this it
+  // backfills with the most-recently-updated closed ones, so the page never
+  // looks empty on a repo between PRs.
+  const MIN_PRS = 4
+
+  // Shared aggregate over a PR's runs (count, pass/fail, latest status). Two
+  // calls — open and closed — keep "all open PRs" uncapped while bounding the
+  // closed backfill.
+  const prQuery = (where: string, order: string) => `
+    SELECT
+      p.repo, p.pr_number, p.head_sha, p.base_ref, p.state, p.title, p.updated_at,
+      COUNT(r.id) as run_count,
+      SUM(CASE WHEN r.status = 'passed' THEN 1 ELSE 0 END) as pass_count,
+      SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) as fail_count,
+      (
+        SELECT r2.status FROM runs r2
+        WHERE r2.repo = p.repo AND r2.pr_number = p.pr_number
+        ORDER BY r2.started_at DESC LIMIT 1
+      ) as latest_status
+    FROM prs p
+    LEFT JOIN runs r ON r.repo = p.repo AND r.pr_number = p.pr_number
+    WHERE p.repo = ?1 AND ${where}
+    GROUP BY p.pr_number
+    ORDER BY ${order}`
+
+  const [repoRow, openPrsResult, closedPrsResult, recentRunsResult] = await Promise.all([
     env.DB.prepare(
       'SELECT owner, name, github_repo_id, added_at FROM watched_repo WHERE owner = ?1 AND name = ?2',
     ).bind(owner, name).first<{ owner: string; name: string; github_repo_id: number | null; added_at: number }>(),
 
-    env.DB.prepare(`
-      SELECT
-        p.repo, p.pr_number, p.head_sha, p.base_ref, p.state, p.title, p.updated_at,
-        COUNT(r.id) as run_count,
-        SUM(CASE WHEN r.status = 'passed' THEN 1 ELSE 0 END) as pass_count,
-        SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) as fail_count,
-        (
-          SELECT r2.status FROM runs r2
-          WHERE r2.repo = p.repo AND r2.pr_number = p.pr_number
-          ORDER BY r2.started_at DESC LIMIT 1
-        ) as latest_status
-      FROM prs p
-      LEFT JOIN runs r ON r.repo = p.repo AND r.pr_number = p.pr_number
-      WHERE p.repo = ?1 AND p.state = 'open'
-      GROUP BY p.pr_number
-      ORDER BY p.updated_at DESC
-    `).bind(repo).all(),
+    env.DB.prepare(prQuery("p.state = 'open'", 'p.updated_at DESC')).bind(repo).all(),
+    env.DB.prepare(prQuery("p.state != 'open'", `p.updated_at DESC LIMIT ${MIN_PRS}`)).bind(repo).all(),
 
     env.DB.prepare(`
       SELECT id, pr_number, head_sha, status, started_at, ended_at
@@ -138,9 +148,13 @@ export const getRepoPrs: AuthedHandler = async (_req, env, _ctx, params) => {
 
   if (!repoRow) return Response.json({ error: 'repo_not_found' }, { status: 404 })
 
+  const open = openPrsResult.results ?? []
+  const closed = closedPrsResult.results ?? []
+  const prs = open.length >= MIN_PRS ? open : [...open, ...closed.slice(0, MIN_PRS - open.length)]
+
   return Response.json({
     repo: repoRow,
-    open_prs: openPrsResult.results ?? [],
+    prs,
     recent_runs: recentRunsResult.results ?? [],
   })
 }

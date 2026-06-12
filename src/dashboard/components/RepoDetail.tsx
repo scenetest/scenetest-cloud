@@ -41,13 +41,14 @@ export function RepoDetail({ owner, name }: Props) {
       <h1 class='font-mono text-2xl font-medium tracking-hero text-ink m-0 mb-1'>{owner}/{name}</h1>
       <p class='font-serif text-lg text-muted mt-0 mb-8'>Pull requests and run history.</p>
 
-      <h2 class='font-mono text-xl font-medium text-ink mb-3'>Open pull requests</h2>
-      {d.open_prs.length === 0 ? (
-        <p class='font-serif text-base text-muted mb-12'>No open pull requests.</p>
+      <h2 class='font-mono text-xl font-medium text-ink mb-3'>Pull requests</h2>
+      {d.prs.length === 0 ? (
+        <p class='font-serif text-base text-muted mb-12'>No pull requests yet.</p>
       ) : (
         <div class='list-panel mb-12'>
-          {d.open_prs.map((pr) => {
+          {d.prs.map((pr) => {
             const selected = pr.pr_number === selectedPr
+            const closed = pr.state !== 'open'
             return (
               <div
                 key={pr.pr_number}
@@ -58,12 +59,13 @@ export function RepoDetail({ owner, name }: Props) {
                 style={selected ? { boxShadow: 'inset 3px 0 0 var(--color-indigo-500)', background: 'var(--color-card)' } : undefined}
               >
                 <StatusPip status={pr.latest_status ?? 'queued'} />
-                <div class='flex-1 min-w-0'>
+                <div class={`flex-1 min-w-0 ${closed ? 'opacity-60' : ''}`}>
                   <div class='font-serif text-lg text-ink truncate'>{pr.title ?? `PR #${pr.pr_number}`}</div>
                   <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(pr.updated_at)}>
                     #{pr.pr_number} · {pr.base_ref} · {pr.run_count} run{pr.run_count !== 1 ? 's' : ''} · updated {relativeTime(pr.updated_at)}
                   </div>
                 </div>
+                {closed && <Badge tone='neutral'>closed</Badge>}
                 <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
                 <Badge tone={(pr.fail_count ?? 0) > 0 ? 'fail' : 'neutral'}>✗ {pr.fail_count ?? 0}</Badge>
               </div>
