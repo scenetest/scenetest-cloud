@@ -101,37 +101,6 @@ async function waitForServer(child, maxMs = 30_000) {
   throw new Error('wrangler dev did not become ready in time')
 }
 
-// Read an SSE stream, collecting `data:` payloads until the server closes it
-// (terminal run) or maxMs passes. Returns parsed events.
-async function collectSse(path, cookie, maxMs = 8000) {
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), maxMs)
-  const events = []
-  try {
-    const res = await fetch(BASE + path, { headers: { cookie }, signal: ctrl.signal })
-    if (!res.ok) return { status: res.status, events }
-    const reader = res.body.getReader()
-    const dec = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
-      let nl
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl)
-        buf = buf.slice(nl + 1)
-        if (line.startsWith('data: ')) events.push(JSON.parse(line.slice(6)))
-      }
-    }
-    return { status: res.status, events }
-  } catch {
-    return { status: 0, events } // aborted on timeout; return what arrived
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
 // Extract the raw session token value from a Cookie header string.
 // The viewer WS route accepts ?session=<token> as a fallback for clients
 // (like Node's global WebSocket) that cannot set request headers.
