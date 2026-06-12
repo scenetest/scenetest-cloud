@@ -92,7 +92,7 @@ export const getRepoPrs: AuthedHandler = async (_req, env, _ctx, params) => {
       SELECT id, pr_number, head_sha, status, started_at, ended_at
       FROM runs
       WHERE repo = ?1
-      ORDER BY started_at DESC
+      ORDER BY COALESCE(started_at, ended_at) DESC
       LIMIT 20
     `).bind(repo).all(),
   ])
