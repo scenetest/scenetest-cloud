@@ -17,6 +17,7 @@ import {
   addRepo,
   addUser,
   deleteRepo,
+  repoStatus,
   deleteUser,
   listRepos,
   listUsers,
@@ -41,6 +42,7 @@ const router = new Router()
   .get('/api/admin/repos', withSession(listRepos))
   .post('/api/admin/repos', withSession(addRepo))
   .delete('/api/admin/repos/:owner/:name', withSession(deleteRepo))
+  .get('/api/admin/repos/:owner/:name/status', withSession(repoStatus))
   // Cloud dashboard data
   .get('/api/cloud/overview', withSession(getOverview))
   .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))

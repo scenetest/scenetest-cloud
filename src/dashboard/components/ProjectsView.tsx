@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks'
 import { useOverview } from '../hooks/useOverview.ts'
 import { Button } from './Button.tsx'
+import { AddProjectWizard } from './AddProjectWizard.tsx'
 
 interface Props {
   onOpenRepo: (owner: string, name: string) => void
@@ -68,37 +69,7 @@ export function ProjectsView({ onOpenRepo }: Props) {
         })}
       </div>
 
-      {showAdd && <AddRepoModal onClose={() => setShowAdd(false)} />}
-    </div>
-  )
-}
-
-function AddRepoModal({ onClose }: { onClose: () => void }) {
-  return (
-    <div onClick={onClose} class='modal-overlay'>
-      <div onClick={(e) => e.stopPropagation()} class='modal-box'>
-        <div class='flex items-center gap-3 px-6 py-5 border-b border-border'>
-          <div class='flex-1'>
-            <div class='font-mono text-lg font-medium text-ink'>Add a repository</div>
-            {/* STUB: needs GitHub App repo picker — see /api/admin/repos */}
-            <div class='font-serif text-base text-muted mt-1'>
-              Link a GitHub repository to start running your scene specs on every push.
-            </div>
-          </div>
-          <button onClick={onClose} class='bg-transparent border-0 text-faint cursor-pointer font-mono text-lg leading-none'>✕</button>
-        </div>
-        <div class='p-6'>
-          <p class='font-serif text-base text-muted m-0'>
-            Adding repositories via UI is coming soon. For now, use the admin API:
-          </p>
-          <pre class='font-mono text-sm bg-code rounded-sm mt-3 p-3.5 m-0'>
-            {`POST /api/admin/repos\n{ "owner": "acme", "name": "my-app" }`}
-          </pre>
-        </div>
-        <div class='flex justify-end px-6 py-4 border-t border-border'>
-          <Button variant='secondary' size='md' onClick={onClose}>Close</Button>
-        </div>
-      </div>
+      {showAdd && <AddProjectWizard onClose={() => setShowAdd(false)} onOpenRepo={onOpenRepo} />}
     </div>
   )
 }

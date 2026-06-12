@@ -100,3 +100,71 @@ export const deleteRepo: AuthedHandler = async (_req, env, _ctx, params) => {
     .run()
   return Response.json({ ok: true })
 }
+
+// GET /api/admin/repos/:owner/:name/status — the add-a-project wizard's
+// live checklist (docs/add-a-project.md). Each phase reports from evidence
+// the system already has:
+//   registered — the watched_repo row exists
+//   webhook    — any delivery recorded for this repo (GitHub's creation
+//                ping counts, which is exactly why pings record their repo)
+//   pipeline   — 'active' when the latest box realized real stages,
+//                'absent' when it realized only the coarse default,
+//                else a direct GitHub contents probe ('present'/'absent'),
+//                'unknown' when GitHub can't be reached
+//   first_run  — the most recent run, if any
+export const repoStatus: AuthedHandler = async (_req, env, _ctx, params) => {
+  const owner = params.owner!
+  const name = params.name!
+  const repo = `${owner}/${name}`
+
+  const [registered, delivery, box, run] = await Promise.all([
+    env.DB.prepare(
+      'SELECT 1 FROM watched_repo WHERE owner = ?1 COLLATE NOCASE AND name = ?2 COLLATE NOCASE',
+    ).bind(owner, name).first(),
+    env.DB.prepare(
+      `SELECT event, received_at FROM webhook_deliveries
+        WHERE repo = ?1 COLLATE NOCASE ORDER BY received_at DESC LIMIT 1`,
+    ).bind(repo).first<{ event: string; received_at: number }>(),
+    env.DB.prepare(
+      `SELECT realized_stages FROM boxes WHERE repo = ?1 COLLATE NOCASE
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ).bind(repo).first<{ realized_stages: string | null }>(),
+    env.DB.prepare(
+      `SELECT id, status, started_at FROM runs WHERE repo = ?1 COLLATE NOCASE
+        ORDER BY rowid DESC LIMIT 1`,
+    ).bind(repo).first<{ id: string; status: string; started_at: number | null }>(),
+  ])
+
+  let pipeline: { state: 'active' | 'present' | 'absent' | 'unknown'; source: 'box' | 'github' }
+  const realizedKeys = box?.realized_stages ? Object.keys(JSON.parse(box.realized_stages)) : null
+  if (realizedKeys && realizedKeys.length > 0) {
+    // A box has run the pipeline: coarse default realizes only 'setup' (or
+    // the '*coarse*' pseudo-stage); anything else means a real pipeline file.
+    const coarse = realizedKeys.every((k) => k === 'setup' || k === '*coarse*')
+    pipeline = { state: coarse ? 'absent' : 'active', source: 'box' }
+  } else {
+    pipeline = { state: 'unknown', source: 'github' }
+    try {
+      const headers: Record<string, string> = env.GITHUB_API_TOKEN
+        ? { ...GH_API_HEADERS, authorization: `Bearer ${env.GITHUB_API_TOKEN}` }
+        : { ...GH_API_HEADERS }
+      const resp = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/scenetest/pipeline.json`,
+        { headers },
+      )
+      if (resp.ok) pipeline = { state: 'present', source: 'github' }
+      else if (resp.status === 404) pipeline = { state: 'absent', source: 'github' }
+    } catch {
+      // network/rate-limit: stay 'unknown'
+    }
+  }
+
+  return Response.json({
+    registered: registered !== null,
+    webhook: delivery
+      ? { seen: true, last_event: delivery.event, last_at: delivery.received_at }
+      : { seen: false },
+    pipeline,
+    first_run: run ?? null,
+  })
+}
