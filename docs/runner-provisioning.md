@@ -13,12 +13,14 @@ Background in [architecture.md](./architecture.md); setup steps in
    signature, drops duplicate deliveries (`webhook_deliveries` table), checks
    the repo against `watched_repo`, and upserts `prs`.
 2. For `opened` / `synchronize` / `reopened`, `createRun()`
-   (`src/worker/runner/create-run.ts`) calls `ensureBox()`: reuse the PR's
-   live box if its `head_sha` matches, otherwise retire it (cancelling its
-   unfinished runs — latest wins — and closing its channel) and provision a
-   fresh one, minting the box's bearer token (stored only as a SHA-256
-   hash). The content-addressed stage diff from architecture.md replaces the
-   sha-equality check once the pipeline-config format exists.
+   (`src/worker/runner/create-run.ts`) calls `ensureBox()`, which computes
+   the push's stage vector from the repo's pipeline file and git tree
+   hashes ([pipeline.md](./pipeline.md)) and diffs it against what the live
+   box has realized: no divergence reuses the box untouched; divergence at
+   stage k cancels in-flight runs (latest wins) and sends the warm box an
+   `update` to re-run stages k..end at the new sha; no live box provisions
+   fresh hardware, minting the box's bearer token (stored only as a SHA-256
+   hash).
 3. The DigitalOcean provider (`src/worker/runner/digitalocean.ts`) creates
    one droplet from the `RUNNER_IMAGE` snapshot, passing box-level
    parameters via `user_data`, and records it in `runner_instances`. The run
@@ -26,10 +28,11 @@ Background in [architecture.md](./architecture.md); setup steps in
    (`src/worker/do/pr-coordinator.ts`) — queued until the box connects.
 4. On the box, the image's `scenetest-runner` service runs the agent
    (`infra/box/agent.mjs`): it reads `/etc/scenetest/run.env`, clones the
-   repo at `SCENETEST_HEAD_SHA`, runs the project's `scenetest/box-setup.sh`
-   (app, database, seeds — the same code path as a developer's laptop),
-   reports `POST /api/boxes/:boxId/ready`, and connects out to the box
-   channel.
+   repo at `SCENETEST_HEAD_SHA`, and connects out to the box channel. The
+   queued pipeline `update` arrives first (FIFO) and the agent runs its
+   stages — app, database, seeds, the same code path as a developer's
+   laptop — then reports the realized vector via
+   `POST /api/boxes/:boxId/ready`.
 5. The box holds one outbound WebSocket to
    `GET /api/boxes/:boxId/channel` (bearer-authed; header or `?token=`).
    Down it come `{ kind: 'dispatch', run }` batches and
@@ -81,16 +84,19 @@ ever connects outbound, and the bearer token it holds dies with the box.
 
 ### Project hooks
 
-The agent drives the user's repo through two conventional scripts —
-explicitly placeholders for the pipeline-config format from architecture.md:
+Box setup is driven by the repo's pipeline file (`scenetest/pipeline.json`,
+spec in [pipeline.md](./pipeline.md)): the worker computes which stages a
+push invalidated and sends them down the channel as an `update`; the agent
+checks out the sha, runs them in order, and reports the realized stage
+vector through `/api/boxes/:boxId/ready` (a failed stage retires the box).
+Repos without a pipeline file get the coarse default, which runs
+`scenetest/box-setup.sh` if present — the legacy hook keeps working.
 
-- `scenetest/box-setup.sh` — bring up app, database, seeds (run once at
-  checkout).
-- `scenetest/box-run.sh` — execute one batch; receives `SCENETEST_RUN_ID`,
-  `SCENETEST_SUBSET`, and `SCENETEST_LOCAL_INGEST` (the agent's local
-  endpoint, which accepts the same body as the cloud ingest and relays up
-  the channel). A missing script or non-zero exit marks the run failed, so
-  no batch is left dangling.
+Scene batches still use one hook: `scenetest/box-run.sh` — execute one
+batch; receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`, and
+`SCENETEST_LOCAL_INGEST` (the agent's local endpoint, which accepts the
+same body as the cloud ingest and relays up the channel). A missing script
+or non-zero exit marks the run failed, so no batch is left dangling.
 
 ### run.env variables
 

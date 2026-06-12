@@ -14,7 +14,7 @@
 // this stage's watch globs.)
 
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -337,7 +337,21 @@ async function main() {
   // --- the real box agent, spawned in test mode -----------------------------
   console.log('· box agent (infra/box/agent.mjs)')
   const agentWork = mkdtempSync(join(tmpdir(), 'scenetest-agent-'))
-  // Queue a command before the agent exists; it must arrive via flush.
+  // Queue a pipeline update and a command before the agent exists; both must
+  // arrive via flush on connect, update first (FIFO). The update's stage
+  // drops a marker file so we can see it actually executed, and its vector
+  // must come back through /ready into boxes.realized_stages.
+  const updateQueued = await fetch(`${BASE}/api/debug/box-update`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      boxId: 'e2e-box-2',
+      headSha: 'agbox1',
+      vector: { setup: 'hash-setup-1' },
+      stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
+    }),
+  })
+  check('debug box-update queued (no box connected yet)',
+    updateQueued.status === 202 && (await j(updateQueued)).delivered === false)
   await fetch(`${BASE}/api/runs/e2e-agent-run/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'run:pause' }),
@@ -377,6 +391,8 @@ async function main() {
 
   check('agent connected its channel',
     await waitFor(() => agentLog.includes('channel connected')), agentLog)
+  check('agent ran the queued pipeline stage',
+    await waitFor(() => existsSync(join(agentWork, 'stage-ran.marker'))), agentLog)
   check('agent received the queued command (flush on connect)',
     await waitFor(() => {
       try { return readFileSync(join(agentWork, 'e2e-agent-run.commands.jsonl'), 'utf8').includes('run:pause') }
@@ -394,6 +410,15 @@ async function main() {
   check('agent-relayed event reached viewers via D1 → SSE',
     agentReplay.events.some((e) => e.type === 'run:start'))
   agent.kill('SIGTERM')
+
+  // A failed pipeline stage retires the box (its runs cancel; reaper would
+  // sweep the droplet). Reuses box 1 — the inline section is done with it.
+  const failReady = await fetch(`${BASE}/api/boxes/e2e-box-1/ready`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${boxToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ ok: false, failed_stage: 'db' }),
+  })
+  check('failed stage report → box retired', (await j(failReady)).retired === true)
 
   // --- latest-wins: second push retires the box and cancels run 1 -----------
   // Timing assumption: the stub batch takes ≥600ms (5 × 120ms action sleeps),
@@ -417,8 +442,17 @@ async function main() {
   const live = d1Query(persistDir,
     "SELECT COUNT(*) AS n FROM boxes WHERE repo = 'demo/repo' AND pr_number = 1 AND status != 'destroyed'")
   check('exactly one live box per PR', live[0].n === 1, `got ${live[0].n}`)
-  const agentBox = d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-2'")
-  check('agent flipped its box provisioning → ready', agentBox[0].status === 'ready', `got ${agentBox[0].status}`)
+  const agentBox = d1Query(persistDir,
+    "SELECT status, realized_stages FROM boxes WHERE id = 'e2e-box-2'")
+  check('agent flipped its box provisioning → ready (via update)',
+    agentBox[0].status === 'ready', `got ${agentBox[0].status}`)
+  check('realized stage vector stored from the agent report',
+    agentBox[0].realized_stages === '{"setup":"hash-setup-1"}', `got ${agentBox[0].realized_stages}`)
+  const failedBox = d1Query(persistDir,
+    "SELECT b.status, r.status AS run_status FROM boxes b JOIN runs r ON r.box_id = b.id WHERE b.id = 'e2e-box-1'")
+  check('failed-stage box destroyed and its run cancelled',
+    failedBox[0].status === 'destroyed' && failedBox[0].run_status === 'cancelled',
+    JSON.stringify(failedBox[0]))
 
   if (failures.length > 0 && serverErr) {
     console.error('\n--- wrangler dev stderr (tail) ---\n' + serverErr.split('\n').slice(-20).join('\n'))

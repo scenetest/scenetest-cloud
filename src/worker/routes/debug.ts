@@ -1,5 +1,34 @@
 import type { Handler } from '../router.ts'
 import { createRun } from '../runner/create-run.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
+
+// POST /api/debug/box-update
+// Body: { boxId, headSha?, vector?, stages? } — enqueue a pipeline update on
+// the box's coordinator, exactly as ensureBox would. Exists so the e2e
+// script can exercise the agent's update path (checkout → stages → ready
+// with realized vector) without a real GitHub tree. DEV-ONLY, same gate as
+// stub-run.
+export const debugBoxUpdate: Handler = async (req, env) => {
+  if (env.ENABLE_DEBUG_ROUTES !== '1') {
+    return new Response('Not Found', { status: 404 })
+  }
+  const body = await req.json<{
+    boxId: string
+    headSha?: string
+    vector?: Record<string, string>
+    stages?: Array<{ name: string; run?: string }>
+  }>()
+  const box = await env.DB.prepare('SELECT repo, pr_number FROM boxes WHERE id = ?1')
+    .bind(body.boxId)
+    .first<{ repo: string; pr_number: number }>()
+  if (!box) return Response.json({ error: 'box not found' }, { status: 404 })
+
+  const res = await prCoordinator(env, box.repo, box.pr_number).fetch('https://do/update', {
+    method: 'POST',
+    body: JSON.stringify({ headSha: body.headSha, vector: body.vector, stages: body.stages ?? [] }),
+  })
+  return Response.json(await res.json(), { status: 202 })
+}
 
 // POST /api/debug/stub-run
 // Body: { prNumber?: number, subset?: string[] }
