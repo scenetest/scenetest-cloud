@@ -104,9 +104,18 @@ async function handleEvent(
 ): Promise<HandleResult> {
   // Cheap event-type gate before parsing or touching the DB. (isWatched is
   // irrelevant here — classifyWebhook short-circuits on event type first.)
+  // Pings still record which repo they came from: GitHub fires one when a
+  // webhook is created, so a ping delivery row with the repo name is the
+  // "wiring verified" signal project onboarding (and its UI) checks for.
   if (event !== 'pull_request') {
     const d = classifyWebhook(event, undefined, false) as { kind: 'ignore'; reason: string }
-    return { result: `ignored:${d.reason}` }
+    let repo: string | undefined
+    try {
+      repo = (JSON.parse(rawBody) as { repository?: { full_name?: string } }).repository?.full_name
+    } catch {
+      // non-JSON body; nothing to attribute
+    }
+    return { result: `ignored:${d.reason}`, ...(repo ? { repo } : {}) }
   }
 
   const payload = JSON.parse(rawBody) as PullRequestPayload
