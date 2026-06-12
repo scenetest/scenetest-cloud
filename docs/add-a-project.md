@@ -48,49 +48,28 @@ or secret is wrong; GitHub's *Recent Deliveries* tab shows what it got back
 
 ## Phase 3 — make the repo runnable (~10–30 minutes, mostly your LLM's job)
 
-Two files in your repo, both under `scenetest/`:
+One file in your repo: `scenetest/pipeline.json`. It declares both halves
+of the contract —
 
-### `scenetest/pipeline.json` — how a box becomes your app
+- **stages**: how a bare machine becomes your running app (install deps,
+  reset + seed the database, build, serve), each with watch globs so only
+  invalidated work re-runs;
+- **`scenes`** (top-level): how one batch of scenes executes against the
+  served app. Its command receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`,
+  and `SCENETEST_EVENTS_FILE` — append the CLI's protocol events there
+  (one JSON per line) and they're relayed to the dashboard live, with the
+  verdict settled from `run:end`. No HTTP plumbing needed.
 
-Declares the stages that take a bare machine to a running app: install
-deps, reset + seed the database, build, serve. Full spec, rules of thumb,
-and a step-by-step checklist written for LLMs in
-[pipeline.md](./pipeline.md) — hand that page to your assistant with the
-repo and review what comes back.
+Full spec, rules of thumb, and a step-by-step checklist written for LLMs
+in [pipeline.md](./pipeline.md) — hand that page to your assistant with
+the repo and review what comes back.
 
 Strictly speaking the file is optional — without it every push rebuilds
-everything via `scenetest/box-setup.sh` if that exists. But note the
-first-user trap: with *neither* file, the box reports ready having set up
-**nothing**, and every run fails confusingly. Treat the pipeline file as
-required.
-
-### `scenetest/box-run.sh` — how one batch of scenes executes
-
-Called per run with:
-
-| Variable | Meaning |
-|---|---|
-| `SCENETEST_RUN_ID` | id of this batch |
-| `SCENETEST_SUBSET` | JSON array of scene ids, empty = all |
-| `SCENETEST_LOCAL_INGEST` | local HTTP endpoint; accepts the same body as the cloud ingest and relays events to the dashboard |
-
-Skeleton (honest caveat: until the scenes CLI grows a first-class
-report-URL flag, this script bridges CLI output to the ingest itself —
-this is the roughest edge of onboarding today):
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-# Run the scenes (the app is already up — the pipeline's serve stage did it)
-pnpm exec scenes run --base-url http://localhost:4173 ${SCENETEST_SUBSET:+--subset "$SCENETEST_SUBSET"}
-# Relay the run's event log to the dashboard
-jq -c '{events: [{payload: .}]}' .scenetest/runs/latest.jsonl | while read -r batch; do
-  curl -s -X POST "$SCENETEST_LOCAL_INGEST/events/$SCENETEST_RUN_ID" \
-    -H 'content-type: application/json' -d "$batch" > /dev/null
-done
-```
-
-A non-zero exit marks the run failed — no batch is ever left dangling.
+everything via the legacy hooks (`scenetest/box-setup.sh` for setup,
+`scenetest/box-run.sh` for batches) if they exist. But note the
+first-user trap: with no pipeline file *and* no hooks, the box reports
+ready having set up **nothing**, and every run fails confusingly. Treat
+the pipeline file as required.
 
 ## Phase 4 — open a PR and watch
 
@@ -122,5 +101,5 @@ In escalation order:
 4. The DigitalOcean console, droplets filtered by tag
    `st-repo:<owner>-<name>`: is a box up at all?
 5. A run that reaches the box and fails instantly usually means a failed
-   pipeline stage (box retired; fix the stage, push) or a missing
-   `box-run.sh`.
+   pipeline stage (box retired; fix the stage, push) or a `scenes` command
+   that exits non-zero — check it locally with the same env vars.

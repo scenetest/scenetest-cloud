@@ -28,6 +28,12 @@ export interface PipelineStage {
 export interface PipelineConfig {
   version: 1
   stages: PipelineStage[]
+  // How one batch of scenes executes. NOT a stage: stages are
+  // content-addressed and skipped when nothing changed; the scenes command
+  // is dispatch-triggered and parameterized per run. It still rides the
+  // pipeline file, so editing it cascades (the file hashes into every
+  // stage) and the box always holds the current command.
+  scenes: string
 }
 
 export interface StagePlan {
@@ -36,10 +42,13 @@ export interface StagePlan {
   vector: Record<string, string>
   // What the box must execute on divergence, in order.
   stages: Array<{ name: string; run?: string }>
+  scenes: string
   coarse: boolean
 }
 
 export const PIPELINE_PATH = 'scenetest/pipeline.json'
+// Legacy hook fallback, also the default when the file omits `scenes`.
+export const DEFAULT_SCENES_COMMAND = 'bash scenetest/box-run.sh'
 
 // Absent or unreadable pipeline file: one stage watching everything, running
 // the legacy setup hook if the repo has one. Exactly yesterday's behavior.
@@ -53,6 +62,7 @@ export function defaultPipeline(): PipelineConfig {
         run: 'if [ -f scenetest/box-setup.sh ]; then bash scenetest/box-setup.sh; fi',
       },
     ],
+    scenes: DEFAULT_SCENES_COMMAND,
   }
 }
 
@@ -66,8 +76,9 @@ export function parsePipeline(raw: string): PipelineConfig | null {
   } catch {
     return null
   }
-  const cfg = data as { version?: unknown; stages?: unknown }
+  const cfg = data as { version?: unknown; stages?: unknown; scenes?: unknown }
   if (cfg.version !== 1 || !Array.isArray(cfg.stages) || cfg.stages.length === 0) return null
+  if (cfg.scenes !== undefined && typeof cfg.scenes !== 'string') return null
 
   const seen = new Set<string>()
   const stages: PipelineStage[] = []
@@ -80,7 +91,7 @@ export function parsePipeline(raw: string): PipelineConfig | null {
     if (!Array.isArray(watch) || !watch.every((g) => typeof g === 'string' && g.length > 0)) return null
     stages.push({ name: s.name, watch: watch as string[], ...(s.run !== undefined ? { run: s.run as string } : {}) })
   }
-  return { version: 1, stages }
+  return { version: 1, stages, scenes: typeof cfg.scenes === 'string' ? cfg.scenes : DEFAULT_SCENES_COMMAND }
 }
 
 // Minimal glob-to-regex: '**' crosses directories, '*' stays within one path
@@ -160,6 +171,7 @@ function coarsePlan(headSha: string): StagePlan {
   return {
     vector: { '*coarse*': headSha },
     stages: defaultPipeline().stages.map((s) => ({ name: s.name, run: s.run })),
+    scenes: DEFAULT_SCENES_COMMAND,
     coarse: true,
   }
 }
@@ -204,7 +216,7 @@ export async function computeStagePlan(env: Env, repo: string, headSha: string):
     }
 
     const { vector, stages } = await computeVector(config, tree, await imageStageHash(), pipelineFileSha)
-    return { vector, stages, coarse: false }
+    return { vector, stages, scenes: config.scenes, coarse: false }
   } catch (err) {
     console.warn(`pipeline: coarse fallback for ${repo}@${headSha}: ${err instanceof Error ? err.message : err}`)
     return coarsePlan(headSha)

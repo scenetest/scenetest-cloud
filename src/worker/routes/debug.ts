@@ -17,6 +17,7 @@ export const debugBoxUpdate: Handler = async (req, env) => {
     headSha?: string
     vector?: Record<string, string>
     stages?: Array<{ name: string; run?: string }>
+    scenes?: string
   }>()
   const box = await env.DB.prepare('SELECT repo, pr_number FROM boxes WHERE id = ?1')
     .bind(body.boxId)
@@ -25,7 +26,33 @@ export const debugBoxUpdate: Handler = async (req, env) => {
 
   const res = await prCoordinator(env, box.repo, box.pr_number).fetch('https://do/update', {
     method: 'POST',
-    body: JSON.stringify({ headSha: body.headSha, vector: body.vector, stages: body.stages ?? [] }),
+    body: JSON.stringify({
+      headSha: body.headSha,
+      vector: body.vector,
+      stages: body.stages ?? [],
+      scenes: body.scenes,
+    }),
+  })
+  return Response.json(await res.json(), { status: 202 })
+}
+
+// POST /api/debug/box-dispatch
+// Body: { boxId, run: RunSpec-ish } — enqueue a scene batch on the box's
+// coordinator, as createRun's dispatch would, so e2e can exercise the
+// agent's batch path (scenes command, events-file relay, verdict). DEV-ONLY.
+export const debugBoxDispatch: Handler = async (req, env) => {
+  if (env.ENABLE_DEBUG_ROUTES !== '1') {
+    return new Response('Not Found', { status: 404 })
+  }
+  const body = await req.json<{ boxId: string; run: unknown }>()
+  const box = await env.DB.prepare('SELECT repo, pr_number FROM boxes WHERE id = ?1')
+    .bind(body.boxId)
+    .first<{ repo: string; pr_number: number }>()
+  if (!box) return Response.json({ error: 'box not found' }, { status: 404 })
+
+  const res = await prCoordinator(env, box.repo, box.pr_number).fetch('https://do/dispatch', {
+    method: 'POST',
+    body: JSON.stringify({ run: body.run }),
   })
   return Response.json(await res.json(), { status: 202 })
 }

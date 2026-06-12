@@ -92,11 +92,14 @@ vector through `/api/boxes/:boxId/ready` (a failed stage retires the box).
 Repos without a pipeline file get the coarse default, which runs
 `scenetest/box-setup.sh` if present — the legacy hook keeps working.
 
-Scene batches still use one hook: `scenetest/box-run.sh` — execute one
-batch; receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`, and
-`SCENETEST_LOCAL_INGEST` (the agent's local endpoint, which accepts the
-same body as the cloud ingest and relays up the channel). A missing script
-or non-zero exit marks the run failed, so no batch is left dangling.
+Scene batches run the pipeline file's top-level `scenes` command (default:
+the legacy `bash scenetest/box-run.sh` hook), delivered to the agent with
+every update. It receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`,
+`SCENETEST_LOCAL_INGEST` (the agent's local endpoint, same body as the
+cloud ingest), and `SCENETEST_EVENTS_FILE` — protocol events appended
+there are tailed and relayed live, and a `run:end` event settles the
+verdict from its summary. A non-zero exit marks the run failed, so no
+batch is left dangling.
 
 ### run.env variables
 

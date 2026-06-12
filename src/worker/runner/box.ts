@@ -101,6 +101,7 @@ async function queueUpdate(env: Env, pr: PrRef, plan: StagePlan, fromStage: numb
       headSha: pr.headSha,
       vector: plan.vector,
       stages: plan.stages.slice(fromStage),
+      scenes: plan.scenes,
     }),
   })
 }
