@@ -81,20 +81,42 @@ export const postSceneExecutions: Handler = async (req, env, _ctx, params) => {
 }
 
 // POST /api/runs/:runId/complete
-// Body: { status: 'passed' | 'failed' | 'cancelled' }
+// Body: { status: 'passed' | 'failed' | 'cancelled', metrics?: { name: number } }
 // `ended_at IS NULL` keeps this from resurrecting a run the worker already
 // ended — e.g. cancelled because a new commit retired its box while the old
 // box's completion report was still in flight.
+//
+// `metrics` carries the build stage's linear measurements (bundle.raw,
+// bundle.gzip, …) for this run's head. They land in overview_metrics keyed by
+// run; the main-branch timeline (metric_history) is sampled from them on merge.
 export const postRunComplete: Handler = async (req, env, _ctx, params) => {
   const runId = params.runId!
   const auth = await verifyBoxToken(req, env, runId)
   if (!auth.ok) return auth.response
 
-  const body = await req.json<{ status: 'passed' | 'failed' | 'cancelled' }>()
+  const body = await req.json<{
+    status: 'passed' | 'failed' | 'cancelled'
+    metrics?: Record<string, number>
+  }>()
   const res = await env.DB.prepare(
     'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
   )
     .bind(body.status, Date.now(), runId)
     .run()
-  return Response.json({ ok: true, applied: res.meta.changes > 0 })
+  const applied = res.meta.changes > 0
+
+  // Latest-wins extends to metrics: a late completion from a box already
+  // retired by a newer commit must not record stale measurements either.
+  const metrics = applied
+    ? Object.entries(body.metrics ?? {}).filter(([, v]) => typeof v === 'number')
+    : []
+  if (metrics.length > 0) {
+    const stmt = env.DB.prepare(
+      `INSERT INTO overview_metrics (run_id, name, pr_value) VALUES (?1, ?2, ?3)
+       ON CONFLICT(run_id, name) DO UPDATE SET pr_value = excluded.pr_value`,
+    )
+    await env.DB.batch(metrics.map(([name, value]) => stmt.bind(runId, name, value)))
+  }
+
+  return Response.json({ ok: true, applied })
 }

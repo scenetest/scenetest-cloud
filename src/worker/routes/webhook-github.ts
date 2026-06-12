@@ -20,6 +20,8 @@ interface PullRequestPayload {
   repository: { full_name: string }
   pull_request: {
     state: string
+    merged?: boolean
+    merge_commit_sha?: string | null
     head: { sha: string }
     base: { ref: string; sha: string }
   }
@@ -146,6 +148,14 @@ async function handleEvent(
     )
       .bind(now, repo, prNumber)
       .run()
+    // A merge is the only close that lands on the base branch, so it is the
+    // only one that contributes a point to the main-branch metric timeline.
+    if (payload.pull_request.merged) {
+      const commitSha = payload.pull_request.merge_commit_sha || payload.pull_request.head.sha
+      const baseRef = payload.pull_request.base.ref
+      const points = await recordMergeMetrics(env, repo, prNumber, baseRef, commitSha, now)
+      return { ...base, result: `pr-merged:${points}` }
+    }
     return { ...base, result: 'pr-closed' }
   }
 
@@ -190,4 +200,43 @@ async function handleEvent(
     subset,
   })
   return { ...base, result: `run-created:${runId}` }
+}
+
+// On merge, sample the PR's last measured metrics into the main-branch
+// timeline. The values come from the most recent run of this PR that reported
+// any (overview_metrics.pr_value); a merge reuses the merged PR's artifacts, so
+// that reading is the main-line reading. Returns how many points were written.
+// INSERT OR REPLACE keyed by the merge commit makes webhook redelivery a no-op.
+async function recordMergeMetrics(
+  env: Env,
+  repo: string,
+  prNumber: number,
+  baseRef: string,
+  commitSha: string,
+  now: number,
+): Promise<number> {
+  const rows = await env.DB.prepare(
+    `SELECT name, pr_value AS value FROM overview_metrics
+     WHERE pr_value IS NOT NULL AND run_id = (
+       SELECT r.id FROM runs r
+       JOIN overview_metrics om ON om.run_id = r.id AND om.pr_value IS NOT NULL
+       WHERE r.repo = ?1 AND r.pr_number = ?2
+       ORDER BY r.started_at DESC LIMIT 1
+     )`,
+  )
+    .bind(repo, prNumber)
+    .all<{ name: string; value: number }>()
+
+  const metrics = rows.results ?? []
+  if (metrics.length === 0) return 0
+
+  const stmt = env.DB.prepare(
+    `INSERT OR REPLACE INTO metric_history
+       (repo, base_ref, name, commit_sha, value, pr_number, recorded_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+  )
+  await env.DB.batch(
+    metrics.map((m) => stmt.bind(repo, baseRef, m.name, commitSha, m.value, prNumber, now)),
+  )
+  return metrics.length
 }

@@ -189,6 +189,14 @@ overview tables. The PR comparison view is "report at base hash vs report
 at head hash," and identical inputs share one report across runs and across
 PRs.
 
+Those per-run readings are also the source for a main-branch timeline: on
+merge, the webhook samples the merged PR's last reported metrics
+(`overview_metrics`) into `metric_history`, one row per metric keyed by the
+merge commit. A merge reuses the merged PR's artifacts, so the PR's head
+reading is the main-line reading; the dashboard charts each metric as a line
+over commits/time. Sampling rides the same latest-wins rule as verdicts — a
+late completion from a retired box records nothing.
+
 The pipeline definition (stage commands and watch globs) lives in the
 user's repo, in their scenetest folder, because it must change atomically
 with the code it builds; it is hashed like any other input. The cloud UI

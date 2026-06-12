@@ -41,6 +41,25 @@ export interface RepoDetail {
   recent_runs: RecentRun[]
 }
 
+// Main-branch metric timeline (GET /api/cloud/repos/:owner/:name/metrics).
+export interface MetricPoint {
+  commit_sha: string
+  pr_number: number | null
+  value: number
+  recorded_at: number
+}
+
+export interface MetricSeries {
+  name: string
+  points: MetricPoint[]
+}
+
+export interface RepoMetrics {
+  repo: string
+  base_ref: string
+  metrics: MetricSeries[]
+}
+
 // Add-a-project wizard checklist (GET /api/admin/repos/:owner/:name/status).
 export interface RepoSetupStatus {
   registered: boolean

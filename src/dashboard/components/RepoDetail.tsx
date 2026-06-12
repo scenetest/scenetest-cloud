@@ -2,6 +2,7 @@ import { useRepo } from '../hooks/useRepo.ts'
 import { StatusPip } from './StatusPip.tsx'
 import { Badge } from './Badge.tsx'
 import { Button } from './Button.tsx'
+import { MetricTimeline } from './MetricTimeline.tsx'
 
 interface Props {
   owner: string
@@ -48,6 +49,8 @@ export function RepoDetail({ owner, name, onBack }: Props) {
           ))}
         </div>
       )}
+
+      <MetricTimeline owner={owner} name={name} />
 
       <h2 class='font-mono text-xl font-medium text-ink mb-3'>Recent runs</h2>
       {d.recent_runs.length === 0 ? (

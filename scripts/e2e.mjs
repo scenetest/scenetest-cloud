@@ -198,6 +198,15 @@ async function main() {
   d1Query(persistDir,
     "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-agent-run', 'demo/watched', 10, 'agbox1', 'manual', 'queued', 'e2e-box-2')")
 
+  // A third PR + box + run, kept live, for the metric-timeline path (report
+  // metrics on completion → merge samples them into the main-branch series).
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 11, 'metsha1', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-3', 'demo/watched', 11, 'metsha1', 'ready', '${boxTokenHash}', 0)`)
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, started_at, box_id) VALUES ('e2e-metric-run', 'demo/watched', 11, 'metsha1', 'manual', 'queued', 1, 'e2e-box-3')")
+
   console.log('· starting wrangler dev')
   server = spawn(WRANGLER, [
     'dev', '--port', String(PORT), '--persist-to', persistDir,
@@ -511,6 +520,32 @@ async function main() {
     body: JSON.stringify({ ok: false, failed_stage: 'db' }),
   })
   check('failed stage report → box retired', (await j(failReady)).retired === true)
+
+  // --- main-branch metric timeline: complete a run with metrics, then merge --
+  // The box reports bundle metrics on run-complete (→ overview_metrics); a
+  // merge samples the PR's latest metrics into the main-branch series; the repo
+  // metrics endpoint groups them into chartable lines.
+  console.log('· metric timeline (run metrics → merge → series)')
+  const complete = await fetch(`${BASE}/api/runs/e2e-metric-run/complete`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${boxToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ status: 'passed', metrics: { 'bundle.gzip': 51200, 'bundle.raw': 204800 } }),
+  })
+  check('run-complete with metrics accepted', complete.status === 200 && (await j(complete)).applied === true)
+  const mergedHook = await j(await hook('pull_request', {
+    action: 'closed', number: 11,
+    repository: { full_name: 'demo/watched' },
+    pull_request: {
+      state: 'closed', merged: true, merge_commit_sha: 'merge11',
+      head: { sha: 'metsha1' }, base: { ref: 'main', sha: 'base000' },
+    },
+  }))
+  check('merged PR samples metrics into the timeline', mergedHook.result === 'pr-merged:2', JSON.stringify(mergedHook))
+  const metrics = await j(await fetch(`${BASE}/api/cloud/repos/demo/watched/metrics`, { headers: { cookie } }))
+  const gzip = (metrics.metrics ?? []).find((m) => m.name === 'bundle.gzip')
+  check('metrics endpoint returns the gzip series',
+    gzip != null && gzip.points.length === 1 && gzip.points[0].value === 51200 && gzip.points[0].commit_sha === 'merge11',
+    JSON.stringify(metrics))
 
   // --- the add-a-project wizard's status checklist ---------------------------
   console.log('· repo setup status')

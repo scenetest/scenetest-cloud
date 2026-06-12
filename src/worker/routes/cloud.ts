@@ -105,3 +105,35 @@ export const getRepoPrs: AuthedHandler = async (_req, env, _ctx, params) => {
     recent_runs: recentRunsResult.results ?? [],
   })
 }
+
+// GET /api/cloud/repos/:owner/:name/metrics?base=main
+// The main-branch metric timeline: every merge's sampled metrics, grouped by
+// metric name and ordered oldest→newest so the dashboard can chart each as a
+// line over commits/time. Empty until merges with reported metrics exist.
+export const getRepoMetrics: AuthedHandler = async (req, env, _ctx, params) => {
+  const repo = `${params.owner!}/${params.name!}`
+  const baseRef = new URL(req.url).searchParams.get('base') ?? 'main'
+
+  const rows = await env.DB.prepare(
+    `SELECT name, commit_sha, pr_number, value, recorded_at
+       FROM metric_history
+      WHERE repo = ?1 AND base_ref = ?2
+      ORDER BY name ASC, recorded_at ASC, rowid ASC`,
+  )
+    .bind(repo, baseRef)
+    .all<{ name: string; commit_sha: string; pr_number: number | null; value: number; recorded_at: number }>()
+
+  const byName = new Map<string, Array<{ commit_sha: string; pr_number: number | null; value: number; recorded_at: number }>>()
+  for (const r of rows.results ?? []) {
+    const point = { commit_sha: r.commit_sha, pr_number: r.pr_number, value: r.value, recorded_at: r.recorded_at }
+    const list = byName.get(r.name)
+    if (list) list.push(point)
+    else byName.set(r.name, [point])
+  }
+
+  return Response.json({
+    repo,
+    base_ref: baseRef,
+    metrics: [...byName.entries()].map(([name, points]) => ({ name, points })),
+  })
+}
