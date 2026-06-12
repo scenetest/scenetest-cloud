@@ -13,7 +13,19 @@ import {
 describe('parsePipeline', () => {
   it('accepts a minimal valid file and defaults watch to **', () => {
     const cfg = parsePipeline('{"version":1,"stages":[{"name":"deps","run":"pnpm i"}]}')
-    expect(cfg).toEqual({ version: 1, stages: [{ name: 'deps', watch: ['**'], run: 'pnpm i' }] })
+    expect(cfg).toEqual({
+      version: 1,
+      stages: [{ name: 'deps', watch: ['**'], run: 'pnpm i' }],
+      scenes: 'bash scenetest/box-run.sh',
+    })
+  })
+
+  it('carries the scenes command, defaulting to the legacy hook', () => {
+    expect(parsePipeline('{"version":1,"stages":[{"name":"a"}],"scenes":"pnpm scenes run"}')?.scenes)
+      .toBe('pnpm scenes run')
+    expect(parsePipeline('{"version":1,"stages":[{"name":"a"}]}')?.scenes)
+      .toBe('bash scenetest/box-run.sh')
+    expect(parsePipeline('{"version":1,"stages":[{"name":"a"}],"scenes":3}')).toBeNull()
   })
 
   it('tolerates reserved fields (save/restore/toolchain) silently', () => {
@@ -114,6 +126,7 @@ describe('firstDivergentStage', () => {
   const plan = (vector: Record<string, string>): StagePlan => ({
     vector,
     stages: Object.keys(vector).map((name) => ({ name })),
+    scenes: 'bash scenetest/box-run.sh',
     coarse: false,
   })
 

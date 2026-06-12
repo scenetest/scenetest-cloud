@@ -138,9 +138,9 @@ function Checklist({ owner, name, onOpenRepo }: { owner: string; name: string; o
           : 'scenetest/pipeline.json found in the repo.'}
       >
         <p class='m-0'>
-          Commit <span class='font-mono text-sm'>scenetest/pipeline.json</span> (how a test machine becomes
-          your running app) and <span class='font-mono text-sm'>scenetest/box-run.sh</span> (how one batch of
-          scenes executes). Easiest path: paste this into your coding assistant, in your repo —
+          Commit <span class='font-mono text-sm'>scenetest/pipeline.json</span>: its stages take a bare
+          machine to your running app, and its top-level <span class='font-mono text-sm'>scenes</span> command
+          runs one batch against it. Easiest path: paste this into your coding assistant, in your repo —
         </p>
         <CopyBlock label='Prompt for your LLM' text={llmPrompt} />
         {s?.pipeline.state === 'unknown' && (
@@ -221,9 +221,9 @@ function CopyBlock({ label, text }: { label: string; text: string }) {
 
 // Condensed from docs/pipeline.md's "For LLMs setting up a repo" — enough
 // for an assistant working inside the target repo, no external links needed.
-const llmPrompt = `Create scenetest/pipeline.json and scenetest/box-run.sh for this repo.
+const llmPrompt = `Create scenetest/pipeline.json for this repo.
 
-pipeline.json schema: {"version":1,"stages":[{"name":"...","watch":["globs"],"run":"one shell line"}]}
+Schema: {"version":1,"stages":[{"name":"...","watch":["globs"],"run":"one shell line"}],"scenes":"one shell line"}
 Stages run in order on a test VM (node, pnpm, docker, supabase CLI preinstalled); a stage re-runs only when a file matching its watch globs changes, and a changed stage re-runs everything after it. Globs: ** crosses directories, * stays in one segment, no negation.
 
 Build it like this:
@@ -231,8 +231,8 @@ Build it like this:
 2. db — watch the database dir (supabase/, prisma/, migrations/); run the reset+seed command (supabase: "supabase start && supabase db reset").
 3. build — watch source + config (src/**, *.config.*, tsconfig*.json); run the build (+ typegen if any).
 4. serve — watch []; start the app on a port in the background and exit (e.g. "(pnpm preview --port 4173 &) && sleep 2").
-Rules: watch inputs never outputs (lockfile not node_modules, src/** not dist/**); stage names [a-z0-9_-]; when unsure widen the glob; strict JSON, version must be the number 1.
+5. scenes (top-level field, NOT a stage) — run the scenes CLI against the served port and append its event log (one JSON protocol event per line) to "$SCENETEST_EVENTS_FILE"; those events stream to the dashboard live and the run:end event settles the verdict. The command also receives SCENETEST_RUN_ID and SCENETEST_SUBSET (JSON array, empty = all). Non-zero exit marks the run failed.
 
-box-run.sh runs one batch of scenes against the served app. It receives SCENETEST_RUN_ID, SCENETEST_SUBSET (JSON array or empty = all), and SCENETEST_LOCAL_INGEST (POST events to $SCENETEST_LOCAL_INGEST/events/$SCENETEST_RUN_ID with body {"events":[{"payload":<scenetest event>}]}). Run the scenes CLI, then relay its event log there. Non-zero exit marks the run failed.
+Rules: watch inputs never outputs (lockfile not node_modules, src/** not dist/**); stage names [a-z0-9_-]; when unsure widen the glob; strict JSON, version must be the number 1.
 
 Sanity-check before finishing: a lockfile change should re-run everything; a src/ change only build+serve; a docs change nothing.`

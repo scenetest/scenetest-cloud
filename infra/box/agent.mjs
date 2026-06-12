@@ -5,20 +5,24 @@
 // writes /etc/scenetest/run.env.
 //
 // Responsibilities (see docs/runner-provisioning.md):
-//   1. Clone SCENETEST_REPO at SCENETEST_HEAD_SHA and run the project's
-//      box setup (scenetest/box-setup.sh — app + db + seeds, backgrounded).
-//   2. Report the box ready, then hold one outbound WebSocket to
-//      SCENETEST_INGEST_URL/api/boxes/:id/channel (reconnect with backoff).
-//   3. On {kind:'dispatch'}: run the project's scenetest/box-run.sh with the
-//      batch's env; mark the run failed if the script is missing or exits
-//      non-zero, since a batch that can't run still needs a verdict.
-//   4. Relay events: a local HTTP ingest on 127.0.0.1:4999 accepts the same
-//      body as the cloud ingest (POST /events/:runId) so the scenes CLI on
-//      the box reports same-origin-style; envelopes go up the socket and
-//      into runs/<runId>.jsonl on disk (debug trail + future R2 artifact).
+//   1. Clone SCENETEST_REPO at SCENETEST_HEAD_SHA, then hold one outbound
+//      WebSocket to SCENETEST_INGEST_URL/api/boxes/:id/channel (reconnect
+//      with backoff).
+//   2. On {kind:'update'}: checkout the sha, run the pipeline stages, report
+//      the realized vector via /ready (failure retires the box). The update
+//      also carries the pipeline's scenes command.
+//   3. On {kind:'dispatch'}: run the scenes command with the batch's env.
+//      Events land two ways: POSTed to the local ingest, or appended to
+//      $SCENETEST_EVENTS_FILE (protocol events, one JSON per line), which is
+//      tailed and relayed live; a run:end event settles the verdict, and a
+//      non-zero exit is the failed backstop.
+//   4. Relay events: the local HTTP ingest on 127.0.0.1:4999 accepts the
+//      same body as the cloud ingest (POST /events/:runId); envelopes go up
+//      the socket and into runs/<runId>.jsonl (debug trail + future R2
+//      artifact).
 //   5. On {kind:'command'}: append to runs/<runId>.commands.jsonl where the
-//      run script can consume it. (v0 — a richer hand-off to the CLI comes
-//      with the receiver-core integration.)
+//      scenes command can consume it. (v0 — a richer hand-off to the CLI
+//      comes with the receiver-core integration.)
 //   6. Power off when the channel closes with "box retired".
 //
 // Zero dependencies: node >= 22 builtins only (global WebSocket included).
@@ -26,8 +30,7 @@
 // SCENETEST_NO_POWEROFF=1 logs instead of powering off.
 
 import { spawn, execFileSync } from 'node:child_process'
-import { appendFileSync, mkdirSync } from 'node:fs'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 
@@ -52,6 +55,7 @@ const AUTH = { authorization: `Bearer ${TOKEN}` }
 const log = (...args) => console.log(new Date().toISOString(), ...args)
 
 let ws = null
+let currentScenes = null // from the latest pipeline update
 const seqByRun = new Map()
 
 // ---------- checkout + project setup -----------------------------------------
@@ -87,7 +91,8 @@ function checkoutSha(repoDir, sha) {
 // agent just echoes it after the work succeeds. A failed stage reports
 // ok:false — the worker retires this box and the next push starts fresh.
 async function applyUpdate(update, repoDir) {
-  const { headSha, vector, stages } = update ?? {}
+  const { headSha, vector, stages, scenes } = update ?? {}
+  if (typeof scenes === 'string') currentScenes = scenes
   if (!Array.isArray(stages)) return
   log(`update: ${stages.length} stage(s) at ${headSha}`)
   let current = 'checkout'
@@ -178,29 +183,75 @@ async function completeRun(runId, status) {
   }).catch((err) => log(`complete(${runId}) failed:`, err.message))
 }
 
+// The scenes command comes from the pipeline file via the latest update
+// (default: the legacy box-run.sh hook). Its event side-channel: anything
+// the command appends to $SCENETEST_EVENTS_FILE (protocol events, one JSON
+// per line — e.g. tee the scenes CLI's jsonl there) is tailed and relayed
+// live; a run:end event also settles the run's verdict, so the command
+// doesn't have to call /complete itself.
 function runBatch(run, repoDir) {
-  const script = repoDir && join(repoDir, 'scenetest', 'box-run.sh')
-  if (!script || !existsSync(script)) {
-    log(`dispatch for ${run.runId}: no scenetest/box-run.sh — failing the run`)
-    void completeRun(run.runId, 'failed')
-    return
-  }
-  log(`running batch ${run.runId} (subset: ${run.subset ? run.subset.length : 'all'})`)
-  const child = spawn('bash', [script], {
-    cwd: repoDir,
+  const command = currentScenes ?? 'bash scenetest/box-run.sh'
+  const eventsFile = join(WORK_DIR, `${run.runId}.events.jsonl`)
+  log(`running batch ${run.runId} (subset: ${run.subset ? run.subset.length : 'all'}): ${command}`)
+
+  const child = spawn('bash', ['-c', command], {
+    cwd: repoDir ?? WORK_DIR,
     stdio: 'inherit',
     env: {
       ...process.env,
       SCENETEST_RUN_ID: run.runId,
       SCENETEST_SUBSET: run.subset ? JSON.stringify(run.subset) : '',
       SCENETEST_LOCAL_INGEST: `http://127.0.0.1:${LOCAL_PORT}`,
+      SCENETEST_EVENTS_FILE: eventsFile,
     },
   })
+
+  // Tail the events file while the batch runs (and one final sweep after
+  // exit, since the command may write it in one go at the end).
+  let offset = 0
+  let sawEnd = null
+  const sweep = () => {
+    if (!existsSync(eventsFile)) return
+    const text = readFileSync(eventsFile, 'utf8')
+    if (text.length <= offset) return
+    const chunk = text.slice(offset)
+    const lastNl = chunk.lastIndexOf('\n')
+    if (lastNl < 0) return // partial line; next sweep
+    offset += lastNl + 1
+    const events = []
+    for (const line of chunk.slice(0, lastNl).split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const payload = JSON.parse(line)
+        events.push({ payload })
+        if (payload?.type === 'run:end') sawEnd = payload
+      } catch {
+        // not JSON; skip the line rather than poison the batch
+      }
+    }
+    if (events.length > 0) {
+      let seq = seqByRun.get(run.runId) ?? 0
+      const numbered = events.map((e) => ({ seq: ++seq, payload: e.payload }))
+      seqByRun.set(run.runId, seq)
+      relayEvents(run.runId, numbered)
+    }
+  }
+  const tail = setInterval(sweep, 250)
+
   child.on('exit', (code) => {
+    clearInterval(tail)
+    sweep()
     log(`batch ${run.runId} exited ${code}`)
-    // The run script is expected to report its own verdict via the scenes
-    // CLI; a non-zero exit is the backstop so no run is left dangling.
-    if (code !== 0) void completeRun(run.runId, 'failed')
+    if (code !== 0) {
+      // Backstop: no batch is left dangling.
+      void completeRun(run.runId, 'failed')
+    } else if (sawEnd) {
+      // The verdict comes from the run's own summary when it reported one.
+      const failed = sawEnd.summary?.failed ?? 0
+      void completeRun(run.runId, failed > 0 ? 'failed' : 'passed')
+    }
+    // Exit 0 with no run:end: the command reported through the ingest /
+    // /complete itself; leave it be.
   })
 }
 

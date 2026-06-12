@@ -354,6 +354,10 @@ async function main() {
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
       stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
+      // The scenes command from pipeline.json rides the update. This one
+      // writes protocol events to the events file; the agent must tail-relay
+      // them and settle the verdict from run:end (1 failed → run failed).
+      scenes: `printf '%s\\n%s\\n' '{"type":"run:start","timestamp":1,"sceneCount":1}' '{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}' >> "$SCENETEST_EVENTS_FILE"`,
     }),
   })
   check('debug box-update queued (no box connected yet)',
@@ -415,6 +419,27 @@ async function main() {
   const agentReplay = await collectSse('/api/runs/e2e-agent-run/events', cookie, 2500)
   check('agent-relayed event reached viewers via D1 → SSE',
     agentReplay.events.some((e) => e.type === 'run:start'))
+
+  // Dispatch a batch: the agent runs the scenes command from the update,
+  // tails $SCENETEST_EVENTS_FILE, relays the events, and settles the verdict
+  // from run:end's summary.
+  await fetch(`${BASE}/api/debug/box-dispatch`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      boxId: 'e2e-box-2',
+      run: { runId: 'e2e-agent-run', boxId: 'e2e-box-2', repo: 'demo/watched', prNumber: 10, headSha: 'agbox1', subset: null },
+    }),
+  })
+  check('scenes command ran and its events relayed (run:end via events file)',
+    await waitFor(async () => {
+      const replay = await collectSse('/api/runs/e2e-agent-run/events', cookie, 1200)
+      return replay.events.some((e) => e.type === 'run:end')
+    }, 8000))
+  check('agent settled the verdict from run:end (1 failing scene → failed)',
+    await waitFor(async () => {
+      const rows = d1Query(persistDir, "SELECT status FROM runs WHERE id = 'e2e-agent-run'")
+      return rows[0].status === 'failed'
+    }, 5000))
   agent.kill('SIGTERM')
 
   // A failed pipeline stage retires the box (its runs cancel; reaper would

@@ -36,9 +36,33 @@ tool — call it from a `run` line.
     { "name": "db",    "watch": ["supabase/**"],               "run": "supabase start && supabase db reset" },
     { "name": "build", "watch": ["src/**", "*.config.*"],      "run": "pnpm build" },
     { "name": "serve", "watch": [],                            "run": "(pnpm preview --port 4173 &) && sleep 2" }
-  ]
+  ],
+  "scenes": "pnpm exec scenes run --base-url http://localhost:4173"
 }
 ```
+
+Top-level `scenes` is **how one batch of scenes executes** — deliberately
+not a stage: stages are content-addressed and skipped when nothing changed,
+while scene batches run on dispatch (every push, every manual re-run,
+subsets, different teams). It still lives in this file, so there is exactly
+one repo-side contract; editing it re-runs the pipeline like any other edit
+to this file. When omitted it falls back to the legacy hook,
+`bash scenetest/box-run.sh`.
+
+The scenes command runs at the repo root with:
+
+| Variable | Meaning |
+|---|---|
+| `SCENETEST_RUN_ID` | id of this batch |
+| `SCENETEST_SUBSET` | JSON array of scene ids, empty = all |
+| `SCENETEST_LOCAL_INGEST` | local HTTP ingest (same body as the cloud API) |
+| `SCENETEST_EVENTS_FILE` | append protocol events here, one JSON object per line — they are tailed and relayed live, and a `run:end` event settles the run's verdict from its summary |
+
+So the simplest correct command is "run the CLI, tee its event log to
+`$SCENETEST_EVENTS_FILE`" — no HTTP plumbing. A non-zero exit marks the run
+failed; exit 0 with a `run:end` event reports passed/failed from the
+summary. (When the scenes CLI grows a report-URL flag, even the tee
+disappears.)
 
 Per stage:
 
@@ -83,9 +107,8 @@ files under `supabase/`; `*.md` matches `README.md` but **not**
 What stages can rely on: repo checked out at the PR's head commit (cwd =
 repo root, public repos only for now), previous stages' effects present
 (warm box) or freshly re-run, and a non-zero exit failing the box — the
-next push provisions a fresh one. Scene batches are **not** a stage; they
-arrive separately after the pipeline is ready (via `scenetest/box-run.sh`
-until the CLI integration lands).
+next push provisions a fresh one. Scene batches arrive separately after
+the pipeline is ready, via the top-level `scenes` command above.
 
 ## For LLMs setting up a repo
 
@@ -104,15 +127,18 @@ Do this, in order:
 4. Add a `serve` stage that starts the app on a port in the background and
    returns (the run line must exit; `(cmd &)` + a readiness sleep or
    wait-on is fine).
-5. Do **not**: watch generated/output paths; combine unrelated concerns
+5. Set top-level `scenes`: run the scenes CLI against the served port and
+   tee/append its event log (one JSON event per line) to
+   `$SCENETEST_EVENTS_FILE`.
+6. Do **not**: watch generated/output paths; combine unrelated concerns
    into one stage; write conditionals into `run` lines to simulate
    branching (the watch globs are the conditional); invent stages the repo
    doesn't need.
-6. Validate: the file is strict JSON, `version` is the number 1, stage
+7. Validate: the file is strict JSON, `version` is the number 1, stage
    names are unique `[a-z0-9_-]`. A file that fails validation is ignored
    (the repo silently gets the coarse default), so prefer fewer, simpler
    stages over clever ones.
-7. Sanity-check your globs against the repo tree: for each stage ask "which
+8. Sanity-check your globs against the repo tree: for each stage ask "which
    files, when edited, should re-run this?" and confirm the globs match
    exactly those files. Then check the cascade reads sensibly: a lockfile
    change should hit `deps`+`db`+`build`+`serve`; a `src/` change only
