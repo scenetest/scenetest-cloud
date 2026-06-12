@@ -1,6 +1,11 @@
 export interface Env {
   DB: D1Database
   ASSETS: Fetcher
+  // Durable record of run event logs. At end of run the events are assembled
+  // into a .jsonl object here; D1's `events` rows are then prunable. Optional
+  // so the worker still boots when the binding is absent (the artifact path
+  // no-ops). Provisioned via `wrangler r2 bucket create` — see docs/setup.md.
+  ARTIFACTS?: R2Bucket
   // One Durable Object per PR: box channel, command queue, event write-through.
   PR_COORDINATOR: DurableObjectNamespace
   // GitHub OAuth (identity)
@@ -19,6 +24,10 @@ export interface Env {
   GITHUB_API_TOKEN?: string
   SESSION_SECRET: string
   ENABLE_DEBUG_ROUTES?: string
+  // How long a terminal run's events linger in D1 after its artifact is
+  // written, before the cron sweep prunes them. Default 24 (hours). Set "0"
+  // to prune as soon as the artifact exists (used by the e2e harness).
+  EVENTS_RETENTION_HOURS?: string
 
   // Runner provisioning. RUNNER_PROVIDER selects the implementation:
   // 'stub' (default; writes fake events straight to D1) or 'digitalocean'.

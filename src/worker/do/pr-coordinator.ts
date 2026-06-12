@@ -1,5 +1,6 @@
 import type { Env } from '../env.ts'
 import { insertEvents, type RunEvent } from '../db.ts'
+import { getArtifactKey, readArtifactEvents } from '../artifacts.ts'
 
 // One Durable Object per PR: the coordination point between the PR's box and
 // the rest of the system. It terminates the box's single outbound WebSocket
@@ -178,9 +179,13 @@ export class PrCoordinator implements DurableObject {
   }
 
   // Replay stored events to a single viewer. Pages through D1 to avoid
-  // loading an entire long run into memory at once.
+  // loading an entire long run into memory at once. When a terminal run's
+  // events have been pruned from D1 (the cron sweep, after its artifact was
+  // written), D1 yields nothing and replay falls back to the R2 artifact —
+  // same frame shape, so the viewer can't tell the difference.
   private async replayTo(ws: WebSocket, runId: string, sinceSeq: number): Promise<void> {
     let after = sinceSeq
+    let sawAny = false
     for (;;) {
       const { results } = await this.env.DB.prepare(
         'SELECT seq, payload FROM events WHERE run_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3',
@@ -189,8 +194,16 @@ export class PrCoordinator implements DurableObject {
         // row.payload is already a JSON string (insertEvents stores JSON.stringify).
         ws.send(JSON.stringify({ kind: 'event', seq: row.seq, payload: row.payload }))
         after = row.seq
+        sawAny = true
       }
       if ((results?.length ?? 0) < REPLAY_PAGE) break
+    }
+
+    if (sawAny) return
+    const key = await getArtifactKey(this.env, runId)
+    if (!key) return
+    for (const e of await readArtifactEvents(this.env, key, sinceSeq)) {
+      ws.send(JSON.stringify({ kind: 'event', seq: e.seq, payload: e.payload }))
     }
   }
 

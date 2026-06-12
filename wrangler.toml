@@ -45,7 +45,16 @@ database_name = "scenetest-cloud-mhsnook"
 database_id = "59cdeb29-a690-46b8-a8f9-423be56ed4d8"
 migrations_dir = "migrations"
 
-# Reaper for ephemeral runner boxes (no-op while RUNNER_PROVIDER = "stub").
+# Durable record of run event logs. At end of run the events become a single
+# .jsonl object here; the cron sweep then prunes the run's rows from D1's
+# `events` table. Create the bucket once: `wrangler r2 bucket create
+# scenetest-cloud-artifacts` (see docs/setup.md).
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "scenetest-cloud-artifacts"
+
+# Reaper for ephemeral runner boxes (no-op while RUNNER_PROVIDER = "stub") and
+# the R2 artifact/prune sweep (runs regardless of provider).
 [triggers]
 crons = ["*/10 * * * *"]
 
@@ -97,6 +106,10 @@ binding = "DB"
 database_name = "scenetest-cloud-mhsnook"
 database_id = "59cdeb29-a690-46b8-a8f9-423be56ed4d8"
 migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "scenetest-cloud-artifacts"
 
 [env.production.vars]
 GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
