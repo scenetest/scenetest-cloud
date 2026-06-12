@@ -12,6 +12,26 @@ export const dashboardHtml: AuthedHandler = () =>
 export const dashboardSse: AuthedHandler = (req, env, _ctx, params) =>
   streamRunEvents(req, env, params.runId!)
 
+// GET /api/runs/:runId/ws — viewer WebSocket. Cookie auth (same-origin WS
+// handshakes carry cookies), then forward the upgrade to the PR's DO where
+// the socket is accepted, the backlog is replayed, and live events fan out.
+export const dashboardWs: AuthedHandler = async (req, env, _ctx, params) => {
+  if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+    return new Response('Expected WebSocket', { status: 426 })
+  }
+  const runId = params.runId!
+  const run = await env.DB.prepare('SELECT repo, pr_number FROM runs WHERE id = ?1')
+    .bind(runId)
+    .first<{ repo: string; pr_number: number }>()
+  if (!run) return new Response('run not found', { status: 404 })
+
+  const doUrl = new URL('https://do/viewer-connect')
+  doUrl.searchParams.set('runId', runId)
+  const sinceSeq = new URL(req.url).searchParams.get('sinceSeq')
+  if (sinceSeq) doUrl.searchParams.set('sinceSeq', sinceSeq)
+  return prCoordinator(env, run.repo, run.pr_number).fetch(new Request(doUrl, req))
+}
+
 // POST /api/runs/:runId/commands — body is one encoded protocol command.
 // Validation is strict (decodeCommand): commands get acted on, so unknown
 // types are rejected rather than relayed. Valid commands go to the run's PR

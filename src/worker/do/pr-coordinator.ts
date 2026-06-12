@@ -4,10 +4,8 @@ import { insertEvents, type RunEvent } from '../db.ts'
 // One Durable Object per PR: the coordination point between the PR's box and
 // the rest of the system. It terminates the box's single outbound WebSocket
 // (hibernation API, so an idle connected box costs nothing), queues commands
-// and run dispatches while no box is connected, and writes the box's events
-// through to D1 — where the existing SSE endpoint picks them up for viewers.
-// (A direct DO→viewer WebSocket leg can replace that poll later without
-// changing the box side.)
+// and run dispatches while no box is connected, writes the box's events
+// through to D1, and fans them out live to connected viewer WebSockets.
 //
 // Box-channel wire format — OUR contract between worker and box bootstrap,
 // wrapping (not extending) the published protocol:
@@ -19,11 +17,19 @@ import { insertEvents, type RunEvent } from '../db.ts'
 //                { kind: 'update', update }             (checkout + run
 //                  pipeline stages: { headSha, vector, stages: [{name,run}] })
 //
+// Viewer-channel wire format (WS, cookie-authed at the worker edge):
+//   cloud → viewer: { kind: 'event', seq, payload }
+//     payload is the raw JSON string — same bytes SSE put after `data:`.
+//     Client calls JSON.parse(frame.payload) to recover the protocol event.
+//     Both live and replay frames use this shape so the client dedupes by seq.
+//
 // Internal HTTP surface (reachable only via the binding, never publicly):
-//   GET  /box-connect?boxId=…  — WebSocket upgrade for the box channel
-//   POST /command              — { runId, command } → send or queue
-//   POST /dispatch             — { run: RunSpec } → send or queue
-//   POST /retire               — { boxId } → close its sockets, drop queue
+//   GET  /box-connect?boxId=…              — WebSocket upgrade for the box
+//   GET  /viewer-connect?runId=…&sinceSeq=… — WebSocket upgrade for viewers
+//   POST /command                          — { runId, command } → send or queue
+//   POST /dispatch                         — { run: RunSpec } → send or queue
+//   POST /retire                           — { boxId } → close sockets, drop queue
+//   POST /ingest/:runId                    — { events } → ingestAndFanout
 
 interface EventsEnvelope {
   kind: 'events'
@@ -32,6 +38,7 @@ interface EventsEnvelope {
 }
 
 const QUEUE_PREFIX = 'q:'
+const REPLAY_PAGE = 1000
 
 export class PrCoordinator implements DurableObject {
   constructor(
@@ -55,6 +62,24 @@ export class PrCoordinator implements DurableObject {
       const pair = new WebSocketPair()
       this.state.acceptWebSocket(pair[1]!, ['box', boxId])
       await this.flushQueue(pair[1]!)
+      return new Response(null, { status: 101, webSocket: pair[0]! })
+    }
+
+    if (url.pathname === '/viewer-connect') {
+      if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+        return new Response('Expected WebSocket', { status: 426 })
+      }
+      const runId = url.searchParams.get('runId')
+      if (!runId) return new Response('runId required', { status: 400 })
+      let sinceSeq = parseInt(url.searchParams.get('sinceSeq') ?? '0', 10)
+      if (!Number.isFinite(sinceSeq) || sinceSeq < 0) sinceSeq = 0
+
+      const pair = new WebSocketPair()
+      // Register FIRST so live frames during the replay window reach this
+      // socket. Any event delivered twice (live + replay) is deduped by the
+      // client on seq — no event is ever lost.
+      this.state.acceptWebSocket(pair[1]!, ['viewer', `v:${runId}`])
+      await this.replayTo(pair[1]!, runId, sinceSeq)
       return new Response(null, { status: 101, webSocket: pair[0]! })
     }
 
@@ -88,6 +113,17 @@ export class PrCoordinator implements DurableObject {
       return Response.json({ ok: true })
     }
 
+    if (url.pathname.startsWith('/ingest/') && req.method === 'POST') {
+      const runId = decodeURIComponent(url.pathname.slice('/ingest/'.length))
+      if (!runId) return new Response('runId required', { status: 400 })
+      const { events } = (await req.json()) as { events?: RunEvent[] }
+      const valid = (events ?? []).filter(
+        (e): e is RunEvent => e != null && typeof e.seq === 'number',
+      )
+      await this.ingestAndFanout(runId, valid)
+      return Response.json({ ok: true, count: valid.length })
+    }
+
     return new Response('Not Found', { status: 404 })
   }
 
@@ -108,13 +144,54 @@ export class PrCoordinator implements DurableObject {
     const events = envelope.events.filter(
       (e): e is RunEvent => e != null && typeof e.seq === 'number',
     )
-    if (events.length > 0) await insertEvents(this.env.DB, envelope.runId, events)
+    await this.ingestAndFanout(envelope.runId, events)
     ws.send(JSON.stringify({ kind: 'ack', runId: envelope.runId, count: events.length }))
   }
 
   async webSocketClose(): Promise<void> {
     // Nothing to clean: connection state lives in the socket tags, and the
     // queue persists precisely for the box-not-connected case.
+  }
+
+  private async ingestAndFanout(runId: string, events: RunEvent[]): Promise<void> {
+    if (events.length === 0) return
+    await insertEvents(this.env.DB, runId, events)
+    this.fanout(runId, events)
+  }
+
+  // Fan live events to every viewer registered for this run.
+  // payload is re-serialized to a JSON string so replay and live frames are
+  // identical on the wire — client calls JSON.parse(frame.payload) for both.
+  private fanout(runId: string, events: RunEvent[]): void {
+    const sockets = this.state.getWebSockets(`v:${runId}`)
+    if (sockets.length === 0) return
+    for (const e of events) {
+      const frame = JSON.stringify({
+        kind: 'event',
+        seq: e.seq,
+        payload: JSON.stringify(e.payload ?? null),
+      })
+      for (const ws of sockets) {
+        try { ws.send(frame) } catch { /* socket closing; nothing to do */ }
+      }
+    }
+  }
+
+  // Replay stored events to a single viewer. Pages through D1 to avoid
+  // loading an entire long run into memory at once.
+  private async replayTo(ws: WebSocket, runId: string, sinceSeq: number): Promise<void> {
+    let after = sinceSeq
+    for (;;) {
+      const { results } = await this.env.DB.prepare(
+        'SELECT seq, payload FROM events WHERE run_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3',
+      ).bind(runId, after, REPLAY_PAGE).all<{ seq: number; payload: string }>()
+      for (const row of results ?? []) {
+        // row.payload is already a JSON string (insertEvents stores JSON.stringify).
+        ws.send(JSON.stringify({ kind: 'event', seq: row.seq, payload: row.payload }))
+        after = row.seq
+      }
+      if ((results?.length ?? 0) < REPLAY_PAGE) break
+    }
   }
 
   private boxSocket(): WebSocket | null {

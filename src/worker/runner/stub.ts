@@ -1,6 +1,6 @@
 import type { Env } from '../env.ts'
 import type { RunSpec, Runner } from './types.ts'
-import { insertEvents } from '../db.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
 
 // LocalStubRunner: fabricates a plausible run by writing scenetest-shaped
 // events + scene_executions straight to D1. It has no real machine, so
@@ -35,7 +35,13 @@ async function runStub(env: Env, run: RunSpec) {
   let seq = 0
   const emit = async (payload: unknown) => {
     seq += 1
-    await insertEvents(env.DB, run.runId, [{ seq, payload }])
+    await prCoordinator(env, run.repo, run.prNumber).fetch(
+      new Request(`https://do/ingest/${encodeURIComponent(run.runId)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ events: [{ seq, payload }] }),
+      }),
+    )
   }
 
   await env.DB.prepare(

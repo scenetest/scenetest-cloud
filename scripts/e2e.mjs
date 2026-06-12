@@ -132,6 +132,63 @@ async function collectSse(path, cookie, maxMs = 8000) {
   }
 }
 
+// Extract the raw session token value from a Cookie header string.
+// The viewer WS route accepts ?session=<token> as a fallback for clients
+// (like Node's global WebSocket) that cannot set request headers.
+function sessionToken(cookie) {
+  return (/(?:^|;\s*)session=([^;]*)/.exec(cookie) ?? [])[1] ?? ''
+}
+
+// Build a viewer WS URL, injecting the session token as ?session=.
+function viewerWsUrl(path, cookie) {
+  const sep = path.includes('?') ? '&' : '?'
+  return `ws://127.0.0.1:${PORT}${path}${sep}session=${sessionToken(cookie)}`
+}
+
+// Connect a viewer WebSocket, collect { events, seqs } until `run:end` arrives
+// or maxMs elapses.
+async function collectWs(path, cookie, maxMs = 8000) {
+  return new Promise((resolve) => {
+    const events = []
+    const seqs = []
+    let resolved = false
+    let opened = false
+    const finish = (status) => {
+      if (resolved) return
+      resolved = true
+      clearTimeout(timer)
+      try { ws.close() } catch {}
+      resolve({ status, events, seqs })
+    }
+    const timer = setTimeout(() => finish(0), maxMs)
+    const ws = new WebSocket(viewerWsUrl(path, cookie))
+    ws.addEventListener('open', () => { opened = true })
+    ws.addEventListener('error', () => finish(opened ? 0 : 401))
+    ws.addEventListener('close', (e) => finish(opened ? (e.code === 1000 ? 200 : 0) : 401))
+    ws.addEventListener('message', (e) => {
+      let frame
+      try { frame = JSON.parse(e.data) } catch { return }
+      if (frame.kind !== 'event') return
+      seqs.push(frame.seq)
+      let payload
+      try { payload = JSON.parse(frame.payload) } catch { return }
+      events.push(payload)
+      if (payload?.type === 'run:end') setTimeout(() => finish(200), 100)
+    })
+  })
+}
+
+// Check whether a WS upgrade is accepted ('open') or refused ('refused').
+async function wsStatus(path, cookie, maxMs = 2000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { try { ws.close() } catch {}; resolve('timeout') }, maxMs)
+    const ws = new WebSocket(viewerWsUrl(path, cookie))
+    ws.addEventListener('open', () => { clearTimeout(timer); resolve('open') })
+    ws.addEventListener('error', () => { clearTimeout(timer); resolve('refused') })
+    ws.addEventListener('close', () => { clearTimeout(timer); resolve('refused') })
+  })
+}
+
 // ---------- main -------------------------------------------------------------
 
 const persistDir = mkdtempSync(join(tmpdir(), 'scenetest-e2e-'))
@@ -248,13 +305,14 @@ async function main() {
   check('newly watched repo triggers a run (case-insensitive match)',
     addedHook.result?.startsWith('run-created:'), JSON.stringify(addedHook))
 
-  // --- the run that webhook triggered, observed through SSE ---
-  console.log('· stub run → SSE')
-  const replay = await collectSse(`/api/runs/${webhookRunId}/events`, cookie)
+  // --- the run that webhook triggered, observed through the viewer WebSocket --
+  console.log('· stub run → viewer WS')
+  const replay = await collectWs(`/api/runs/${webhookRunId}/ws`, cookie)
   const types = replay.events.map((e) => e.type)
-  check('SSE replays run:start first', types[0] === 'run:start')
-  check('SSE reaches run:end (stream closed by terminal state)', types.includes('run:end'))
+  check('WS replays run:start first', types[0] === 'run:start')
+  check('WS reaches run:end', types.includes('run:end'))
   check('scenes flowed through', types.filter((t) => t === 'scene:start').length === 4)
+  check('no duplicate seq in replay', replay.seqs.length === new Set(replay.seqs).size)
 
   // --- dashboard shell + widget + commands ---
   console.log('· dashboard')
@@ -277,8 +335,8 @@ async function main() {
     body: JSON.stringify({ type: 'rm -rf' }),
   })
   check('garbage command → 400', cmdBad.status === 400)
-  check('SSE with tampered session → 401',
-    (await collectSse(`/api/runs/${webhookRunId}/events`, 'session=tampered.sig', 1500)).status === 401)
+  check('WS with tampered session → refused',
+    (await wsStatus(`/api/runs/${webhookRunId}/ws`, 'session=tampered.sig')) === 'refused')
 
   // --- PR coordinator: the script plays the box over the WebSocket channel --
   console.log('· PR coordinator (box channel)')
@@ -344,9 +402,33 @@ async function main() {
   }))
   check('coordinator acked the events batch',
     (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
-  const wsReplay = await collectSse('/api/runs/e2e-ws-run/events', cookie, 2500)
-  check('box events reached viewers via D1 → SSE',
+
+  // Viewer WS: replay from D1, then live events.
+  const wsReplay = await collectWs('/api/runs/e2e-ws-run/ws', cookie, 2500)
+  check('box events reached viewer via WS replay',
     wsReplay.events.some((e) => e.type === 'scene:start' && e.name === 'ws scene'))
+
+  // --- overlap dedup: replay and live may both deliver the same seq ----------
+  // Connect a new viewer, then push a fresh event. The viewer gets the new
+  // event exactly once — either from fanout before replay reaches it, or from
+  // replay; the client's seq filter drops any duplicate.
+  console.log('· replay/live overlap dedup + reconnect')
+  box.send(JSON.stringify({
+    kind: 'events', runId: 'e2e-ws-run',
+    events: [{ seq: 3, payload: { type: 'action:start', timestamp: Date.now(), actor: 'A', action: 'click', target: 'x' } }],
+  }))
+  await waitInbox((m) => m.kind === 'ack' && m.runId === 'e2e-ws-run' && m.count >= 1)
+
+  // Full replay (sinceSeq=0): seq 1, 2, 3 — no duplicates.
+  const full = await collectWs('/api/runs/e2e-ws-run/ws?sinceSeq=0', cookie, 2500)
+  check('full replay delivers all three events', full.seqs.length >= 3, JSON.stringify(full.seqs))
+  check('no duplicates in full replay', full.seqs.length === new Set(full.seqs).size)
+
+  // Reconnect with sinceSeq=2: should only see seq 3, never seq 1 or 2.
+  const partial = await collectWs('/api/runs/e2e-ws-run/ws?sinceSeq=2', cookie, 2500)
+  check('sinceSeq=2 skips seq 1 and 2', partial.seqs.every((s) => s > 2), JSON.stringify(partial.seqs))
+  check('sinceSeq=2 delivers seq 3', partial.seqs.includes(3))
+
   box.close()
 
   // --- the real box agent, spawned in test mode -----------------------------
@@ -425,8 +507,8 @@ async function main() {
     body: JSON.stringify({ events: [{ payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } }] }),
   })
   check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
-  const agentReplay = await collectSse('/api/runs/e2e-agent-run/events', cookie, 2500)
-  check('agent-relayed event reached viewers via D1 → SSE',
+  const agentReplay = await collectWs('/api/runs/e2e-agent-run/ws', cookie, 2500)
+  check('agent-relayed event reached viewer via WS',
     agentReplay.events.some((e) => e.type === 'run:start'))
 
   // Dispatch a batch: the agent runs the scenes command from the update,
@@ -488,7 +570,7 @@ async function main() {
   }))).runId
   const run1 = await stubRun()
   const run2 = await stubRun()
-  await collectSse(`/api/runs/${run2}/events`, cookie) // closes when run2 is terminal
+  await collectWs(`/api/runs/${run2}/ws`, cookie) // closes when run2 emits run:end
   await new Promise((r) => setTimeout(r, 300)) // let run1's bailing loop settle
 
   const statuses = d1Query(persistDir,
