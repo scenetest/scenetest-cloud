@@ -426,6 +426,23 @@ async function main() {
   })
   check('failed stage report → box retired', (await j(failReady)).retired === true)
 
+  // --- the add-a-project wizard's status checklist ---------------------------
+  console.log('· repo setup status')
+  check('status endpoint anonymous → 401',
+    (await fetch(`${BASE}/api/admin/repos/demo/watched/status`)).status === 401)
+  const st1 = await j(await fetch(`${BASE}/api/admin/repos/demo/watched/status`, { headers: { cookie } }))
+  check('status: registered + webhook seen + first run present',
+    st1.registered === true && st1.webhook.seen === true && st1.first_run != null,
+    JSON.stringify(st1))
+  check('status: pipeline not falsely active', st1.pipeline.state !== 'active', JSON.stringify(st1.pipeline))
+  // A box that realized real (non-coarse) stages flips the pipeline check.
+  d1Query(persistDir,
+    `UPDATE boxes SET realized_stages = '{"deps":"d1","db":"d2","build":"d3"}'
+      WHERE id = (SELECT id FROM boxes WHERE repo = 'demo/watched' ORDER BY created_at DESC, rowid DESC LIMIT 1)`)
+  const st2 = await j(await fetch(`${BASE}/api/admin/repos/demo/watched/status`, { headers: { cookie } }))
+  check('status: realized stages → pipeline active (from box evidence)',
+    st2.pipeline.state === 'active' && st2.pipeline.source === 'box', JSON.stringify(st2.pipeline))
+
   // --- latest-wins: second push retires the box and cancels run 1 -----------
   // Timing assumption: the stub batch takes ≥600ms (5 × 120ms action sleeps),
   // and the second trigger lands within ~100ms of the first returning — so

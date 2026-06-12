@@ -40,3 +40,14 @@ export interface RepoDetail {
   open_prs: PrSummary[]
   recent_runs: RecentRun[]
 }
+
+// Add-a-project wizard checklist (GET /api/admin/repos/:owner/:name/status).
+export interface RepoSetupStatus {
+  registered: boolean
+  webhook: { seen: boolean; last_event?: string; last_at?: number }
+  pipeline: {
+    state: 'active' | 'present' | 'absent' | 'unknown'
+    source: 'box' | 'github'
+  }
+  first_run: { id: string; status: string; started_at: number | null } | null
+}
