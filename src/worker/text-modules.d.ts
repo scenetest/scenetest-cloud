@@ -1,5 +1,2 @@
-// Modules imported as raw text via wrangler [[rules]] type = "Text".
-declare module '*.sh' {
-  const text: string
-  export default text
-}
+// Shell assets are no longer imported as raw text (WAF risk).
+// Use scripts/encode-assets.mjs to regenerate the *-b64.ts files.

@@ -10,7 +10,7 @@
     "dev:dashboard": "vite",
     "dev:dashboard:watch": "vite build --watch",
     "build:dashboard": "vite build",
-    "deploy": "pnpm build:dashboard && wrangler deploy",
+    "deploy": "node scripts/encode-assets.mjs && pnpm build:dashboard && wrangler deploy --env production",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "typecheck": "tsc --noEmit",

@@ -1,4 +1,5 @@
 name = "scenetest-cloud"
+account_id = "dd3bee1c1159eb67e1a2249f83e2b4c4"
 main = "src/worker/index.ts"
 compatibility_date = "2025-01-15"
 compatibility_flags = ["nodejs_compat"]
@@ -28,14 +29,6 @@ binding = "ASSETS"
 # (200). Without this, deep links like /404 or /admin land on the assets
 # handler's own 404 instead of letting the SPA render its own page.
 not_found_handling = "single-page-application"
-
-# The builder cloud-init script and the box agent are bundled as text: they
-# are inputs to the image stage (hashed into its cache key) and shipped to
-# DigitalOcean inside user_data.
-[[rules]]
-type = "Text"
-globs = ["**/*.sh", "**/agent.mjs"]
-fallthrough = true
 
 # One Durable Object per PR (SQLite-backed): terminates the box's outbound
 # WebSocket, queues commands/dispatches, writes events through to D1.
@@ -84,3 +77,32 @@ ENABLE_DEBUG_ROUTES = "0"
 #   GITHUB_WEBHOOK_SECRET
 #   SESSION_SECRET
 #   DO_API_TOKEN          (only when RUNNER_PROVIDER = "digitalocean")
+
+# Production environment — deploy with: wrangler deploy --env production
+# Vars here replace (not merge with) the top-level [vars] block.
+[env.production]
+name = "scenetest-cloud"
+workers_dev = false
+
+[[env.production.routes]]
+pattern = "ci.msnook.xyz"
+zone_name = "msnook.xyz"
+custom_domain = true
+
+[env.production.durable_objects]
+bindings = [{ name = "PR_COORDINATOR", class_name = "PrCoordinator" }]
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "scenetest-cloud-mhsnook"
+database_id = "59cdeb29-a690-46b8-a8f9-423be56ed4d8"
+migrations_dir = "migrations"
+
+[env.production.vars]
+GITHUB_OAUTH_CLIENT_ID = "Iv23lirXMXY2Wpn6xdx5"
+RUNNER_PROVIDER = "digitalocean"
+RUNNER_REGION = "blr1"
+RUNNER_SIZE = "s-2vcpu-4gb"
+PUBLIC_BASE_URL = "https://ci.msnook.xyz"
+BOOTSTRAP_ALLOWED_LOGIN = "mhsnook"
+ENABLE_DEBUG_ROUTES = "0"
