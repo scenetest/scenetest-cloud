@@ -1,6 +1,6 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { dashboardHtml, dashboardSse, postRunCommand } from './scenetest-bridge/routes.ts'
+import { dashboardHtml, dashboardSse, dashboardWs, postRunCommand } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun, debugBoxUpdate, debugBoxDispatch } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
@@ -52,6 +52,7 @@ const router = new Router()
   .get('/r/:runId/dashboard', withSession(dashboardHtml, 'redirect'))
   .get('/r/:runId/dashboard/', withSession(dashboardHtml, 'redirect'))
   .get('/api/runs/:runId/events', withSession(dashboardSse))
+  .get('/api/runs/:runId/ws', withSession(dashboardWs))
   .post('/api/runs/:runId/commands', withSession(postRunCommand))
   // GitHub webhooks (HMAC-authed inside the handler)
   .post('/webhook/github', postGithubWebhook)

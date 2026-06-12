@@ -1,6 +1,5 @@
-// Shared statements where two writers must stay wire-compatible (e.g. the
-// HTTP ingest route and the dev stub runner both feed the events table that
-// the SSE bridge reads back).
+// Shared DB helpers. insertEvents is the single write path for the events
+// table; all ingest routes go through the DO's ingestAndFanout which calls it.
 
 export interface RunEvent {
   seq: number

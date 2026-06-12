@@ -13,7 +13,12 @@ interface SessionPayload {
 
 export async function getSessionUser(req: Request, env: Env): Promise<AuthedUser | null> {
   const cookies = parseCookies(req.headers.get('cookie'))
-  const token = cookies[SESSION_COOKIE]
+  let token: string | undefined = cookies[SESSION_COOKIE]
+  // WebSocket upgrade requests from browsers carry cookies automatically
+  // (same-origin). Test clients that cannot set headers use ?session= instead.
+  if (!token && req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+    token = new URL(req.url).searchParams.get('session') ?? undefined
+  }
   if (!token) return null
   const payload = await verifyPayload<SessionPayload>(token, env.SESSION_SECRET)
   if (!payload) return null

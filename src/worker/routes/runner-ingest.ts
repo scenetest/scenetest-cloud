@@ -1,10 +1,12 @@
 import type { Handler } from '../router.ts'
 import { verifyBoxToken } from '../middleware/bearer.ts'
-import { insertEvents, type RunEvent } from '../db.ts'
+import type { RunEvent } from '../db.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
 
 // POST /api/events/:runId
 // Body: { events: Array<{ seq: number, payload: unknown }> }
-// Payload is opaque JSON (scenetest-js wire format). We store and forward.
+// Payload is opaque JSON (scenetest-js wire format). Routed through the DO so
+// events are persisted and fanned out to connected viewers in one step.
 export const postEvents: Handler = async (req, env, _ctx, params) => {
   const runId = params.runId!
   const auth = await verifyBoxToken(req, env, runId)
@@ -13,7 +15,14 @@ export const postEvents: Handler = async (req, env, _ctx, params) => {
   const body = await req.json<{ events?: RunEvent[] }>()
   if (!body.events?.length) return new Response('No events', { status: 400 })
 
-  await insertEvents(env.DB, runId, body.events)
+  const { repo, pr_number } = auth.run
+  await prCoordinator(env, repo, pr_number).fetch(
+    new Request(`https://do/ingest/${encodeURIComponent(runId)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ events: body.events }),
+    }),
+  )
   return Response.json({ ok: true, count: body.events.length })
 }
 
