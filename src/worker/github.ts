@@ -5,6 +5,15 @@ export const GH_API_HEADERS = {
   'user-agent': 'scenetest-cloud',
 } as const
 
+// Headers for api.github.com, authenticated when the deployment has a
+// GITHUB_API_TOKEN (unauthenticated calls share the worker egress IP's
+// 60/hr limit).
+export function ghHeaders(env: { GITHUB_API_TOKEN?: string }): Record<string, string> {
+  return env.GITHUB_API_TOKEN
+    ? { ...GH_API_HEADERS, authorization: `Bearer ${env.GITHUB_API_TOKEN}` }
+    : { ...GH_API_HEADERS }
+}
+
 const enc = new TextEncoder()
 
 // GitHub signs the raw request body with HMAC-SHA256 and sends

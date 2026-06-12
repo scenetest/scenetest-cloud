@@ -151,7 +151,7 @@ function Checklist({ owner, name, onOpenRepo }: { owner: string; name: string; o
       <Step
         done={s?.first_run != null}
         title='4 · First run'
-        doneNote={s?.first_run ? `Run ${s.first_run.status}.` : ''}
+        doneNote={s?.first_run ? `Run ${s.first_run.status}.` : undefined}
       >
         <p class='m-0'>
           Open (or push to) a pull request on the repo. The very first run waits ~10–15 minutes
@@ -174,7 +174,7 @@ function Checklist({ owner, name, onOpenRepo }: { owner: string; name: string; o
 function Step({ done, title, doneNote, children }: {
   done: boolean
   title: string
-  doneNote: string
+  doneNote?: string
   children: preact.ComponentChildren
 }) {
   return (

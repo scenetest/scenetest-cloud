@@ -1,6 +1,6 @@
 import type { Handler } from '../router.ts'
 import type { Env } from '../env.ts'
-import { hashToken } from '../middleware/bearer.ts'
+import { bearerFrom, hashToken } from '../middleware/bearer.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
 import { retireBox } from '../runner/box.ts'
 
@@ -54,8 +54,7 @@ export const boxChannel: Handler = async (req, env, _ctx, params) => {
 // Body is optional for backward compatibility (bare ready, no vector).
 export const boxReady: Handler = async (req, env, _ctx, params) => {
   const boxId = params.boxId!
-  const headerToken = /^Bearer\s+(.+)$/.exec(req.headers.get('authorization') ?? '')?.[1]
-  const box = await verifyBox(env, boxId, headerToken ?? null)
+  const box = await verifyBox(env, boxId, bearerFrom(req))
   if (!box) return new Response('Unauthorized', { status: 401 })
 
   const body = (await req.json().catch(() => ({}))) as {
@@ -84,5 +83,5 @@ export const boxReady: Handler = async (req, env, _ctx, params) => {
       boxId,
     )
     .run()
-  return Response.json({ ok: true })
+  return Response.json({ ok: true, retired: false })
 }

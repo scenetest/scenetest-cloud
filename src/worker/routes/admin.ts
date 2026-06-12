@@ -1,5 +1,5 @@
 import type { AuthedHandler } from '../auth/session.ts'
-import { GH_API_HEADERS } from '../github.ts'
+import { GH_API_HEADERS, ghHeaders } from '../github.ts'
 
 async function readJson<T>(req: Request): Promise<T | null> {
   try { return (await req.json()) as T } catch { return null }
@@ -112,6 +112,9 @@ export const deleteRepo: AuthedHandler = async (_req, env, _ctx, params) => {
 //                else a direct GitHub contents probe ('present'/'absent'),
 //                'unknown' when GitHub can't be reached
 //   first_run  — the most recent run, if any
+const PROBE_TTL_MS = 60_000
+const probeCache = new Map<string, { at: number; state: 'present' | 'absent' }>()
+
 export const repoStatus: AuthedHandler = async (_req, env, _ctx, params) => {
   const owner = params.owner!
   const name = params.name!
@@ -138,24 +141,35 @@ export const repoStatus: AuthedHandler = async (_req, env, _ctx, params) => {
   let pipeline: { state: 'active' | 'present' | 'absent' | 'unknown'; source: 'box' | 'github' }
   const realizedKeys = box?.realized_stages ? Object.keys(JSON.parse(box.realized_stages)) : null
   if (realizedKeys && realizedKeys.length > 0) {
-    // A box has run the pipeline: coarse default realizes only 'setup' (or
-    // the '*coarse*' pseudo-stage); anything else means a real pipeline file.
-    const coarse = realizedKeys.every((k) => k === 'setup' || k === '*coarse*')
+    // A box has run the pipeline. System pseudo-stages ('*setup*' from the
+    // default pipeline, '*coarse*' from the fallback plan) live in a
+    // reserved namespace user stage names can't enter — all-reserved means
+    // no real pipeline file was in play.
+    const coarse = realizedKeys.every((k) => k.startsWith('*'))
     pipeline = { state: coarse ? 'absent' : 'active', source: 'box' }
   } else {
     pipeline = { state: 'unknown', source: 'github' }
-    try {
-      const headers: Record<string, string> = env.GITHUB_API_TOKEN
-        ? { ...GH_API_HEADERS, authorization: `Bearer ${env.GITHUB_API_TOKEN}` }
-        : { ...GH_API_HEADERS }
-      const resp = await fetch(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/scenetest/pipeline.json`,
-        { headers },
-      )
-      if (resp.ok) pipeline = { state: 'present', source: 'github' }
-      else if (resp.status === 404) pipeline = { state: 'absent', source: 'github' }
-    } catch {
-      // network/rate-limit: stay 'unknown'
+    // The wizard polls this endpoint every few seconds; cache the GitHub
+    // probe per repo so polling doesn't burn the rate limit (isolate-local,
+    // best effort).
+    const cacheKey = `${owner}/${name}`.toLowerCase()
+    const cached = probeCache.get(cacheKey)
+    if (cached && Date.now() - cached.at < PROBE_TTL_MS) {
+      pipeline = { state: cached.state, source: 'github' }
+    } else {
+      try {
+        const resp = await fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/contents/scenetest/pipeline.json`,
+          { headers: ghHeaders(env) },
+        )
+        if (resp.ok || resp.status === 404) {
+          const state = resp.ok ? ('present' as const) : ('absent' as const)
+          probeCache.set(cacheKey, { at: Date.now(), state })
+          pipeline = { state, source: 'github' }
+        }
+      } catch {
+        // network/rate-limit: stay 'unknown'
+      }
     }
   }
 

@@ -30,7 +30,7 @@
 // SCENETEST_NO_POWEROFF=1 logs instead of powering off.
 
 import { spawn, execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 
@@ -124,6 +124,18 @@ async function applyUpdate(update, repoDir) {
 
 // ---------- event relay -------------------------------------------------------
 
+// Assign sequence numbers (preserving any the caller provided) and relay.
+// Shared by the local HTTP ingest and the events-file tail so the two entry
+// points can't drift on numbering.
+function ingestEvents(runId, rawEvents) {
+  let seq = seqByRun.get(runId) ?? 0
+  const numbered = rawEvents.map((e) =>
+    typeof e.seq === 'number' ? ((seq = Math.max(seq, e.seq)), e) : { seq: ++seq, payload: e.payload ?? e },
+  )
+  seqByRun.set(runId, seq)
+  return relayEvents(runId, numbered)
+}
+
 function relayEvents(runId, events) {
   for (const e of events) {
     appendFileSync(join(WORK_DIR, `${runId}.jsonl`), JSON.stringify(e.payload ?? e) + '\n')
@@ -160,14 +172,9 @@ function startLocalIngest() {
         res.writeHead(400).end('no events')
         return
       }
-      let seq = seqByRun.get(runId) ?? 0
-      const numbered = events.map((e) =>
-        typeof e.seq === 'number' ? ((seq = Math.max(seq, e.seq)), e) : { seq: ++seq, payload: e.payload ?? e },
-      )
-      seqByRun.set(runId, seq)
-      const sent = relayEvents(runId, numbered)
+      const sent = ingestEvents(runId, events)
       res.writeHead(202, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, relayed: sent, count: numbered.length }))
+      res.end(JSON.stringify({ ok: true, relayed: sent, count: events.length }))
     })
   })
   server.listen(LOCAL_PORT, '127.0.0.1', () => log(`local ingest on 127.0.0.1:${LOCAL_PORT}`))
@@ -212,6 +219,10 @@ function runBatch(run, repoDir) {
   let sawEnd = null
   const sweep = () => {
     if (!existsSync(eventsFile)) return
+    // Cheap stat guard: most 250ms ticks see no growth, so don't re-read the
+    // file. (Byte size vs char offset can differ on multibyte content — the
+    // guard only ever errs toward an extra read, never a missed one.)
+    if (statSync(eventsFile).size <= offset) return
     const text = readFileSync(eventsFile, 'utf8')
     if (text.length <= offset) return
     const chunk = text.slice(offset)
@@ -229,12 +240,7 @@ function runBatch(run, repoDir) {
         // not JSON; skip the line rather than poison the batch
       }
     }
-    if (events.length > 0) {
-      let seq = seqByRun.get(run.runId) ?? 0
-      const numbered = events.map((e) => ({ seq: ++seq, payload: e.payload }))
-      seqByRun.set(run.runId, seq)
-      relayEvents(run.runId, numbered)
-    }
+    if (events.length > 0) ingestEvents(run.runId, events)
   }
   const tail = setInterval(sweep, 250)
 
