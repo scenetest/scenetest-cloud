@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { MissingInsertHandlerError } from '@tanstack/db'
+import { MissingInsertHandlerError, createLiveQueryCollection, count } from '@tanstack/db'
 import type { RunEvent, TeamMeta } from '@scenetest/protocol'
 import type { ShapeSource } from './runShapeSource.ts'
 import { createScenesCollection, type SceneRow } from './collections/scenes.ts'
@@ -69,6 +69,32 @@ describe('ws-shape scenes collection (read-only replica)', () => {
     emit(start('e2e', 'flaky.scene.ts'))
     emit(end('e2e', 'flaky', 50))
     expect(scenes.get('flaky.scene.ts:e2e')?.status).toBe('flaky')
+  })
+
+  it('live aggregate (groupBy status → count) recomputes incrementally', async () => {
+    const { source, emit } = fakeSource()
+    const scenes = createScenesCollection(source)
+    await scenes.preload()
+
+    // The same query the panel runs — maintained by d2ts, headless here.
+    const rollup = createLiveQueryCollection({
+      query: (q) =>
+        q
+          .from({ s: scenes })
+          .groupBy(({ s }) => s.status)
+          .select(({ s }) => ({ status: s.status, n: count(s.scene_id) })),
+    })
+    await rollup.preload()
+    const n = (status: string) =>
+      (rollup.toArray as Array<{ status: string; n: number }>).find((r) => r.status === status)?.n ?? 0
+
+    emit(start('a', 'f.ts'))
+    emit(start('b', 'f.ts'))
+    expect(n('running')).toBe(2)
+
+    emit(end('a', 'passed', 10))
+    expect(n('running')).toBe(1)
+    expect(n('passed')).toBe(1)
   })
 
   it('is structurally read-only: there is no client mutation path', async () => {
