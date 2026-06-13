@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SchemaValidationError } from '@tanstack/db'
+import { MissingInsertHandlerError } from '@tanstack/db'
 import type { RunEvent, TeamMeta } from '@scenetest/protocol'
 import type { ShapeSource } from './runShapeSource.ts'
 import { createScenesCollection, type SceneRow } from './collections/scenes.ts'
@@ -30,7 +30,7 @@ const end = (name: string, status: string, duration: number): RunEvent => ({
   type: 'scene:end', timestamp: 2000, name, status, duration, teamIndex: 0, team,
 })
 
-describe('ws-shape scenes collection', () => {
+describe('ws-shape scenes collection (read-only replica)', () => {
   it('folds scene:start → scene:end into a row (insert then update)', async () => {
     const { source, emit } = fakeSource()
     const scenes = createScenesCollection(source)
@@ -59,32 +59,28 @@ describe('ws-shape scenes collection', () => {
     expect(failing()).toBe(1)
   })
 
-  // The crux: synced data is NOT schema-validated, but client mutations ARE.
-  it('SYNC path accepts a row outside the schema enum (raw replica)', async () => {
+  it('mirrors whatever the producer emits — no validation on the sync path', async () => {
     const { source, emit } = fakeSource()
     const scenes = createScenesCollection(source)
     await scenes.preload()
 
-    // 'flaky' is not in the SceneRow status enum.
+    // An arbitrary producer-defined status lands as-is: a read replica mirrors
+    // the source, it does not police it.
     emit(start('e2e', 'flaky.scene.ts'))
     emit(end('e2e', 'flaky', 50))
-
-    const row = scenes.get('flaky.scene.ts:e2e')
-    // It landed anyway — sync writes bypass schema validation entirely.
-    expect(row?.status).toBe('flaky')
+    expect(scenes.get('flaky.scene.ts:e2e')?.status).toBe('flaky')
   })
 
-  it('CLIENT mutation path DOES validate the same bad row', async () => {
+  it('is structurally read-only: there is no client mutation path', async () => {
     const { source } = fakeSource()
     const scenes = createScenesCollection(source)
     await scenes.preload()
 
-    const bad = {
-      scene_id: 'x', file: 'x', name: 'x',
-      status: 'flaky', teamIndex: 0, startedAt: 1,
-    } as unknown as SceneRow
-
-    // Same shape that sailed through sync throws when offered as a client write.
-    expect(() => scenes.validateData(bad, 'insert')).toThrow(SchemaValidationError)
+    const row: SceneRow = {
+      scene_id: 'x', file: 'x', name: 'x', status: 'running', teamIndex: 0, startedAt: 1,
+    }
+    // No onInsert/onUpdate/onDelete handler is configured, so a client write
+    // throws rather than mutating — the sync reducer is the only writer.
+    expect(() => scenes.insert(row)).toThrow(MissingInsertHandlerError)
   })
 })

@@ -1,26 +1,27 @@
-import { z } from 'zod'
 import { createCollection } from '@tanstack/db'
 import type { RunEvent } from '@scenetest/protocol'
 import { wsShapeSync, type ShapeChange } from '../wsShapeCollection.ts'
 import type { ShapeSource } from '../runShapeSource.ts'
 
 // One row per scene execution, folded from the protocol event stream. scene_id
-// mirrors the server's convention ('<file>:<scene name>'). status is a closed
-// enum here on purpose — see the test: a scene:end whose status is outside this
-// set still lands via the SYNC path (raw replica), because the schema gates
-// only client mutations, not synced writes.
-export const SceneRow = z.object({
-  scene_id: z.string(),
-  file: z.string(),
-  name: z.string(),
-  status: z.enum(['running', 'passed', 'failed', 'skipped']),
-  teamIndex: z.number().int(),
-  startedAt: z.number(),
-  endedAt: z.number().optional(),
-  durationMs: z.number().optional(),
-  error: z.string().optional(),
-})
-export type SceneRow = z.infer<typeof SceneRow>
+// mirrors the server's convention ('<file>:<scene name>').
+//
+// Read-only replica: there is NO client mutation path. The collection has no
+// onInsert/onUpdate/onDelete handlers, so the ONLY writer is the sync reducer
+// below — server → client, one direction. `status` is a plain string because
+// we mirror whatever the producer emits (no enum to validate against; nothing
+// here validates synced data, by design).
+export interface SceneRow {
+  scene_id: string
+  file: string
+  name: string
+  status: string // 'running' | 'passed' | 'failed' | 'skipped' | … (producer-defined)
+  teamIndex: number
+  startedAt: number
+  endedAt?: number
+  durationMs?: number
+  error?: string
+}
 
 // scene:start opens a row; scene:end closes it. scene:end carries `name` but
 // not `file`, so we resolve back to the running row by name (POC limitation:
@@ -51,9 +52,7 @@ export function projectScene(
     if (!open) return []
     const row: SceneRow = {
       ...open,
-      // cast: protocol scene:end.status is an open string; on the raw sync
-      // path we store it as-is even if it falls outside the enum.
-      status: event.status as SceneRow['status'],
+      status: event.status,
       endedAt: event.timestamp,
       durationMs: event.duration,
       ...(event.error === undefined ? {} : { error: event.error }),
@@ -65,12 +64,12 @@ export function projectScene(
   return []
 }
 
-// The concrete collection: attach it to a run's shared WS source.
+// The concrete read-only collection: attach it to a run's shared WS source.
+// No mutation handlers are configured — the sync reducer is the sole writer.
 export function createScenesCollection(source: ShapeSource) {
-  return createCollection({
+  return createCollection<SceneRow, string>({
     id: 'scenes',
-    schema: SceneRow,
-    getKey: (row: SceneRow) => row.scene_id,
+    getKey: (row) => row.scene_id,
     sync: wsShapeSync<SceneRow>({ source, project: projectScene }),
   })
 }
