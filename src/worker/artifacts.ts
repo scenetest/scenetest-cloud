@@ -106,10 +106,12 @@ export async function readArtifactEvents(
 }
 
 // The cron sweep — runs regardless of RUNNER_PROVIDER (see runner/tick.ts).
-// Two passes: (1) write artifacts for terminal runs still missing one, then
-// (2) prune `events` rows for artifacted runs whose end is older than the
-// retention window. The EXISTS clause keeps already-pruned runs out of the
-// delete set. No-op without the ARTIFACTS binding.
+// Two passes: (1) write artifacts for terminal runs still missing one
+// (completions assemble best-effort at the time; cancellations — which skip
+// that — and any dropped waitUntil land here), then (2) prune `events` rows
+// for artifacted runs whose end is older than the retention window. The EXISTS
+// clause keeps already-pruned runs out of the delete set. No-op without the
+// ARTIFACTS binding.
 export async function sweepArtifacts(env: Env): Promise<void> {
   if (!env.ARTIFACTS) return
 
@@ -137,7 +139,10 @@ export async function sweepArtifacts(env: Env): Promise<void> {
   )
     .bind(cutoff)
     .all<{ id: string }>()
-  for (const row of prunable.results ?? []) {
-    await env.DB.prepare('DELETE FROM events WHERE run_id = ?1').bind(row.id).run()
+  const ids = (prunable.results ?? []).map((row) => row.id)
+  if (ids.length > 0) {
+    // One batched round trip rather than a DELETE per run (cf. insertEvents).
+    const del = env.DB.prepare('DELETE FROM events WHERE run_id = ?1')
+    await env.DB.batch(ids.map((id) => del.bind(id)))
   }
 }
