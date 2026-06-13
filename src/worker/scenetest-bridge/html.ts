@@ -22,6 +22,8 @@ export function renderDashboard(): string {
 <main>
   <header><a href="/">scenetest-cloud</a></header>
   <div id="run-dashboard"></div>
+  <!-- POC: TanStack DB scenes collection, fed by the same run WS. -->
+  <section id="ws-scenes"></section>
 </main>
 <script type="module" src="/run-dashboard.js"></script>
 </body>
