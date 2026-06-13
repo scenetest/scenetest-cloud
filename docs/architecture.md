@@ -140,7 +140,11 @@ Each Cloudflare primitive has one job:
   `EVENTS_RETENTION_HOURS` (default 24) are pruned, so D1 holds metadata and
   never accumulates log lines. Once a run's rows are gone the viewer replay
   (WS and SSE) and `GET /api/runs/:runId/log` serve from the artifact
-  instead — same frames, transparent to the client.
+  instead — same frames, transparent to the client. (Not R2 SQL: that queries
+  Iceberg tables, not `.jsonl`, and this path is a keyed point read. R2 SQL is
+  the analytics axis — cross-run rollups, the `overview_*` tables — and if that
+  outgrows D1 the move is Pipelines→Iceberg as a derived second sink, `.jsonl`
+  staying canonical.)
 - Queues (optional) decouple Durable Object write-through from D1 metadata
   updates and absorb webhook bursts. They are not on the live path.
 
