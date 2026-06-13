@@ -1,4 +1,4 @@
-import type { ConnectionStatus, Transport } from '@scenetest/dashboard'
+import type { Transport } from '@scenetest/dashboard'
 import { encodeCommand, isEventShaped, type Command } from '@scenetest/protocol'
 import { WebSocket as ReconnectingWebSocket } from 'partysocket'
 
