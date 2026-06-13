@@ -22,6 +22,7 @@
     "@scenetest/protocol": "^0.11.0",
     "@tailwindcss/vite": "^4.3.0",
     "@tanstack/react-query": "^5.101.0",
+    "partysocket": "^1.2.0",
     "preact": "^10.29.2",
     "preact-iso": "^2.12.0",
     "tailwindcss": "^4.3.0"
