@@ -1,5 +1,6 @@
 import type { ConnectionStatus, Transport } from '@scenetest/dashboard'
 import { encodeCommand, isEventShaped, type Command } from '@scenetest/protocol'
+import { WebSocket as ReconnectingWebSocket } from 'partysocket'
 
 // Transport adapter for cloud: the worker API, session-authed (cookies ride
 // along automatically on same-origin WebSocket and fetch).
@@ -12,8 +13,9 @@ import { encodeCommand, isEventShaped, type Command } from '@scenetest/protocol'
 //   the protocol event.
 // - The client tracks lastSeq and dedupes any frame with seq <= lastSeq
 //   (overlap from register-first-then-replay can send a frame twice).
-// - On disconnect, exponential backoff reconnect resumes with ?sinceSeq so
-//   replay only covers the gap — same semantics as Last-Event-ID on SSE.
+// - partysocket owns reconnect + backoff; it re-invokes the url provider on
+//   every attempt, so a reconnect resumes with the current ?sinceSeq — replay
+//   only covers the gap, same semantics as Last-Event-ID on SSE.
 // - fetchState() returns [] because the replay on connect covers history.
 // - Commands POST to one endpoint as encoded protocol commands.
 export function createCloudTransport(runId: string): Transport {
@@ -26,47 +28,45 @@ export function createCloudTransport(runId: string): Transport {
     subscribe(onEvent, onStatus) {
       let lastSeq = 0
       let closed = false
-      let ws: WebSocket | null = null
-      let backoff = 500
 
-      const connect = () => {
-        onStatus?.('connecting')
+      // partysocket calls this provider for every (re)connect, so sinceSeq is
+      // re-read each time and reconnects resume from the last applied seq.
+      const url = () => {
         const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-        ws = new WebSocket(`${proto}://${location.host}${base}/ws?sinceSeq=${lastSeq}`)
-
-        ws.onopen = () => {
-          backoff = 500
-          onStatus?.('connected')
-        }
-
-        ws.onmessage = (e) => {
-          let raw: unknown
-          try { raw = JSON.parse(e.data as string) } catch { return }
-          if (!raw || typeof raw !== 'object') return
-          const frame = raw as Record<string, unknown>
-          if (frame.kind !== 'event' || typeof frame.seq !== 'number') return
-          const seq = frame.seq as number
-          if (seq <= lastSeq) return  // dedupe replay/live overlap
-          lastSeq = seq
-          let payload: unknown
-          try { payload = JSON.parse(frame.payload as string) } catch { return }
-          if (isEventShaped(payload)) onEvent(payload as Parameters<typeof onEvent>[0])
-        }
-
-        ws.onclose = () => {
-          if (closed) return
-          onStatus?.('disconnected')
-          setTimeout(connect, backoff)
-          backoff = Math.min(backoff * 2, 10_000)
-        }
-
-        ws.onerror = () => ws?.close()
+        return `${proto}://${location.host}${base}/ws?sinceSeq=${lastSeq}`
       }
 
-      connect()
+      onStatus?.('connecting')
+      // Reconnect + backoff (500ms→10s) are partysocket's job — no manual loop.
+      const ws = new ReconnectingWebSocket(url, undefined, {
+        minReconnectionDelay: 500,
+        maxReconnectionDelay: 10_000,
+      })
+
+      ws.onopen = () => onStatus?.('connected')
+
+      ws.onmessage = (e) => {
+        let raw: unknown
+        try { raw = JSON.parse(e.data as string) } catch { return }
+        if (!raw || typeof raw !== 'object') return
+        const frame = raw as Record<string, unknown>
+        if (frame.kind !== 'event' || typeof frame.seq !== 'number') return
+        const seq = frame.seq as number
+        if (seq <= lastSeq) return  // dedupe replay/live overlap
+        lastSeq = seq
+        let payload: unknown
+        try { payload = JSON.parse(frame.payload as string) } catch { return }
+        if (isEventShaped(payload)) onEvent(payload as Parameters<typeof onEvent>[0])
+      }
+
+      ws.onclose = () => {
+        if (closed) return  // intentional unsubscribe; partysocket won't reconnect
+        onStatus?.('disconnected')  // transient drop — partysocket reconnects
+      }
+
       return () => {
         closed = true
-        ws?.close()
+        ws.close()
       }
     },
 
