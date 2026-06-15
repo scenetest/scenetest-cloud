@@ -92,6 +92,43 @@ cloud it is the worker API (fetch + WebSocket). Because the difference
 between the two environments is confined to this object, the dashboard
 behaves the same in both by construction.
 
+### Candidate primitive: StreamDB / Durable Streams
+
+We hand-roll a cluster of related machinery — resumable replay (WS and SSE),
+the transparent D1-then-R2 backfill switch, snapshot-then-deltas on both the
+run view and the home view, and the event-ordering contract that ties them
+together. ElectricSQL's **Durable Streams** (an open HTTP protocol for
+persistent, resumable, addressable streams) and **StreamDB** (a reactive,
+TanStack-DB-backed database materialized from such a stream) are the
+off-the-shelf shape of exactly that machinery.
+
+Not adopting now — but tracking it as the thing we would otherwise keep
+building ourselves. The usual 0.1.0 caution does **not** gate this: we have
+already invented the equivalent primitives, so hitting a rough edge means
+working with the library team to fix it upstream, which is welcome rather
+than a risk. What we are actually looking for is one primitive that combines:
+
+1. A server that runs in dev, from plain Node, or from a Durable Object, and
+   exposes the stream over hibernating WebSockets, non-hibernating
+   WebSockets, or SSE — with connect + backfill, implementing our
+   data-ordering (or at least sequencing) contract.
+2. A client where `const { db } = createTransportDB(settings)` returns the
+   desired TanStack DB collections whose updates are carried in the stream.
+3. (optional) a way to watch SQLite or the Postgres WAL to source events
+   server-side.
+4. (optional) a way for clients to send events back upstream and fan them out
+   to other watchers.
+
+The non-negotiable constraints if we do adopt it: it sits **behind**
+`@scenetest/protocol` as a transport/persistence implementation, carrying our
+events as payload — never as the wire vocabulary (the one expensive decision
+stays ours). The real gating question is fit, not maturity: chiefly whether
+its connection model preserves the WebSocket-hibernation cost story this
+design depends on, since an always-on SSE/WS stream would reintroduce idle
+billing the rest of the architecture works to avoid. The natural slot is
+this transport adapter (and its server-side counterpart, the receiver core);
+the zero-dependency box agent is not a candidate.
+
 ## Dev mode
 
 The Vite plugin is a thin, same-origin adapter: it injects the listener,
