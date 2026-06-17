@@ -2,7 +2,6 @@ import type { Handler } from '../router.ts'
 import { verifyBoxToken } from '../middleware/bearer.ts'
 import type { RunEvent } from '../db.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
-import { assembleArtifact } from '../artifacts.ts'
 
 // POST /api/events/:runId
 // Body: { events: Array<{ seq: number, payload: unknown }> }
@@ -97,13 +96,17 @@ export const postRunComplete: Handler = async (req, env, ctx, params) => {
   )
     .bind(body.status, Date.now(), runId)
     .run()
-  // The run just reached a terminal state: write its durable R2 artifact.
-  // Best-effort via waitUntil — the cron sweep is the guarantee if this drops.
+  // The run just reached a terminal state: ask its PR object to flush the log
+  // to the durable R2 artifact. Best-effort via waitUntil — the cron archive
+  // backstop is the guarantee if this drops.
   if (res.meta.changes > 0) {
+    const { repo, pr_number } = auth.run
     ctx.waitUntil(
-      assembleArtifact(env, runId).catch((err) =>
-        console.error(`artifact(${runId}) failed: ${err instanceof Error ? err.message : err}`),
-      ),
+      prCoordinator(env, repo, pr_number)
+        .fetch('https://do/archive', { method: 'POST', body: JSON.stringify({ runId }) })
+        .catch((err) =>
+          console.error(`artifact(${runId}) failed: ${err instanceof Error ? err.message : err}`),
+        ),
     )
   }
   return Response.json({ ok: true, applied: res.meta.changes > 0 })

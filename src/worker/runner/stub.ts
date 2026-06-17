@@ -1,7 +1,6 @@
 import type { Env } from '../env.ts'
 import type { RunSpec, Runner } from './types.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
-import { assembleArtifact } from '../artifacts.ts'
 
 // LocalStubRunner: fabricates a plausible run by writing scenetest-shaped
 // events + scene_executions straight to D1. It has no real machine, so
@@ -174,12 +173,15 @@ async function runStub(env: Env, run: RunSpec) {
     .bind(fail === 0 ? 'passed' : 'failed', endTs, run.runId)
     .run()
 
-  // Mirror the real box's end-of-run step: write the durable R2 artifact. The
-  // cancelled-mid-batch early return above skips this; the cron sweep covers
-  // it. Already inside dispatch()'s waitUntil, so awaiting is fine.
-  await assembleArtifact(env, run.runId).catch((err) =>
-    console.error(`artifact(${run.runId}) failed: ${err instanceof Error ? err.message : err}`),
-  )
+  // Mirror the real box's end-of-run step: ask the PR object to flush its log
+  // to the durable R2 artifact. The cancelled-mid-batch early return above
+  // skips this; the cron archive backstop covers it. Already inside
+  // dispatch()'s waitUntil, so awaiting is fine.
+  await prCoordinator(env, run.repo, run.prNumber)
+    .fetch('https://do/archive', { method: 'POST', body: JSON.stringify({ runId: run.runId }) })
+    .catch((err) =>
+      console.error(`artifact(${run.runId}) failed: ${err instanceof Error ? err.message : err}`),
+    )
 }
 
 function sceneId(file: string, name: string): string {

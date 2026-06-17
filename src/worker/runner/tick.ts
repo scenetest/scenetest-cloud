@@ -3,22 +3,45 @@ import type { BoxSpec } from './types.ts'
 import { hashToken } from '../middleware/bearer.ts'
 import { advanceImageBuilds, ensureImage } from './image.ts'
 import { provisionDroplet, reapRunners } from './digitalocean.ts'
-import { sweepArtifacts } from '../artifacts.ts'
+import { prCoordinator } from '../do/pr-coordinator.ts'
 
 // The scheduled heartbeat (wrangler.toml [triggers]): walk every async chain
 // forward one step. Order matters — builds first (they may unblock boxes),
 // then pending boxes, then the reaper.
 export async function tick(env: Env): Promise<void> {
-  // Event-log durability is provider-independent: the stub provider writes to
-  // D1 just like a real box, so the artifact/prune sweep runs first, before
-  // the DigitalOcean-only provisioning machinery early-returns below.
-  await sweepArtifacts(env).catch((err) => {
-    console.error(`tick: sweep failed: ${err instanceof Error ? err.message : err}`)
+  // Archive backstop, provider-independent (the stub ends runs just like a real
+  // box): each PR object flushes a run's log to R2 at end of run, but an object
+  // evicted before it ran — or a cancellation that skipped the flush — leaves a
+  // terminal run with no artifact_key. Poke its object to archive. Nothing is
+  // pruned here: the log lives in the object's SQLite, never in D1.
+  await archiveTerminalRuns(env).catch((err) => {
+    console.error(`tick: archive backstop failed: ${err instanceof Error ? err.message : err}`)
   })
   if (env.RUNNER_PROVIDER !== 'digitalocean' || !env.DO_API_TOKEN) return
   await advanceImageBuilds(env)
   await provisionPendingBoxes(env)
   await reapRunners(env)
+}
+
+// Terminal runs still missing their R2 artifact: ask each run's PR object to
+// flush its log. No-op without the ARTIFACTS binding (archiveRun returns null).
+async function archiveTerminalRuns(env: Env): Promise<void> {
+  if (!env.ARTIFACTS) return
+  const pending = await env.DB.prepare(
+    `SELECT id, repo, pr_number FROM runs
+       WHERE artifact_key IS NULL AND status IN ('passed', 'failed', 'cancelled')
+       LIMIT 100`,
+  ).all<{ id: string; repo: string; pr_number: number }>()
+  for (const row of pending.results ?? []) {
+    try {
+      await prCoordinator(env, row.repo, row.pr_number).fetch('https://do/archive', {
+        method: 'POST',
+        body: JSON.stringify({ runId: row.id }),
+      })
+    } catch (err) {
+      console.error(`tick: archiving ${row.id} failed: ${err instanceof Error ? err.message : err}`)
+    }
+  }
 }
 
 // Boxes whose provision() went pending (image was still building): give each

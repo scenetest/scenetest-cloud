@@ -25,8 +25,11 @@ Every part of the system produces or consumes events:
 - Producers: the injected client listener (assertion results), the CLI
   (Playwright actions, driver failures), the human (commands like "re-run as
   a different team").
-- Consumers: the dashboard (live view), the recorder (`.jsonl` in dev,
-  R2 + D1 in cloud), the CLI (its instruction queue).
+- Consumers: the dashboard (live view), the recorder of the log (`.jsonl` in
+  dev; the PR object's SQLite live, flushed to R2 at teardown, in cloud), the
+  CLI (its instruction queue). Projections (scores, toplines) are derived from
+  the log, not separately recorded — in dev the client derives them in memory,
+  in cloud D1 holds the settled ones. See "The log and its projections."
 
 `@scenetest/protocol` is a small versioned package defining the typed event
 and command vocabulary plus serialization. It lives in the monorepo and is
@@ -90,7 +93,74 @@ to fetch state and subscribe to live events; the adapter speaks to whatever
 backend is present. In dev that is the Vite middleware (fetch + SSE); in
 cloud it is the worker API (fetch + WebSocket). Because the difference
 between the two environments is confined to this object, the dashboard
-behaves the same in both by construction.
+behaves the same in both by construction. Both adapters implement one shape —
+a snapshot fetch plus a live subscription — which is the read primitive of
+"The log and its projections" seen from the client: a cursor read of the
+ordered stream, then deltas.
+
+## The log and its projections
+
+Two storage categories, and nothing is allowed to blur them.
+
+**The log** is every event, append-only, ordered by `seq`. It is the one
+source of truth — the protocol message stream itself, the same vocabulary the
+protocol package defines. Assertion results, Playwright actions, driver
+failures, the human's commands: all of it is one ordered stream of opaque
+messages.
+
+**Projections** are everything derived from the log: a scene's current status,
+a run's score, the home view's toplines, the overview comparison deltas. A
+projection is a pure function of the log. Persisting one is always and only a
+performance or queryability move — never a new fact, always rebuildable by
+replaying the log. This is the rule that keeps the two halves honest: if a
+stored value cannot be regenerated from the log, it is either part of the log
+or a bug.
+
+`run_id` is a field on each message, not a container. Because runs align with
+`seq`, a run is derivable from the log as the messages between two sequence
+numbers — so a run is a denormalized convenience for the UI (chunking a load,
+drawing a timeline, jumping between runs), never a structural boundary. `seq`
+is the authoritative axis: monotonic, fine-grained, total. Anything that
+splits *by* run — a per-run R2 file, a run filter on a query — does so for
+ergonomics on top of an order `seq` already provides.
+
+One read primitive serves the log to every consumer: a cursor-based fetch of
+ordered messages — `read(cursor)` yielding messages in `seq` order. `run_id`
+and `ts` are ordinary fields on each message, none privileged; the reader
+takes the whole stream and any slicing is the client's. The live dashboard,
+the replay-on-connect, and the archived-PR read all go through this one door.
+Whether the bytes come from a live store or a durable archive is hidden behind
+it; the consumer sees one ordered stream.
+
+Where the two categories live, across both environments. The first row is not
+just dev: it is also the per-PR runner box — the production machine a user's
+app is spun up and tested on, running the same code path as a laptop.
+
+| | the log | projections |
+|---|---|---|
+| dev / runner box | local `.jsonl` | derived in the client collection, not persisted |
+| cloud, live | DO SQLite log table | DO SQLite aggregate (a cache) + D1 settled |
+| cloud, durable | R2 `.jsonl`, per-run files | D1, forever |
+
+The log is one content in three homes — the box's `.jsonl`, the PR object's
+SQLite, the R2 archive — differing only in durability and locality. The
+per-run split of the R2 files is a put-time decision, invisible above the read
+primitive. Projections appear in both environments, but dev derives them in
+memory and throws them away (re-deriving from the single `.jsonl` is free in
+one ephemeral session), while the cloud persists them, because its projections
+answer cross-PR queries and must outlive the PR object that computed them. That
+persistence is the performance move; it adds no truth the log does not already
+hold.
+
+The DO holding both the log and a projection is not a violation of the split:
+it owns the canonical live log, and may materialize a projection table beside
+it that it could drop and rebuild at any time.
+
+The one thing in neither category is **command delivery state**. A command is
+in the log like any other message, but its delivery (pending → sent to the
+box) is control-plane state that mutates and is not derivable from
+observations. It rides alongside the append-only log; it is not part of the
+pure-function story, and the design should not pretend otherwise.
 
 ## Dev mode
 
@@ -108,7 +178,10 @@ execution); a run is a batch of executions triggered together — a push
 triggers a batch of all scenes, a manual re-run is a batch of one — and
 owns no infrastructure; a box is the environment a PR's executions run in;
 the PR is the unit of coordination, because a PR getting merged is the goal
-the whole system serves.
+the whole system serves. These are units of *work and coordination*, not of
+storage: in the event log a run is not a container but a field on each message
+(it aligns with `seq`, so a run is just a range of the stream). See "The log
+and its projections."
 
 Each Cloudflare primitive has one job:
 
@@ -121,32 +194,45 @@ Each Cloudflare primitive has one job:
   lifecycle (when to provision, what a push actually requires — see the
   build pipeline below — and when to tear down), accepts the box's outbound
   WebSocket on one side, fans out to dashboard viewers on the other
-  (WebSocket hibernation API), and holds the pending command queue.
-- D1 holds metadata only — runs, scores, failures; enough to render lists
-  and link into R2 — and never log lines. D1 caps at 10 GB, so append-heavy
-  event logs are kept out of it by design rather than as a later
-  optimization.
-- R2 holds the durable record (`ARTIFACTS` bucket): at end of run the event
-  log becomes a `.jsonl` object — the source of truth for raw events, with
-  historical detail views reading it through the worker. The local file is
-  not a backup of the database — persisting it is the point. The worker
-  assembles the artifact from D1 (every event already transits it) rather
-  than the box uploading directly; presigned-URL box uploads can replace
-  this if event volume ever outgrows D1 transit. Mechanics: at completion
-  (stub finish and `postRunComplete`, best-effort via `waitUntil`) the run's
-  events are written to `runs/<repo>/<runId>.jsonl` and `runs.artifact_key`
-  is set. The cron sweep is the guarantee — terminal runs missing a key get
-  one, then the `events` rows of artifacted runs older than
-  `EVENTS_RETENTION_HOURS` (default 24) are pruned, so D1 holds metadata and
-  never accumulates log lines. Once a run's rows are gone the viewer replay
-  (WS and SSE) and `GET /api/runs/:runId/log` serve from the artifact
-  instead — same frames, transparent to the client. (Not R2 SQL: that queries
-  Iceberg tables, not `.jsonl`, and this path is a keyed point read. R2 SQL is
-  the analytics axis — cross-run rollups, the `overview_*` tables — and if that
-  outgrows D1 the move is Pipelines→Iceberg as a derived second sink, `.jsonl`
-  staying canonical.)
-- Queues (optional) decouple Durable Object write-through from D1 metadata
-  updates and absorb webhook bursts. They are not on the live path.
+  (WebSocket hibernation API), and holds the pending command queue. It also
+  **owns the PR's event log**: the box's events land in the object's own
+  SQLite — keyed by `(run_id, seq)`, the order the box assigns and the viewer
+  subscribes against — and both the live fan-out and replay-on-connect read
+  from there, no write-through to D1. (A per-PR object-assigned cursor and a
+  channel discriminator arrive with the one-collection-per-PR dashboard work;
+  the storage move keeps today's per-run wire contract.)
+  The log is the source of truth; the object may keep a derived live aggregate
+  beside it for the dashboard, droppable and rebuildable from the log.
+- D1 holds only **settled projections** — runs, scores, failures, the overview
+  comparison tables; enough to render lists and the cross-PR home view, none of
+  it a fact the log does not already hold. It is never an event sink: log lines
+  live in the PR object's SQLite and the R2 archive, never in D1. (D1 caps at
+  10 GB; keeping the append-heavy log out of it is structural, not an
+  optimization.) The object writes these projections at run boundaries — a
+  couple of writes per run, not per event.
+- R2 holds the durable record (`ARTIFACTS` bucket): when a run completes the
+  object flushes that run's log to a per-run `.jsonl` object at
+  `runs/<repo>/<runId>.jsonl` and sets `runs.artifact_key`. Completion, not
+  teardown: a finished run is immutable, so archiving it then is both simpler
+  and more durable — it survives in R2 even if the object is later evicted.
+  This is the same log the object served live — archive and live store are one
+  content in two homes, and the e2e load-equivalence check pins that. A closed PR's detail
+  view reads these objects through the worker: the live object is gone, so
+  there is nothing to spin up — the read primitive's R2 backend serves them
+  directly. Keeping these per-run rather than one PR blob makes multi-file
+  consumption the norm: a PR closed and reopened spins a fresh object whose
+  `id` sequence restarts, and its archive is just more run files under the
+  same prefix — the reader already merges across files (run chronology across
+  object lifetimes, `id` within each), so a PR that lived as several objects is
+  never a special case. The cron sweep is now only a backstop that archives any
+  terminal-but-unflushed run (an object evicted without clean teardown — the
+  log is durable in SQLite, just not yet in R2); it prunes nothing, because D1
+  never held the log. (Not R2 SQL: that queries Iceberg tables, not `.jsonl`,
+  and this path is a keyed point read. R2 SQL stays the analytics axis —
+  cross-run rollups, the `overview_*` tables — and if that outgrows D1 the move
+  is Pipelines→Iceberg as a derived second sink, `.jsonl` staying canonical.)
+- Queues (optional) decouple the object's boundary projection writes to D1 and
+  absorb webhook bursts. They are not on the live path.
 
 ### Runner
 
@@ -158,9 +244,12 @@ repeatedly; the per-PR box is the faithful analog of that, and a re-run
 against a warm box costs seconds, not a provisioning cycle.
 
 Configuration is the only difference from dev mode: the box's sink writes
-the local `.jsonl` (debug + artifact) and also streams events up the box's
-single outbound WebSocket to the PR's Durable Object. Outbound-only means
-no inbound firewall holes; commands ride the same socket back down.
+the local `.jsonl` (the box-local copy of the log — debug, and the
+independent witness the load-equivalence check compares against the object's
+SQLite) and also streams events up the box's single outbound WebSocket to the
+PR's Durable Object, which is where the durable archive is later flushed from.
+Outbound-only means no inbound firewall holes; commands ride the same socket
+back down.
 
 Powered-off droplets still bill, so idle boxes are destroyed, not parked,
 and the build pipeline's cache makes resurrection cheap (boot the cached
@@ -298,18 +387,20 @@ The cloud path, end to end. Steps 1–3 are identical on a laptop in dev mode.
 │ Playwright-driven browser   │      │                  │      │ dashboard  │
 │   └─ injected listener ──┐  │      │  Worker (Hono)   │      │ widget     │
 │ CLI / Playwright events ─┤  │  WS  │    └─ PR DO ─────┼──WS──┼─ transport │
-│   agent local relay ◄────┘  ├──────┼──►  • fan-out    │      │  adapter   │
-│     ├─ .jsonl sink          │      │     • cmd queue  │      └────────────┘
-│     └─ upstream sink ───────┘      │     • (Queue→D1)*│
-│                                    │  end of run:     │
-│                                    │  .jsonl → R2     │
+│   agent local relay ◄────┘  ├──────┼──►  • SQLite log │      │  adapter   │
+│     ├─ .jsonl sink          │      │     • fan-out    │      └────────────┘
+│     └─ upstream sink ───────┘      │     • cmd queue  │
+│                                    │  projections→D1  │
+│                                    │  log→R2 @ done   │
 └────────────────────────────────────┴──────────────────┘
 ```
 
-(* the optional Queue leg is designed, not yet built. The R2 artifact upload
-is built: the worker assembles each run's events from D1 into a `.jsonl`
-object at completion, and a cron sweep prunes the D1 rows once the artifact
-exists — see the R2 bullet above.)
+(* the optional Queue leg is designed, not yet built. The PR object owns the
+log in its own SQLite: it appends each event there, fans out live, writes
+settled projections to D1 at run boundaries, and flushes each run's log to a
+per-run `.jsonl` in R2 when the run completes — see the DO, D1, and R2 bullets
+above. The cron sweep is only an archive backstop now; nothing prunes D1,
+which never holds the log.)
 
 1. In the Playwright-driven browser on the box, a `should()` check in the
    app under test resolves. The injected listener captures it and POSTs it
@@ -323,9 +414,10 @@ exists — see the R2 bullet above.)
    outbound WebSocket.
 4. The worker routes the socket to the PR's Durable Object
    (`idFromName('owner/name#42')`).
-5. The Durable Object validates the box token, updates live run state,
-   pushes the event to every connected viewer socket, and optionally
-   enqueues a metadata update for D1.
+5. The Durable Object validates the box token, appends the event to its
+   SQLite log (the source of truth), updates the live aggregate, and pushes the
+   event to every connected viewer socket. Settled projections go to D1 at run
+   boundaries, not per event.
 6. The viewer's transport adapter receives the protocol event, the dashboard
    store updates, and Preact paints the new assertion row.
 
@@ -348,32 +440,26 @@ a projection of events the system already has, at a coarser granularity.
 
 - Alongside fine-grained assertion events, the protocol defines a run-status
   family: `run.started`, `run.progress {pct, failing, flaky}`,
-  `run.finished {score}`. Each PR object computes rollups for its active
-  runs from the events it already sees and emits status events upward,
-  throttled (on change, at most every ~2s). Raw assertion events never fan
-  out beyond the PR's own viewers.
-- A per-workspace object sits above the PR objects. It receives status
-  events via object-to-object calls, holds the live "all my PRs and their
-  runs" snapshot, and serves the home dashboard's WebSocket with the same
-  hibernation fan-out pattern.
-- Notifications are sent by the workspace object because they must fire with
-  no tab open. On `run.finished` it sends a Web Push; subscriptions are
-  stored in D1.
+  `run.finished {score}`. Each PR object computes these rollups from the
+  events it already sees; the settled ones land in D1 as projections, and raw
+  assertion events never fan out beyond the PR's own viewers.
 - The PR list comes from GitHub webhooks rather than runs: PR
-  opened/closed/merged → HMAC-verified worker handler → upsert into D1 →
-  poke the workspace object.
-- The home view loads as snapshot plus deltas: initial render from D1 (open
-  PRs, last-known statuses — still metadata, so the D1 rule holds), then a
-  subscription to the workspace object for live updates.
+  opened/closed/merged → HMAC-verified worker handler → upsert into D1.
+- Past that, the home view is an ordinary web app over D1: it renders the open
+  PRs and their last-known statuses from the projection tables and keeps them
+  live. *How* it stays live — poll, SSE, a WebSocket, a fan-out object — is an
+  implementation choice, not an architectural commitment; the load-bearing
+  fact is that it reads projections, never the log. The one real constraint is
+  notifications: a "job finished" push must fire with no tab open, so whatever
+  triggers it lives server-side, not in the page.
 - The home view is cloud-only code in this repo; it has no dev-mode
   counterpart. It is a shell built around the shared widget: tiles consume
-  protocol status events, and clicking a run mounts the same
-  `mountDashboard()`. If the shell ever needs the widget's internals rather
-  than the protocol and URLs, the boundary is being broken.
+  protocol status events, and clicking a run mounts the same widget. If the
+  shell ever needs the widget's internals rather than the protocol and URLs,
+  the boundary is being broken.
 
-Trace for one tile: assertion events → PR object rollup → throttled
-`run.progress` → workspace object → one WebSocket frame → tile updates. On
-finish: same path, plus a D1 snapshot write and a push notification.
+Trace for one tile: assertion events → PR-object rollup → D1 projection → the
+home view. On finish: the same path, plus a server-side push.
 
 ## Visual style
 

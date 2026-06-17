@@ -1,6 +1,6 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { dashboardHtml, dashboardSse, dashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
+import { dashboardHtml, dashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun, debugBoxUpdate, debugBoxDispatch } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
@@ -51,7 +51,6 @@ const router = new Router()
   // variants serve the page — asset URLs are absolute, so it doesn't matter.
   .get('/r/:runId/dashboard', withSession(dashboardHtml, 'redirect'))
   .get('/r/:runId/dashboard/', withSession(dashboardHtml, 'redirect'))
-  .get('/api/runs/:runId/events', withSession(dashboardSse))
   .get('/api/runs/:runId/ws', withSession(dashboardWs))
   .get('/api/runs/:runId/log', withSession(getRunLog))
   .post('/api/runs/:runId/commands', withSession(postRunCommand))
