@@ -24,13 +24,9 @@ export interface Env {
   GITHUB_API_TOKEN?: string
   SESSION_SECRET: string
   ENABLE_DEBUG_ROUTES?: string
-  // How long a terminal run's events linger in D1 after its artifact is
-  // written, before the cron sweep prunes them. Default 24 (hours). Set "0"
-  // to prune as soon as the artifact exists (used by the e2e harness).
-  EVENTS_RETENTION_HOURS?: string
 
   // Runner provisioning. RUNNER_PROVIDER selects the implementation:
-  // 'stub' (default; writes fake events straight to D1) or 'digitalocean'.
+  // 'stub' (default; fabricates events into the PR object's log) or 'digitalocean'.
   RUNNER_PROVIDER?: string
   // DigitalOcean provider config. DO_API_TOKEN is a secret; the rest are
   // plain vars. The runner image builds and caches itself from stock Ubuntu

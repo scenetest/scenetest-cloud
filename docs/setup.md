@@ -76,12 +76,12 @@ wrangler r2 bucket create scenetest-cloud-artifacts
 ```
 
 `wrangler dev` simulates R2 locally, so local dev and `pnpm e2e` need no
-setup. At end of run the worker writes `runs/<repo>/<runId>.jsonl` and the
-cron sweep (every 10 minutes, already configured) prunes the run's rows from
-the `events` table once the artifact exists and the run is older than
-`EVENTS_RETENTION_HOURS` (default 24; set it in `[vars]` to change). After a
-prune the viewer replay and `GET /api/runs/<runId>/log` (session-authed raw
-download) serve from the artifact.
+setup. At end of run the PR Durable Object flushes its log to
+`runs/<repo>/<runId>.jsonl` (the cron, every 10 minutes, is an archive
+backstop for runs that ended without a clean flush). The viewer replay and
+`GET /api/runs/<runId>/log` (session-authed raw download) serve from the
+object's live log while it exists, and from the artifact once the object is
+reset at PR teardown.
 
 ## DigitalOcean runner
 

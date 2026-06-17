@@ -3,25 +3,21 @@ import type { Env } from '../env.ts'
 import type { AuthedHandler } from '../auth/session.ts'
 import { renderDashboard } from './html.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
-import { buildJsonl, getArtifactKey, readArtifactEvents } from '../artifacts.ts'
 
 export const dashboardHtml: AuthedHandler = () =>
   new Response(renderDashboard(), {
     headers: { 'content-type': 'text/html; charset=utf-8' },
   })
 
-export const dashboardSse: AuthedHandler = (req, env, _ctx, params) =>
-  streamRunEvents(req, env, params.runId!)
-
 // GET /api/runs/:runId/log — download the raw event log as .jsonl. Serves the
-// R2 artifact once it exists; before then (run in flight, or sweep pending) it
-// assembles the log from D1 on the fly without persisting. Pruned runs always
-// have an artifact, so the log survives the events being deleted from D1.
+// R2 artifact once it exists; before then (run in flight, or archive pending)
+// it streams the live log from the run's PR object. Archived runs always have
+// an artifact, so the log survives the object being reset.
 export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
   const runId = params.runId!
-  const run = await env.DB.prepare('SELECT artifact_key FROM runs WHERE id = ?1')
+  const run = await env.DB.prepare('SELECT repo, pr_number, artifact_key FROM runs WHERE id = ?1')
     .bind(runId)
-    .first<{ artifact_key: string | null }>()
+    .first<{ repo: string; pr_number: number; artifact_key: string | null }>()
   if (!run) return new Response('run not found', { status: 404 })
 
   const headers = {
@@ -31,10 +27,13 @@ export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
 
   if (run.artifact_key && env.ARTIFACTS) {
     const obj = await env.ARTIFACTS.get(run.artifact_key)
-    // Key recorded but object missing: fall through to D1 rather than 404.
+    // Key recorded but object missing: fall through to the live log.
     if (obj) return new Response(obj.body, { headers })
   }
-  return new Response(await buildJsonl(env, runId), { headers })
+  const res = await prCoordinator(env, run.repo, run.pr_number).fetch(
+    `https://do/jsonl?runId=${encodeURIComponent(runId)}`,
+  )
+  return new Response(res.body, { headers })
 }
 
 // GET /api/runs/:runId/ws — viewer WebSocket. Cookie auth (same-origin WS
@@ -78,95 +77,4 @@ export const postRunCommand: AuthedHandler = async (req, env, _ctx, params) => {
   })
   const { delivered } = (await res.json()) as { delivered: boolean }
   return Response.json({ delivered }, { status: 202 })
-}
-
-const POLL_MIN_MS = 250
-const POLL_MAX_MS = 2000
-const MAX_DURATION_MS = 5 * 60 * 1000
-const TERMINAL = ['passed', 'failed', 'cancelled']
-
-function streamRunEvents(req: Request, env: Env, runId: string): Response {
-  const lastEventId = req.headers.get('last-event-id')
-  let lastSeq = lastEventId ? parseInt(lastEventId, 10) : 0
-  if (!Number.isFinite(lastSeq) || lastSeq < 0) lastSeq = 0
-
-  const startedAt = Date.now()
-  const encoder = new TextEncoder()
-  let cancelled = false
-  // A fresh connection (no last-event-id) that never sees a D1 row may be a
-  // terminal run whose events were pruned after its artifact was written.
-  let streamedAny = lastSeq > 0
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      const send = (chunk: string) => controller.enqueue(encoder.encode(chunk))
-      // Initial flush so the client knows we're alive.
-      send(`: hello\n\n`)
-
-      // One D1 round trip per tick: new events + run status together.
-      const tick = async (): Promise<{ done: boolean; sawEvents: boolean }> => {
-        const [events, run] = await env.DB.batch([
-          env.DB.prepare(
-            'SELECT seq, payload FROM events WHERE run_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT 500',
-          ).bind(runId, lastSeq),
-          env.DB.prepare('SELECT status FROM runs WHERE id = ?1').bind(runId),
-        ])
-
-        const rows = (events!.results ?? []) as Array<{ seq: number; payload: string }>
-        for (const row of rows) {
-          send(`id: ${row.seq}\ndata: ${row.payload}\n\n`)
-          lastSeq = row.seq
-          streamedAny = true
-        }
-
-        const status = (run!.results?.[0] as { status: string } | undefined)?.status
-        const terminal = status != null && TERMINAL.includes(status)
-        return { done: terminal && rows.length === 0, sawEvents: rows.length > 0 }
-      }
-
-      // Serve the R2 artifact when D1 has nothing because the run's events were
-      // pruned. Same `id:`/`data:` framing as the D1 path, so the client is
-      // none the wiser.
-      const streamArtifact = async (): Promise<void> => {
-        const key = await getArtifactKey(env, runId)
-        if (!key) return
-        for (const e of await readArtifactEvents(env, key, lastSeq)) {
-          send(`id: ${e.seq}\ndata: ${e.payload}\n\n`)
-          lastSeq = e.seq
-        }
-      }
-
-      try {
-        let pollMs = POLL_MIN_MS
-        while (!cancelled && !req.signal.aborted && Date.now() - startedAt < MAX_DURATION_MS) {
-          const { done, sawEvents } = await tick()
-          if (done) {
-            if (!streamedAny) await streamArtifact()
-            break
-          }
-          // Back off while idle; snap back when events flow.
-          pollMs = sawEvents ? POLL_MIN_MS : Math.min(pollMs * 2, POLL_MAX_MS)
-          await new Promise((r) => setTimeout(r, pollMs))
-        }
-      } catch (err) {
-        if (!cancelled) {
-          send(`event: error\ndata: ${JSON.stringify({ message: String(err) })}\n\n`)
-        }
-      }
-      if (!cancelled) controller.close()
-    },
-    cancel() {
-      // Client disconnected; stop the poll loop instead of letting it run out
-      // the MAX_DURATION_MS clock against D1.
-      cancelled = true
-    },
-  })
-
-  return new Response(stream, {
-    headers: {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    },
-  })
 }

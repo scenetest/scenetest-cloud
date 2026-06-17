@@ -1,12 +1,21 @@
 import type { Env } from '../env.ts'
-import { insertEvents, type RunEvent } from '../db.ts'
-import { getArtifactKey, readArtifactEvents } from '../artifacts.ts'
+import type { RunEvent } from '../db.ts'
+import { artifactKey, getArtifactKey, readArtifactEvents } from '../artifacts.ts'
 
 // One Durable Object per PR: the coordination point between the PR's box and
 // the rest of the system. It terminates the box's single outbound WebSocket
 // (hibernation API, so an idle connected box costs nothing), queues commands
-// and run dispatches while no box is connected, writes the box's events
-// through to D1, and fans them out live to connected viewer WebSockets.
+// and run dispatches while no box is connected, and — the point of this class —
+// **owns the PR's event log** in its own SQLite. The box's events land in the
+// `log` table; the live fan-out and replay-on-connect both read from there, and
+// at end of run the log is flushed to a per-run R2 `.jsonl` archive. D1 never
+// holds log lines (see docs/architecture.md, "The log and its projections").
+//
+// The log is keyed by (run_id, seq): the box assigns `seq` per run, and that
+// is the order the viewer subscribes against today. (A per-PR object-assigned
+// cursor and a channel discriminator arrive with the one-collection-per-PR
+// dashboard work; this class deliberately keeps the existing per-run wire
+// contract.)
 //
 // Box-channel wire format — OUR contract between worker and box bootstrap,
 // wrapping (not extending) the published protocol:
@@ -27,6 +36,8 @@ import { getArtifactKey, readArtifactEvents } from '../artifacts.ts'
 // Internal HTTP surface (reachable only via the binding, never publicly):
 //   GET  /box-connect?boxId=…              — WebSocket upgrade for the box
 //   GET  /viewer-connect?runId=…&sinceSeq=… — WebSocket upgrade for viewers
+//   GET  /jsonl?runId=…                    — the run's log as .jsonl text
+//   POST /archive                          — { runId } → flush log to R2
 //   POST /command                          — { runId, command } → send or queue
 //   POST /dispatch                         — { run: RunSpec } → send or queue
 //   POST /retire                           — { boxId } → close sockets, drop queue
@@ -42,10 +53,26 @@ const QUEUE_PREFIX = 'q:'
 const REPLAY_PAGE = 1000
 
 export class PrCoordinator implements DurableObject {
+  private sql: SqlStorage
+
   constructor(
     private state: DurableObjectState,
     private env: Env,
-  ) {}
+  ) {
+    // SQLite-backed (wrangler new_sqlite_classes). The schema is created on
+    // first construction and is a no-op thereafter; the constructor runs
+    // before any request is dispatched, so the table is always present.
+    this.sql = state.storage.sql
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS log (
+         run_id  TEXT    NOT NULL,
+         seq     INTEGER NOT NULL,
+         payload TEXT    NOT NULL,
+         ts      INTEGER NOT NULL,
+         PRIMARY KEY (run_id, seq)
+       ) WITHOUT ROWID`,
+    )
+  }
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url)
@@ -82,6 +109,21 @@ export class PrCoordinator implements DurableObject {
       this.state.acceptWebSocket(pair[1]!, ['viewer', `v:${runId}`])
       await this.replayTo(pair[1]!, runId, sinceSeq)
       return new Response(null, { status: 101, webSocket: pair[0]! })
+    }
+
+    if (url.pathname === '/jsonl' && req.method === 'GET') {
+      const runId = url.searchParams.get('runId')
+      if (!runId) return new Response('runId required', { status: 400 })
+      return new Response(this.buildRunJsonl(runId), {
+        headers: { 'content-type': 'application/x-ndjson; charset=utf-8' },
+      })
+    }
+
+    if (url.pathname === '/archive' && req.method === 'POST') {
+      const { runId } = (await req.json()) as { runId: string }
+      if (!runId) return new Response('runId required', { status: 400 })
+      const key = await this.archiveRun(runId)
+      return Response.json({ key })
     }
 
     if (url.pathname === '/command' && req.method === 'POST') {
@@ -156,7 +198,18 @@ export class PrCoordinator implements DurableObject {
 
   private async ingestAndFanout(runId: string, events: RunEvent[]): Promise<void> {
     if (events.length === 0) return
-    await insertEvents(this.env.DB, runId, events)
+    const now = Date.now()
+    for (const e of events) {
+      // INSERT OR IGNORE: a box reconnect can replay events it already sent;
+      // (run_id, seq) is the dedup key, so re-delivery is a no-op.
+      this.sql.exec(
+        'INSERT OR IGNORE INTO log (run_id, seq, payload, ts) VALUES (?, ?, ?, ?)',
+        runId,
+        e.seq,
+        JSON.stringify(e.payload ?? null),
+        now,
+      )
+    }
     this.fanout(runId, events)
   }
 
@@ -178,25 +231,30 @@ export class PrCoordinator implements DurableObject {
     }
   }
 
-  // Replay stored events to a single viewer. Pages through D1 to avoid
-  // loading an entire long run into memory at once. When a terminal run's
-  // events have been pruned from D1 (the cron sweep, after its artifact was
-  // written), D1 yields nothing and replay falls back to the R2 artifact —
-  // same frame shape, so the viewer can't tell the difference.
+  // Replay stored events to a single viewer. Pages through the local SQLite to
+  // avoid loading an entire long run into memory at once. When the run's log is
+  // no longer here (its PR closed and the object was reset after the archive
+  // was written), SQLite yields nothing and replay falls back to the R2
+  // artifact — same frame shape, so the viewer can't tell the difference.
   private async replayTo(ws: WebSocket, runId: string, sinceSeq: number): Promise<void> {
     let after = sinceSeq
     let sawAny = false
     for (;;) {
-      const { results } = await this.env.DB.prepare(
-        'SELECT seq, payload FROM events WHERE run_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3',
-      ).bind(runId, after, REPLAY_PAGE).all<{ seq: number; payload: string }>()
-      for (const row of results ?? []) {
-        // row.payload is already a JSON string (insertEvents stores JSON.stringify).
+      const rows = this.sql
+        .exec(
+          'SELECT seq, payload FROM log WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?',
+          runId,
+          after,
+          REPLAY_PAGE,
+        )
+        .toArray() as Array<{ seq: number; payload: string }>
+      for (const row of rows) {
+        // row.payload is already a JSON string (ingest stores JSON.stringify).
         ws.send(JSON.stringify({ kind: 'event', seq: row.seq, payload: row.payload }))
         after = row.seq
         sawAny = true
       }
-      if ((results?.length ?? 0) < REPLAY_PAGE) break
+      if (rows.length < REPLAY_PAGE) break
     }
 
     if (sawAny) return
@@ -205,6 +263,52 @@ export class PrCoordinator implements DurableObject {
     for (const e of await readArtifactEvents(this.env, key, sinceSeq)) {
       ws.send(JSON.stringify({ kind: 'event', seq: e.seq, payload: e.payload }))
     }
+  }
+
+  // Build the run's log as .jsonl, one event per line in the archive format
+  // `{"seq":N,"payload":<payload>}` — the same bytes the R2 artifact holds, so
+  // the live download and the archived download are byte-identical. Pages the
+  // local SQLite to keep a long run out of memory.
+  private buildRunJsonl(runId: string): string {
+    const lines: string[] = []
+    let after = 0
+    for (;;) {
+      const rows = this.sql
+        .exec(
+          'SELECT seq, payload FROM log WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?',
+          runId,
+          after,
+          REPLAY_PAGE,
+        )
+        .toArray() as Array<{ seq: number; payload: string }>
+      for (const row of rows) {
+        // row.payload is already a JSON string; embed it raw so we never reparse.
+        lines.push(`{"seq":${row.seq},"payload":${row.payload}}`)
+        after = row.seq
+      }
+      if (rows.length < REPLAY_PAGE) break
+    }
+    return lines.length ? lines.join('\n') + '\n' : ''
+  }
+
+  // Flush a run's log to its durable R2 artifact and record the key on the D1
+  // `runs` row. Idempotent: a run that already has a key is left alone. No-op
+  // without the ARTIFACTS binding. Repo (for the object key) is resolved from
+  // D1, the same place the run's metadata projection already lives.
+  private async archiveRun(runId: string): Promise<string | null> {
+    if (!this.env.ARTIFACTS) return null
+    const run = await this.env.DB.prepare('SELECT repo, artifact_key FROM runs WHERE id = ?1')
+      .bind(runId)
+      .first<{ repo: string; artifact_key: string | null }>()
+    if (!run) return null
+    if (run.artifact_key) return run.artifact_key
+
+    const key = artifactKey(run.repo, runId)
+    await this.env.ARTIFACTS.put(key, this.buildRunJsonl(runId), {
+      httpMetadata: { contentType: 'application/x-ndjson' },
+    })
+    await this.env.DB.prepare('UPDATE runs SET artifact_key = ?1 WHERE id = ?2').bind(key, runId).run()
+    return key
   }
 
   private boxSocket(): WebSocket | null {

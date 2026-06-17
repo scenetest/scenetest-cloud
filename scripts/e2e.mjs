@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // End-to-end check: boots the real worker (wrangler dev + workerd) against a
 // throwaway D1, then exercises the seams a unit test can't reach — auth
-// redirects, webhook HMAC + triggering, the stub runner writing through to
-// SSE, the dashboard shell + widget asset, command validation, and the
+// redirects, webhook HMAC + triggering, the stub runner driving the event
+// log, the dashboard shell + widget asset, command validation, and the
 // latest-wins cancellation.
 //
 // Hermetic by construction: state lives in a temp --persist-to dir, secrets
@@ -360,8 +360,8 @@ async function main() {
   check('live command arrived on the box socket',
     (await waitInbox((m) => m.command?.type === 'run:resume')) !== null, JSON.stringify(inbox))
 
-  // Box streams events up the socket → coordinator writes through to D1 →
-  // the SSE endpoint (which reads D1) replays them to viewers.
+  // Box streams events up the socket → coordinator appends them to its SQLite
+  // log → the viewer WS (which reads that log) replays them to viewers.
   box.send(JSON.stringify({
     kind: 'events', runId: 'e2e-ws-run',
     events: [
@@ -372,7 +372,7 @@ async function main() {
   check('coordinator acked the events batch',
     (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
 
-  // Viewer WS: replay from D1, then live events.
+  // Viewer WS: replay from the object's log, then live events.
   const wsReplay = await collectWs('/api/runs/e2e-ws-run/ws', cookie, 2500)
   check('box events reached viewer via WS replay',
     wsReplay.events.some((e) => e.type === 'scene:start' && e.name === 'ws scene'))
@@ -471,7 +471,7 @@ async function main() {
     }), agentLog)
 
   // The scenes CLI on a box reports to the agent's local ingest; the agent
-  // relays up the channel and the coordinator writes through to D1/SSE.
+  // relays up the channel and the coordinator appends to its SQLite log.
   const localIngest = await fetch('http://127.0.0.1:4998/events/e2e-agent-run', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ events: [{ payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } }] }),
@@ -563,58 +563,73 @@ async function main() {
     failedBox[0].status === 'destroyed' && failedBox[0].run_status === 'cancelled',
     JSON.stringify(failedBox[0]))
 
-  // --- R2 durable artifacts: assemble, prune, replay-from-artifact ----------
-  // A terminal run with events but no artifact_key, ended long ago so it falls
-  // outside the default 24h retention window. The cron sweep should write its
-  // R2 artifact and then prune its events from D1; the log endpoint and the
-  // viewer replay must keep working from the artifact afterward.
-  console.log('· R2 artifacts (assemble → prune → replay)')
+  // --- R2 durable artifacts: log in the object → archive → serve from R2 ----
+  // The event log lives in the PR object's SQLite. At end of run the object
+  // flushes it to a per-run R2 .jsonl; D1 never holds the log, so there is no
+  // prune. We drive a log into a fresh PR's object over the box channel, then
+  // archive it via the cron backstop and read it back.
+  console.log('· R2 artifacts (archive → serve from R2)')
   d1Query(persistDir,
-    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id, ended_at) VALUES ('e2e-artifact-run', 'demo/watched', 9, 'artif1', 'manual', 'passed', 'e2e-box-1', 1)")
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 11, 'artif1', 'main', 'open', 0, 0)")
   d1Query(persistDir,
-    `INSERT INTO events (run_id, seq, payload, ts) VALUES ('e2e-artifact-run', 1, '{"type":"run:start","timestamp":1,"sceneCount":1}', 1)`)
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-art', 'demo/watched', 11, 'artif1', 'ready', '${boxTokenHash}', 0)`)
   d1Query(persistDir,
-    `INSERT INTO events (run_id, seq, payload, ts) VALUES ('e2e-artifact-run', 2, '{"type":"scene:start","timestamp":1,"name":"artifact scene","file":"a.scene.ts","actors":["A"]}', 1)`)
-  d1Query(persistDir,
-    `INSERT INTO events (run_id, seq, payload, ts) VALUES ('e2e-artifact-run', 3, '{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":1,"failed":0}}', 1)`)
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-artifact-run', 'demo/watched', 11, 'artif1', 'manual', 'running', 'e2e-box-art')")
+
+  // Drive the run's log into the PR object over its box channel.
+  const artBox = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/e2e-box-art/channel?token=${boxToken}`)
+  const artInbox = []
+  artBox.addEventListener('message', (e) => artInbox.push(JSON.parse(e.data)))
+  await new Promise((resolve, reject) => {
+    artBox.addEventListener('open', resolve)
+    artBox.addEventListener('error', () => reject(new Error('art box channel refused')))
+  })
+  artBox.send(JSON.stringify({
+    kind: 'events', runId: 'e2e-artifact-run',
+    events: [
+      { seq: 1, payload: { type: 'run:start', timestamp: 1, sceneCount: 1 } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: 1, name: 'artifact scene', file: 'a.scene.ts', actors: ['A'] } },
+      { seq: 3, payload: { type: 'run:end', timestamp: 2, duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
+    ],
+  }))
+  const artAck = await waitFor(() =>
+    artInbox.some((m) => m.kind === 'ack' && m.runId === 'e2e-artifact-run' && m.count === 3))
+  check('artifact run events acked by the coordinator', artAck, JSON.stringify(artInbox))
 
   check('run log anonymous → 401', (await fetch(`${BASE}/api/runs/e2e-artifact-run/log`)).status === 401)
+
+  // Before archive: /log streams the live log straight from the object's SQLite.
   const logPre = await fetch(`${BASE}/api/runs/e2e-artifact-run/log`, { headers: { cookie } })
   const logPreText = await logPre.text()
-  check('run log serves jsonl from D1 before sweep',
+  check('run log serves the live log from the object before archive',
     logPre.status === 200 && logPreText.includes('run:start') && logPreText.includes('run:end'),
     `${logPre.status} ${logPreText.slice(0, 120)}`)
 
-  // Trigger the cron the way wrangler dev exposes it.
+  // Terminal + no artifact_key → the cron archive backstop flushes it to R2.
+  d1Query(persistDir, "UPDATE runs SET status = 'passed', ended_at = 1 WHERE id = 'e2e-artifact-run'")
   const sched = await fetch(`${BASE}/cdn-cgi/handler/scheduled`)
   check('scheduled handler reachable', sched.status === 200, `got ${sched.status}`)
-
-  check('cron sweep wrote the artifact_key', await waitFor(() => {
+  check('cron archive backstop wrote the artifact_key', await waitFor(() => {
     const r = d1Query(persistDir, "SELECT artifact_key FROM runs WHERE id = 'e2e-artifact-run'")
     return r[0].artifact_key != null
   }), 'artifact_key never set')
-  check('cron sweep pruned the run\'s events from D1', await waitFor(() => {
-    const r = d1Query(persistDir, "SELECT COUNT(*) AS n FROM events WHERE run_id = 'e2e-artifact-run'")
-    return r[0].n === 0
-  }), 'events not pruned')
 
+  // After archive: getRunLog prefers the R2 artifact.
   const logPost = await fetch(`${BASE}/api/runs/e2e-artifact-run/log`, { headers: { cookie } })
   const logPostText = await logPost.text()
-  check('run log serves from R2 after the prune',
+  check('run log serves from R2 after archive',
     logPost.status === 200 && logPostText.includes('run:start') && logPostText.includes('run:end'),
     `${logPost.status} ${logPostText.slice(0, 120)}`)
 
+  // The object keeps its log (no prune), so viewer replay still serves it; the
+  // R2 archive is the fallback only once the object is reset at PR teardown.
   const artifactReplay = await collectWs('/api/runs/e2e-artifact-run/ws', cookie, 2500)
   const artTypes = artifactReplay.events.map((e) => e.type)
-  check('viewer replay survives the D1 prune (served from artifact)',
+  check('viewer replay serves the full log after archive',
     artTypes.includes('run:start') && artTypes.includes('run:end'), JSON.stringify(artTypes))
-  check('artifact replay has no duplicate seq',
+  check('replay has no duplicate seq',
     artifactReplay.seqs.length === new Set(artifactReplay.seqs).size, JSON.stringify(artifactReplay.seqs))
-  // Real completed runs (recent ended_at) keep their events — prune is scoped
-  // to the retention window, not "every artifacted run."
-  const liveEvents = d1Query(persistDir,
-    `SELECT COUNT(*) AS n FROM events WHERE run_id = '${webhookRunId}'`)
-  check('recent run\'s events are not pruned', liveEvents[0].n > 0, `got ${liveEvents[0].n}`)
+  artBox.close()
 
   if (failures.length > 0 && serverErr) {
     console.error('\n--- wrangler dev stderr (tail) ---\n' + serverErr.split('\n').slice(-20).join('\n'))

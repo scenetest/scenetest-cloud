@@ -31,7 +31,8 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 
 # One Durable Object per PR (SQLite-backed): terminates the box's outbound
-# WebSocket, queues commands/dispatches, writes events through to D1.
+# WebSocket, queues commands/dispatches, and owns the PR's event log in its
+# own SQLite (flushed to R2 at end of run; D1 never holds log lines).
 [durable_objects]
 bindings = [{ name = "PR_COORDINATOR", class_name = "PrCoordinator" }]
 
@@ -45,9 +46,9 @@ database_name = "scenetest-cloud-mhsnook"
 database_id = "59cdeb29-a690-46b8-a8f9-423be56ed4d8"
 migrations_dir = "migrations"
 
-# Durable record of run event logs. At end of run the events become a single
-# .jsonl object here; the cron sweep then prunes the run's rows from D1's
-# `events` table. Create the bucket once: `wrangler r2 bucket create
+# Durable record of run event logs. At end of run the PR object flushes its
+# log to a per-run `.jsonl` object here (the cron is an archive backstop).
+# Create the bucket once: `wrangler r2 bucket create
 # scenetest-cloud-artifacts` (see docs/setup.md).
 [[r2_buckets]]
 binding = "ARTIFACTS"
