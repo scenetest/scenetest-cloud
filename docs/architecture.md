@@ -264,64 +264,60 @@ idle-based teardown owned by the PR object (a Durable Object alarm reset on
 activity), with the age cap demoted to the hung-box backstop it should be.
 Unbuilt; the cap is the placeholder.
 
-### Substrate: why DigitalOcean and not Cloudflare Containers
+### The runner is a swappable substrate
 
-The runner provider is abstracted on purpose — `Runner` is `provision()` +
+The runner is not coupled to DigitalOcean. `Runner` is `provision()` +
 `dispatch()`, selected by `RUNNER_PROVIDER` (`stub`, `digitalocean`) in
-`registry.ts` — so the box's hosting substrate is swappable without touching
-the coordinator, the event log, D1/R2, or the stage cache. Cloudflare
-Containers (Firecracker microVMs fronted by a Durable Object) are the
-obvious candidate to evaluate against the droplet, since the rest of the
-system already lives in Cloudflare and the per-PR DO that would front a
-container is the PR coordinator we already run. This records why they are
-**not** the substrate today, and what would change that.
+`registry.ts`, so the machine a box runs on is a substrate that swaps in and
+out without touching the coordinator, the event log, D1/R2, or the stage
+cache. The user-facing contract is the same on every substrate: **bake an
+image, then run setup scripts** (the env-image stage plus the staged build
+of the pipeline). Everything above that line — coordination, the log, the
+dashboard — is substrate-agnostic by construction.
 
-Two pulls toward Containers are real. First, `sleepAfter` is precisely the
-idle-based teardown the teardown note above calls the unbuilt target: a
-container fronted by its DO sleeps on inactivity and wakes on the next
-request, which is the DO-alarm-on-activity design without our writing the
-alarm. Second, adopting them collapses the cloud footprint to one provider —
-no `DO_API_TOKEN`, no droplet billing, no builder-droplet state machine, no
-reaper, and no "powered-off droplets still bill" problem driving the
-destroy-don't-park rule. If the box's workload fit, this would be a clear
-simplification.
+DigitalOcean is the first substrate, and it is the default because it is the
+most *flexible*: a stock-Ubuntu droplet can faithfully recreate any kind of
+dev box. That generality matters because users will not all be on the same
+stack — the box is the faithful analog of a developer's laptop (see Runner),
+so it has to run whatever that laptop runs. Concretely, the baked toolchain
+includes Docker, which lets the box stand up Docker-based local stacks (the
+Supabase CLI's, today) exactly as a developer would. A substrate that can
+run anything is the right place to start, because it never tells a user
+their stack is unsupported.
 
-It does not fit today, for one structural reason and one budget reason.
+Other substrates can join behind the same interface, trading flexibility for
+something else. Cloudflare Containers (Firecracker microVMs fronted by a
+Durable Object) are the natural second runner: less flexible than a raw VM —
+no nested virtualization, so a Docker-based local stack would have to be
+re-baked as a direct image (e.g. Postgres + PostgREST in the container)
+rather than run under Docker, and instance memory is tighter than a droplet
+— but more performant and operationally simpler for projects whose image
+*does* fit. For teams working in the Cloudflare ecosystem (us included), the
+payoff is real: the per-PR DO that would front a container is the PR
+coordinator we already run, `sleepAfter` is exactly the idle-based teardown
+the teardown note above calls the unbuilt target, and a Cloudflare-only
+deployment sheds the `DO_API_TOKEN`, droplet billing, the builder-droplet
+state machine, and the reaper. If you can bake a Container-compatible image,
+you get the faster, cheaper substrate; if you can't, DigitalOcean runs your
+box unchanged. That choice living entirely in `RUNNER_PROVIDER` is the point.
 
-- **The box runs the user's real stack, and that stack wants Docker.** The
-  box is the faithful analog of a developer's laptop (see Runner): the
-  user's app, their database, their seeds, Playwright with real browsers.
-  The baked toolchain therefore includes Docker, because the Supabase CLI's
-  local stack is Docker-based. Cloudflare Containers do not offer nested
-  virtualization, so docker-in-container is not available. The only way
-  through is to stop running the user's stack and bake a hand-rolled
-  Postgres+PostgREST image instead — which trades away the fidelity the box
-  exists to provide and makes us responsible for keeping a fake Supabase
-  faithful to the real one. That is antithetical to the whole point.
-- **Memory.** App build plus Postgres plus a headless browser, concurrently,
-  is provisioned today as `s-2vcpu-4gb`. Container instance types top out in
-  the low-GiB range; whether the real workload fits is empirical, not
-  assumed, and is the second thing a spike must measure.
-
-Worth noting against the marketing: Container cold starts are seconds, not
-the sub-millisecond figure that applies to Worker isolates, so the warm-box
-value (a re-run costs seconds, not a provisioning cycle) is not something
-Containers hand us for free. And two model mismatches are reconcilable but
-not zero-cost: the box holds an *outbound* WebSocket to its DO, whereas a
-container is reached by `containerInstance.fetch()`; and the stage cache's
+Adding a second runner is also how the swappable model earns its keep: a
+single substrate can't prove the seam holds, and the abstraction is only
+worth its weight if a genuinely different machine — a microVM reached by
+`containerInstance.fetch()` instead of a droplet holding an *outbound*
+WebSocket to its DO — slots in without disturbing anything above it. The one
+thing every substrate must honor is the build model: the stage cache's
 *state* stages mutate a live, warm machine ("this box now embodies state X"),
-which an immutable container image does not model — a container either bakes
-everything (losing the per-PR incremental cache) or runs the same staged
-build inside itself (at which point Containers vs droplets is a substrate
-swap, not a new build model).
+so a container either runs that same staged build inside itself or it isn't a
+drop-in — baking the whole box into one immutable image would discard the
+per-PR incremental cache, not implement it.
 
-Conditions for revisiting: a project whose DB stack runs without
-docker-in-docker (Postgres+PostgREST baked directly, or a future
-Supabase-without-Docker path), *and* a spike showing app+DB+browser fits the
-container memory ceiling. If both clear, the move is additive — a third
-`RUNNER_PROVIDER = "cloudflare-container"` beside the existing two, earning
-`sleepAfter` and the single-cloud footprint — never a deletion of the
-DigitalOcean path, which stays the substrate for Docker-dependent stacks.
+So the order of work is: ship DigitalOcean (the flexible default that
+supports everyone), keep the `Runner` seam honest, then add Cloudflare
+Containers as the second provider — gated on a spike that bakes a
+Container-compatible image and confirms app + DB + browser fit the memory
+ceiling. It is always additive; the DigitalOcean path stays for any stack
+that needs a full VM.
 
 ### The build pipeline
 
