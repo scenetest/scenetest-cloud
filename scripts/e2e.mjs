@@ -285,6 +285,35 @@ async function main() {
   check('newly watched repo triggers a run (case-insensitive match)',
     addedHook.result?.startsWith('run-created:'), JSON.stringify(addedHook))
 
+  // --- pr-closed teardown: a closed PR retires its box now -------------------
+  // The webhook handler tears the box down on close/merge rather than letting
+  // it bill until the age-cap reaper: retireBox cancels the PR's unfinished
+  // runs, drops the coordinator's queue/sockets, and marks the droplet
+  // destroyed. Seed a fresh PR with a live box + running run to drive it.
+  console.log('· pr-closed teardown')
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 12, 'closebox1', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-close', 'demo/watched', 12, 'closebox1', 'ready', '${boxTokenHash}', 0)`)
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-close-run', 'demo/watched', 12, 'closebox1', 'manual', 'running', 'e2e-box-close')")
+  const closedPayload = {
+    action: 'closed', number: 12,
+    repository: { full_name: 'demo/watched' },
+    pull_request: { state: 'closed', head: { sha: 'closebox1' }, base: { ref: 'main', sha: 'base000' } },
+  }
+  const closed = await j(await hook('pull_request', closedPayload))
+  check('closed PR with a live box → retired', closed.result === 'pr-closed:retired', JSON.stringify(closed))
+  const closedBox = d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-close'")
+  check('closed PR marked its box destroyed', closedBox[0].status === 'destroyed', `got ${closedBox[0].status}`)
+  const closedRun = d1Query(persistDir, "SELECT status, ended_at FROM runs WHERE id = 'e2e-close-run'")
+  check('closed PR cancelled its unfinished run',
+    closedRun[0].status === 'cancelled' && closedRun[0].ended_at != null, JSON.stringify(closedRun[0]))
+  // Idempotent: closing again finds no live box and is a plain pr-closed.
+  const closedAgain = await j(await hook('pull_request', closedPayload))
+  check('closing again with no live box → plain pr-closed',
+    closedAgain.result === 'pr-closed', JSON.stringify(closedAgain))
+
   // --- the run that webhook triggered, observed through the PR viewer --------
   // webhookRunId is the only run on demo/watched#5, so the whole-PR stream is
   // just that run.
