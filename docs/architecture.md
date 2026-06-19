@@ -267,57 +267,40 @@ Unbuilt; the cap is the placeholder.
 ### The runner is a swappable substrate
 
 The runner is not coupled to DigitalOcean. `Runner` is `provision()` +
-`dispatch()`, selected by `RUNNER_PROVIDER` (`stub`, `digitalocean`) in
-`registry.ts`, so the machine a box runs on is a substrate that swaps in and
-out without touching the coordinator, the event log, D1/R2, or the stage
-cache. The user-facing contract is the same on every substrate: **bake an
-image, then run setup scripts** (the env-image stage plus the staged build
-of the pipeline). Everything above that line — coordination, the log, the
-dashboard — is substrate-agnostic by construction.
+`dispatch()`, selected by `RUNNER_PROVIDER` in `registry.ts`, so the machine
+a box runs on swaps without touching the coordinator, the log, D1/R2, or the
+stage cache. The user contract is the same on every substrate: **bake an
+image, then run setup scripts** (the env-image stage plus the staged build).
 
-DigitalOcean is the first substrate, and it is the default because it is the
-most *flexible*: a stock-Ubuntu droplet can faithfully recreate any kind of
-dev box. That generality matters because users will not all be on the same
-stack — the box is the faithful analog of a developer's laptop (see Runner),
-so it has to run whatever that laptop runs. Concretely, the baked toolchain
-includes Docker, which lets the box stand up Docker-based local stacks (the
-Supabase CLI's, today) exactly as a developer would. A substrate that can
-run anything is the right place to start, because it never tells a user
-their stack is unsupported.
+DigitalOcean is the first substrate because it is the most *flexible*: a
+stock VM faithfully recreates any dev box — including Docker-based local
+stacks (the Supabase CLI's, today), since the baked toolchain ships Docker.
+Users won't all be on the same stack, so the default has to run whatever a
+laptop runs and never declare a stack unsupported.
 
-Other substrates can join behind the same interface, trading flexibility for
-something else. Cloudflare Containers (Firecracker microVMs fronted by a
-Durable Object) are the natural second runner: less flexible than a raw VM —
-no nested virtualization, so a Docker-based local stack would have to be
-re-baked as a direct image (e.g. Postgres + PostgREST in the container)
-rather than run under Docker, and instance memory is tighter than a droplet
-— but more performant and operationally simpler for projects whose image
-*does* fit. For teams working in the Cloudflare ecosystem (us included), the
-payoff is real: the per-PR DO that would front a container is the PR
-coordinator we already run, `sleepAfter` is exactly the idle-based teardown
-the teardown note above calls the unbuilt target, and a Cloudflare-only
-deployment sheds the `DO_API_TOKEN`, droplet billing, the builder-droplet
-state machine, and the reaper. If you can bake a Container-compatible image,
-you get the faster, cheaper substrate; if you can't, DigitalOcean runs your
-box unchanged. That choice living entirely in `RUNNER_PROVIDER` is the point.
+Other substrates join behind the same interface, trading flexibility for
+something else. Cloudflare Containers are the natural second runner: less
+flexible (no nested virtualization, so a Docker stack must be re-baked as a
+direct image; tighter memory) but faster and simpler for images that fit,
+and a clear win for Cloudflare-ecosystem teams — the per-PR DO already
+fronts it, `sleepAfter` *is* the idle-teardown the note above calls unbuilt,
+and a one-cloud deploy sheds the `DO_API_TOKEN`, droplet billing, the
+builder state machine, and the reaper. Bake a Container-compatible image and
+you get the faster substrate; if you can't, DigitalOcean runs your box
+unchanged. That choice living in `RUNNER_PROVIDER` is the point.
 
-Adding a second runner is also how the swappable model earns its keep: a
-single substrate can't prove the seam holds, and the abstraction is only
-worth its weight if a genuinely different machine — a microVM reached by
-`containerInstance.fetch()` instead of a droplet holding an *outbound*
-WebSocket to its DO — slots in without disturbing anything above it. The one
-thing every substrate must honor is the build model: the stage cache's
-*state* stages mutate a live, warm machine ("this box now embodies state X"),
-so a container either runs that same staged build inside itself or it isn't a
-drop-in — baking the whole box into one immutable image would discard the
-per-PR incremental cache, not implement it.
+A second runner is also how the model earns its keep: one substrate can't
+prove the seam, and it's only worth its weight if a genuinely different
+machine slots in undisturbed. The one constraint every substrate honors is
+the build model — the stage cache's *state* stages mutate a live, warm box
+("this box now embodies state X"), so a container runs that same staged
+build inside itself; baking the whole box into one immutable image discards
+the per-PR cache rather than implementing it.
 
-So the order of work is: ship DigitalOcean (the flexible default that
-supports everyone), keep the `Runner` seam honest, then add Cloudflare
-Containers as the second provider — gated on a spike that bakes a
-Container-compatible image and confirms app + DB + browser fit the memory
-ceiling. It is always additive; the DigitalOcean path stays for any stack
-that needs a full VM.
+Order of work: ship DigitalOcean, keep the seam honest, then add Cloudflare
+Containers — gated on a spike that bakes a compatible image and confirms app
++ DB + browser fit the memory ceiling. Always additive; the DigitalOcean
+path stays for any stack that needs a full VM.
 
 ### The build pipeline
 
