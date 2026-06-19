@@ -372,6 +372,19 @@ immediately — latest wins. The only state worth a verdict is the one that
 might merge, and a late completion report from the old box cannot overwrite
 the cancellation.
 
+When a run reaches a terminal status, the worker reports the verdict back to
+GitHub as a commit status on the head sha (`postCommitStatus` in
+`github.ts`, called from `postRunComplete`) — `passed → success`,
+`failed → failure`, `cancelled → error`, linked at the PR dashboard. This is
+the one leg of the loop that closes back to GitHub: a PR getting merged is
+the goal the whole system serves, so the merge button must reflect what the
+dashboard already knows. It is the write counterpart to `github.ts`'s
+otherwise read-only role (trees/blobs for the stage plan, webhook-signature
+verification), best-effort via `waitUntil` so a GitHub hiccup never fails the
+box's `/complete`, and gated on `GITHUB_API_TOKEN` carrying `repo:status`
+(absent/under-scoped → log and skip, like the read path's coarse-plan
+degrade). Check runs — richer, but GitHub-App-only — are the upgrade path.
+
 Static-analysis reports — lint and typecheck deltas, bundle sizes,
 dependency changes — are stage outputs keyed the same way, stored in the
 overview tables. The PR comparison view is "report at base hash vs report

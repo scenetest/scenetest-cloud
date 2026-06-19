@@ -1,7 +1,9 @@
 import type { Handler } from '../router.ts'
+import type { Env } from '../env.ts'
 import { verifyBoxToken } from '../middleware/bearer.ts'
 import type { RunEvent } from '../db.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
+import { postCommitStatus } from '../github.ts'
 
 // POST /api/events/:runId
 // Body: { events: Array<{ seq: number, payload: unknown }> }
@@ -46,7 +48,7 @@ export const postRunComplete: Handler = async (req, env, ctx, params) => {
   // to the durable R2 artifact. Best-effort via waitUntil — the cron archive
   // backstop is the guarantee if this drops.
   if (res.meta.changes > 0) {
-    const { repo, pr_number } = auth.run
+    const { repo, pr_number, head_sha } = auth.run
     ctx.waitUntil(
       prCoordinator(env, repo, pr_number)
         .fetch('https://do/archive', { method: 'POST', body: JSON.stringify({ runId }) })
@@ -54,6 +56,47 @@ export const postRunComplete: Handler = async (req, env, ctx, params) => {
           console.error(`artifact(${runId}) failed: ${err instanceof Error ? err.message : err}`),
         ),
     )
+    // Close the loop back to GitHub: a commit status on the head sha so the
+    // PR's merge button reflects the verdict. Best-effort via waitUntil — a
+    // GitHub hiccup must not fail the box's completion report.
+    ctx.waitUntil(reportVerdict(env, runId, repo, pr_number, head_sha, body.status))
   }
   return Response.json({ ok: true, applied: res.meta.changes > 0 })
+}
+
+// Build the commit-status description from this run's scene tallies and link
+// it at the PR dashboard, then hand off to the best-effort GitHub egress.
+async function reportVerdict(
+  env: Env,
+  runId: string,
+  repo: string,
+  prNumber: number,
+  headSha: string,
+  status: 'passed' | 'failed' | 'cancelled',
+): Promise<void> {
+  let description: string
+  if (status === 'cancelled') {
+    description = 'Run cancelled — a newer commit retired this box'
+  } else {
+    const counts = await env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failing
+         FROM scene_executions WHERE run_id = ?1`,
+    )
+      .bind(runId)
+      .first<{ total: number; failing: number | null }>()
+    const total = counts?.total ?? 0
+    const failing = counts?.failing ?? 0
+    description = total
+      ? `${total} scene${total === 1 ? '' : 's'}, ${failing} failing`
+      : status === 'passed'
+        ? 'Run passed'
+        : 'Run failed'
+  }
+  // Mirror src/dashboard/lib/paths.ts pr(); the worker doesn't import dashboard
+  // code (kept in sync by hand). Omit target_url when the origin is unset.
+  const targetUrl = env.PUBLIC_BASE_URL
+    ? `${env.PUBLIC_BASE_URL}/repo/${repo}/pr/${prNumber}?run=${encodeURIComponent(runId)}`
+    : undefined
+  await postCommitStatus(env, { repo, sha: headSha, status, description, targetUrl })
 }
