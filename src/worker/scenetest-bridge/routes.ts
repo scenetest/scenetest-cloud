@@ -1,13 +1,7 @@
 import { decodeCommand } from '@scenetest/protocol'
-import type { Env } from '../env.ts'
 import type { AuthedHandler } from '../auth/session.ts'
-import { renderDashboard } from './html.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
-
-export const dashboardHtml: AuthedHandler = () =>
-  new Response(renderDashboard(), {
-    headers: { 'content-type': 'text/html; charset=utf-8' },
-  })
+import { readArtifactBoxJsonl } from '../artifacts.ts'
 
 // GET /api/runs/:runId/log — download the raw event log as .jsonl. Serves the
 // R2 artifact once it exists; before then (run in flight, or archive pending)
@@ -26,9 +20,11 @@ export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
   }
 
   if (run.artifact_key && env.ARTIFACTS) {
-    const obj = await env.ARTIFACTS.get(run.artifact_key)
-    // Key recorded but object missing: fall through to the live log.
-    if (obj) return new Response(obj.body, { headers })
+    // The R2 archive is the full log row; project it down to the box-compatible
+    // {seq,payload} view so the download matches the live /jsonl. Key recorded
+    // but object missing/empty → null → fall through to the live log.
+    const jsonl = await readArtifactBoxJsonl(env, run.artifact_key)
+    if (jsonl != null) return new Response(jsonl, { headers })
   }
   const res = await prCoordinator(env, run.repo, run.pr_number).fetch(
     `https://do/jsonl?runId=${encodeURIComponent(runId)}`,
@@ -54,6 +50,27 @@ export const dashboardWs: AuthedHandler = async (req, env, _ctx, params) => {
   const sinceSeq = new URL(req.url).searchParams.get('sinceSeq')
   if (sinceSeq) doUrl.searchParams.set('sinceSeq', sinceSeq)
   return prCoordinator(env, run.repo, run.pr_number).fetch(new Request(doUrl, req))
+}
+
+// GET /api/cloud/repos/:owner/:name/pr/:number/ws — PR viewer WebSocket. Cookie
+// auth at the edge, then forward the upgrade to the PR's DO, which replays the
+// whole PR's log (ordered by the PR-global id) and fans out live events. repo +
+// pr name the coordinator; the DO needs no run filter (it is the PR).
+export const prDashboardWs: AuthedHandler = async (req, env, _ctx, params) => {
+  if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+    return new Response('Expected WebSocket', { status: 426 })
+  }
+  const repo = `${params.owner}/${params.name}`
+  const prNumber = Number(params.number)
+  if (!Number.isFinite(prNumber)) return new Response('bad pr number', { status: 400 })
+
+  const doUrl = new URL('https://do/pr-viewer-connect')
+  const sinceId = new URL(req.url).searchParams.get('sinceId')
+  if (sinceId) doUrl.searchParams.set('sinceId', sinceId)
+  // Name the PR so the DO can fold this PR's archived runs back into the stream.
+  doUrl.searchParams.set('repo', repo)
+  doUrl.searchParams.set('pr', String(prNumber))
+  return prCoordinator(env, repo, prNumber).fetch(new Request(doUrl, req))
 }
 
 // POST /api/runs/:runId/commands — body is one encoded protocol command.

@@ -161,8 +161,7 @@ function Checklist({ owner, name }: { owner: string; name: string }) {
 
       {s?.first_run && (
         <div class='flex gap-2'>
-          <Button variant='primary' size='md' href={`/r/${s.first_run.id}/dashboard/`}>Open run dashboard</Button>
-          <Button variant='secondary' size='md' href={paths.repo(owner, name)}>Project page</Button>
+          <Button variant='primary' size='md' href={paths.repo(owner, name)}>Project page</Button>
         </div>
       )}
     </div>

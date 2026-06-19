@@ -132,6 +132,25 @@ the replay-on-connect, and the archived-PR read all go through this one door.
 Whether the bytes come from a live store or a durable archive is hidden behind
 it; the consumer sees one ordered stream.
 
+**The DO owns the log.** In the cloud, the box asserts a *fact* — `(seq,
+payload)`, its per-run sequence — and the PR object records it, minting a
+PR-global `id` in the order it received the fact. `seq` is the fact's; `id` is
+the *log's*: the canonical record of receive-order, not of when things happened.
+So a PR subscriber tails the log, not the fact-stream — it sees events in the
+order the DO logged them (frozen once minted), which need not be the order they
+occurred (a slow box, a reconnect resend, overlapping runs). That is the point:
+one authoritative receive-order, owned by one object, deterministic and
+replayable, so distributed real-time ordering across boxes never has to be
+reasoned about. The PR-anchored stream orders and resumes on `id`; the per-run
+view still orders on `seq`. Because the cross-run interleaving the `id` captures
+cannot be reconstructed from per-run facts and timestamps, the R2 archive
+carries `id` (and `ts`) per line — `id` is the one thing that makes "R2 can
+recreate the log exactly" true. On revival, an archived run is folded back under
+its *original* `id`, so the stream replays identically no matter what order runs
+are restored in (e.g. newest-first). The byte-level `.jsonl` is no longer
+claimed identical to the box's file — only *recognizably similar*; the download
+projects the log back down to the box's `{seq,payload}` view.
+
 Where the two categories live, across both environments. The first row is not
 just dev: it is also the per-PR runner box — the production machine a user's
 app is spun up and tested on, running the same code path as a laptop.

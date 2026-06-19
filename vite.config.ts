@@ -20,7 +20,6 @@ export default defineConfig({
       '/api': workerProxy,
       '/auth': workerProxy,
       '/webhook': workerProxy,
-      '/r': workerProxy,
     },
   },
   build: {
@@ -28,15 +27,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        // The SPA shell, plus the per-run dashboard entry the worker's HTML
-        // references by a stable name (no hash — the shell is generated
-        // worker-side and can't read the manifest).
         index: fileURLToPath(new URL('./src/dashboard/index.html', import.meta.url)),
-        run: fileURLToPath(new URL('./src/dashboard/run.ts', import.meta.url)),
-      },
-      output: {
-        entryFileNames: (chunk) =>
-          chunk.name === 'run' ? 'run-dashboard.js' : 'assets/[name]-[hash].js',
       },
     },
   },

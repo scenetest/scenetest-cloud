@@ -104,7 +104,7 @@ export function RepoDetail({ owner, name }: Props) {
                     </div>
                   )}
                 </div>
-                <Button variant='secondary' size='sm' href={`/r/${run.id}/dashboard`}>View →</Button>
+                <Button variant='secondary' size='sm' href={paths.pr(owner, name, run.pr_number, run.id)}>View →</Button>
               </div>
             )
           })}

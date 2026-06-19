@@ -57,6 +57,22 @@ export const debugBoxDispatch: Handler = async (req, env) => {
   return Response.json(await res.json(), { status: 202 })
 }
 
+// POST /api/debug/reset-pr-log
+// Body: { repo, prNumber } — drop a PR object's live log rows, modelling PR
+// teardown so the e2e can prove an archived run re-folds back into the PR
+// stream from R2. DEV-ONLY, same gate as the rest.
+export const debugResetPrLog: Handler = async (req, env) => {
+  if (env.ENABLE_DEBUG_ROUTES !== '1') {
+    return new Response('Not Found', { status: 404 })
+  }
+  const { repo, prNumber } = await req.json<{ repo: string; prNumber: number }>()
+  if (!repo || !Number.isFinite(prNumber)) {
+    return Response.json({ error: 'repo and prNumber required' }, { status: 400 })
+  }
+  const res = await prCoordinator(env, repo, prNumber).fetch('https://do/reset', { method: 'POST' })
+  return Response.json(await res.json(), { status: 200 })
+}
+
 // POST /api/debug/stub-run
 // Body: { prNumber?: number, subset?: string[] }
 // Upserts a fake PR and creates a run through the normal path (ensure box →
@@ -93,5 +109,5 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
     subset: body.subset ?? null,
   })
 
-  return Response.json({ runId, dashboardUrl: `/r/${runId}/dashboard/` })
+  return Response.json({ runId, prUrl: `/repo/${repo}/pr/${prNumber}` })
 }

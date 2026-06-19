@@ -1,8 +1,8 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { dashboardHtml, dashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
+import { dashboardWs, prDashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
-import { debugStubRun, debugBoxUpdate, debugBoxDispatch } from './routes/debug.ts'
+import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
 import { boxChannel, boxReady } from './routes/box-channel.ts'
 import { tick } from './runner/tick.ts'
@@ -46,11 +46,10 @@ const router = new Router()
   // Cloud dashboard data
   .get('/api/cloud/overview', withSession(getOverview))
   .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))
-  // Run dashboard: worker shell + @scenetest/dashboard widget. The widget's
-  // transport talks to the /api/runs/:runId endpoints below. Both slash
-  // variants serve the page — asset URLs are absolute, so it doesn't matter.
-  .get('/r/:runId/dashboard', withSession(dashboardHtml, 'redirect'))
-  .get('/r/:runId/dashboard/', withSession(dashboardHtml, 'redirect'))
+  // PR-anchored viewer stream: the whole PR's events over one WebSocket.
+  .get('/api/cloud/repos/:owner/:name/pr/:number/ws', withSession(prDashboardWs))
+  // Run-scoped data plane (no run-scoped page — the PR page is the unit). The
+  // per-run viewer WS backs run-granular observation (and R2 artifact replay).
   .get('/api/runs/:runId/ws', withSession(dashboardWs))
   .get('/api/runs/:runId/log', withSession(getRunLog))
   .post('/api/runs/:runId/commands', withSession(postRunCommand))
@@ -67,6 +66,7 @@ const router = new Router()
   .post('/api/debug/stub-run', debugStubRun)
   .post('/api/debug/box-update', debugBoxUpdate)
   .post('/api/debug/box-dispatch', debugBoxDispatch)
+  .post('/api/debug/reset-pr-log', debugResetPrLog)
 
 const REQUIRED_VARS = ['GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET', 'SESSION_SECRET'] as const
 
@@ -85,8 +85,7 @@ export default {
       if (
         path.startsWith('/api/') ||
         path.startsWith('/auth/') ||
-        path.startsWith('/webhook/') ||
-        path.startsWith('/r/')
+        path.startsWith('/webhook/')
       ) {
         return await router.handle(req, env, ctx)
       }

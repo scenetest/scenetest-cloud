@@ -4,14 +4,14 @@ import { NavBar } from './components/NavBar.tsx'
 import { Overview } from './components/Overview.tsx'
 import { ProjectsView } from './components/ProjectsView.tsx'
 import { RepoDetail } from './components/RepoDetail.tsx'
+import { PrDetail } from './components/PrDetail.tsx'
 import { Button } from './components/Button.tsx'
 
 // The SPA owns exactly these paths. preact-iso intercepts in-app link clicks
-// only within this scope; worker-served routes (/auth/*, /r/:runId/dashboard,
-// /api/*) fall outside it and reach the worker normally. This set must agree
-// with the worker's shell fall-through in src/worker/index.ts — repo views use
-// /repo/* rather than /r/* precisely to avoid colliding with the run-dashboard
-// /r/ prefix. The concrete URLs are built in ./lib/paths.ts.
+// only within this scope; worker-served routes (/auth/*, /api/*) fall outside
+// it and reach the worker normally. This set must agree with the worker's shell
+// fall-through in src/worker/index.ts. The concrete URLs are built in
+// ./lib/paths.ts — the PR page (/repo/:owner/:name/pr/:number) is in scope.
 export const spaScope = /^\/($|projects|repo\/)/
 
 export function App() {
@@ -31,6 +31,7 @@ function Dashboard({ me }: { me: Me }) {
       <Router>
         <Route path='/' component={Overview} />
         <Route path='/projects' component={ProjectsView} />
+        <Route path='/repo/:owner/:name/pr/:number' component={PrDetail} />
         <Route path='/repo/:owner/:name' component={RepoDetail} />
         <Route default component={NotFound} />
       </Router>
