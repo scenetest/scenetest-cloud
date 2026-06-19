@@ -215,6 +215,14 @@ async function main() {
 
   const cookie = await forgeSessionCookie()
   const j = (res) => res.json()
+  const waitFor = async (fn, maxMs = 6000) => {
+    const start = Date.now()
+    while (Date.now() - start < maxMs) {
+      if (await fn()) return true
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return false
+  }
 
   // --- auth seams ---
   console.log('· auth')
@@ -369,6 +377,20 @@ async function main() {
   check('coordinator acked the events batch',
     (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
 
+  // The coordinator derives D1 projections from the same event stream (#36):
+  // no /scene-executions call, no stub hand-writes. run:start moves the run to
+  // 'running' with a started_at; scene:start writes a scene_executions row.
+  check('run:start projected the run → running with started_at', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT status, started_at FROM runs WHERE id = 'e2e-ws-run'")
+    return r[0].status === 'running' && r[0].started_at != null
+  }), 'runs.e2e-ws-run never went running')
+  check('scene:start projected a scene_executions row from the stream', await waitFor(() => {
+    const r = d1Query(persistDir,
+      "SELECT status, scene_name, scene_file FROM scene_executions WHERE run_id = 'e2e-ws-run'")
+    return r.length === 1 && r[0].scene_name === 'ws scene' &&
+      r[0].scene_file === 'x.scene.ts' && r[0].status === 'running'
+  }), 'scene_executions not derived from the event stream')
+
   // PR viewer: replay the whole PR's log from the object, then live events.
   const wsReplay = await collectWs('/api/cloud/repos/demo/watched/pr/9/ws', cookie, 2500)
   check('box events reached viewer via WS replay',
@@ -455,15 +477,6 @@ async function main() {
   let agentLog = ''
   agent.stdout.on('data', (d) => { agentLog += d })
   agent.stderr.on('data', (d) => { agentLog += d })
-
-  const waitFor = async (fn, maxMs = 6000) => {
-    const start = Date.now()
-    while (Date.now() - start < maxMs) {
-      if (await fn()) return true
-      await new Promise((r) => setTimeout(r, 100))
-    }
-    return false
-  }
 
   check('agent connected its channel',
     await waitFor(() => agentLog.includes('channel connected')), agentLog)
@@ -604,6 +617,14 @@ async function main() {
     artInbox.some((m) => m.kind === 'ack' && m.runId === 'e2e-artifact-run' && m.count === 3))
   check('artifact run events acked by the coordinator', artAck, JSON.stringify(artInbox))
 
+  // run:end settles the verdict in D1 through the same projection writer (#36):
+  // the run was inserted 'running'; the event stream alone moves it to 'passed'
+  // (0 failed) with an ended_at — no /complete call on this path.
+  check('run:end projected the settled verdict (0 failed → passed)', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT status, ended_at FROM runs WHERE id = 'e2e-artifact-run'")
+    return r[0].status === 'passed' && r[0].ended_at != null
+  }), 'run:end did not settle the verdict in D1')
+
   check('run log anonymous → 401', (await fetch(`${BASE}/api/runs/e2e-artifact-run/log`)).status === 401)
 
   // Before archive: /log streams the live log straight from the object's SQLite.
@@ -613,8 +634,8 @@ async function main() {
     logPre.status === 200 && logPreText.includes('run:start') && logPreText.includes('run:end'),
     `${logPre.status} ${logPreText.slice(0, 120)}`)
 
-  // Terminal + no artifact_key → the cron archive backstop flushes it to R2.
-  d1Query(persistDir, "UPDATE runs SET status = 'passed', ended_at = 1 WHERE id = 'e2e-artifact-run'")
+  // Terminal (settled above by the projection writer) + no artifact_key → the
+  // cron archive backstop flushes it to R2.
   const sched = await fetch(`${BASE}/cdn-cgi/handler/scheduled`)
   check('scheduled handler reachable', sched.status === 200, `got ${sched.status}`)
   check('cron archive backstop wrote the artifact_key', await waitFor(() => {
