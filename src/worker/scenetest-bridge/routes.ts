@@ -1,5 +1,8 @@
 import { decodeCommand } from '@scenetest/protocol'
 import type { AuthedHandler } from '../auth/session.ts'
+import { SESSION_COOKIE, jsonUnauthorized, verifySessionToken } from '../auth/session.ts'
+import { parseCookies } from '../auth/cookies.ts'
+import type { Handler } from '../router.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
 import { readArtifactBoxJsonl } from '../artifacts.ts'
 
@@ -32,14 +35,24 @@ export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
   return new Response(res.body, { headers })
 }
 
-// GET /api/cloud/repos/:owner/:name/pr/:number/ws — PR viewer WebSocket. Cookie
-// auth at the edge, then forward the upgrade to the PR's DO, which replays the
-// whole PR's log (ordered by the PR-global id) and fans out live events. repo +
-// pr name the coordinator; the DO needs no run filter (it is the PR).
-export const prDashboardWs: AuthedHandler = async (req, env, _ctx, params) => {
+// GET /api/cloud/repos/:owner/:name/pr/:number/ws — PR viewer WebSocket. Owns
+// its auth (registered as a plain Handler, not via withSession) because it
+// accepts the session token via ?session= as well as the cookie — a WS-only
+// concession that does not belong in the shared cookie-auth path. After auth it
+// forwards the upgrade to the PR's DO, which replays the whole PR's log (ordered
+// by the PR-global id) and fans out live events. repo + pr name the
+// coordinator; the DO needs no run filter (it is the PR).
+export const prDashboardWs: Handler = async (req, env, _ctx, params) => {
   if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return new Response('Expected WebSocket', { status: 426 })
   }
+  // Browsers send cookies automatically on same-origin WS; test clients that
+  // cannot set headers pass ?session= explicitly.
+  const cookies = parseCookies(req.headers.get('cookie'))
+  const token = cookies[SESSION_COOKIE] ?? new URL(req.url).searchParams.get('session') ?? undefined
+  const user = token ? await verifySessionToken(token, env) : null
+  if (!user) return jsonUnauthorized()
+
   const repo = `${params.owner}/${params.name}`
   const prNumber = Number(params.number)
   if (!Number.isFinite(prNumber)) return new Response('bad pr number', { status: 400 })
