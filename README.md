@@ -9,6 +9,8 @@ DigitalOcean droplets.
 
 - [docs/architecture.md](docs/architecture.md) — how the pieces fit, and how
   this repo relates to the scenetest-js monorepo
+- [docs/todo.md](docs/todo.md) — the prioritized roadmap: what's live, what's
+  next, and the dependency order across the open issues
 - [docs/setup.md](docs/setup.md) — zero to deployed
 - [docs/add-a-project.md](docs/add-a-project.md) — the first-user
   walkthrough: register, webhook, pipeline file, first PR
