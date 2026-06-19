@@ -23,10 +23,6 @@ export function createCloudPrTransport(owner: string, name: string, prNumber: nu
   const base = `/api/cloud/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pr/${prNumber}`
   const proto = () => (location.protocol === 'https:' ? 'wss' : 'ws')
   return {
-    async fetchState() {
-      return []
-    },
-
     subscribe(onEvent, onStatus?: (status: ConnectionStatus) => void) {
       let cursor = 0
       let closed = false

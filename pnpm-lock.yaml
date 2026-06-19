@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@scenetest/dashboard':
-        specifier: ^0.11.0
-        version: 0.11.0
+        specifier: ^0.13.0
+        version: 0.13.0(preact-render-to-string@6.7.0(preact@10.29.2))(typescript@6.0.3)
       '@scenetest/protocol':
         specifier: ^0.11.0
         version: 0.11.0
@@ -557,8 +557,8 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@scenetest/dashboard@0.11.0':
-    resolution: {integrity: sha512-8lAlcdE/wxiQBknjtvTuNjeyoLGq/tI73/yo6n36AprUZRdmWcPxABcP1QSTP/DRJyJs4hTUzS+PL0OwjTKbxg==}
+  '@scenetest/dashboard@0.13.0':
+    resolution: {integrity: sha512-Cjw2mWCFZGemDYg2hobhreANMrZgMo901q1SrF87eRsnsl8Ww9FOHE8ol9Yp85v76l0Rd3s89I1qKhRFlXRyhw==}
 
   '@scenetest/protocol@0.11.0':
     resolution: {integrity: sha512-Lh/0nGWp+pck16ncePrNd9d4MGpXOQ1G2aJxXDkc3U9GoV76iXP+sdePLjPU00sSrei15RS1iXGE71moa/AEYg==}
@@ -666,6 +666,20 @@ packages:
     resolution: {integrity: sha512-t6J3OrB5Fc0ExuhohouH0fWUGMYL6PTLhW+E7zIk/pdbnJARZDCwjBznFnkh5ynRnIRSI4YjtTH0t6USjJISrw==}
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
+
+  '@tanstack/db-ivm@0.1.18':
+    resolution: {integrity: sha512-+pZJiRKdoKRM5Epq9T7otD9ZJl82pRFauo7LKuJGrarjVKQ7r+QQlPe3kGdN9LEKSnuNGIWjX9OOY4M8kH4eLw==}
+    peerDependencies:
+      typescript: '>=4.7'
+
+  '@tanstack/db@0.6.8':
+    resolution: {integrity: sha512-1dzwxYH7jizvpOzVsVmxZ8dGwMPDaA+YcinEmAszoUYF7mgSL0RiIiGHFBAc0WyVvHES7vSHg6x0WslX8C+TTQ==}
+    peerDependencies:
+      typescript: '>=4.7'
+
+  '@tanstack/pacer-lite@0.2.2':
+    resolution: {integrity: sha512-eQ1MyLKCHyXiH7NbdmB80W77OhiMgGBUb+qDx/8WMGbwg5Lf/NlfD0TfNYAqY77i8V3AxoDoYdICrQE5ADw4Yw==}
+    engines: {node: '>=18'}
 
   '@tanstack/query-core@5.101.0':
     resolution: {integrity: sha512-cQetA74EB+seWySv1TTKr828TnP0u39m6LykwDXIo84SNortpDkp30TMEjkqtYCNP9c40uT/iwl6MLiufEt0Ow==}
@@ -800,6 +814,10 @@ packages:
       picomatch:
         optional: true
 
+  fractional-indexing@3.2.0:
+    resolution: {integrity: sha512-PcOxmqwYCW7O2ovKRU8OoQQj2yqTfEB/yeTYk4gPid6dN5ODRfU1hXd9tTVZzax/0NkO7AxpHykvZnT1aYp/BQ==}
+    engines: {node: ^14.13.1 || >=16.0.0}
+
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -815,9 +833,6 @@ packages:
 
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
-
-  htm@3.1.1:
-    resolution: {integrity: sha512-983Vyg8NwUE7JkZ6NmOqpCZ+sh1bKv2iYTlUkzlWmA5JD2acKoxd4KVxbMmxX/85mtfdnDmTFoNKcg5DGAvxNQ==}
 
   jiti@2.7.0:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
@@ -984,6 +999,9 @@ packages:
 
   siginfo@2.0.0:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
+
+  sorted-btree@1.8.1:
+    resolution: {integrity: sha512-395+XIP+wqNn3USkFSrNz7G3Ss/MXlZEqesxvzCRFwL14h6e8LukDHdLBePn5pwbm5OQ9vGu8mDyz2lLDIqamQ==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -1507,11 +1525,15 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@scenetest/dashboard@0.11.0':
+  '@scenetest/dashboard@0.13.0(preact-render-to-string@6.7.0(preact@10.29.2))(typescript@6.0.3)':
     dependencies:
       '@scenetest/protocol': 0.11.0
-      htm: 3.1.1
+      '@tanstack/db': 0.6.8(typescript@6.0.3)
       preact: 10.29.2
+      preact-iso: 2.12.0(preact-render-to-string@6.7.0(preact@10.29.2))(preact@10.29.2)
+    transitivePeerDependencies:
+      - preact-render-to-string
+      - typescript
 
   '@scenetest/protocol@0.11.0': {}
 
@@ -1588,6 +1610,21 @@ snapshots:
       '@tailwindcss/oxide': 4.3.0
       tailwindcss: 4.3.0
       vite: 8.0.16(esbuild@0.27.3)(jiti@2.7.0)
+
+  '@tanstack/db-ivm@0.1.18(typescript@6.0.3)':
+    dependencies:
+      fractional-indexing: 3.2.0
+      sorted-btree: 1.8.1
+      typescript: 6.0.3
+
+  '@tanstack/db@0.6.8(typescript@6.0.3)':
+    dependencies:
+      '@standard-schema/spec': 1.1.0
+      '@tanstack/db-ivm': 0.1.18(typescript@6.0.3)
+      '@tanstack/pacer-lite': 0.2.2
+      typescript: 6.0.3
+
+  '@tanstack/pacer-lite@0.2.2': {}
 
   '@tanstack/query-core@5.101.0': {}
 
@@ -1738,6 +1775,8 @@ snapshots:
     optionalDependencies:
       picomatch: 4.0.4
 
+  fractional-indexing@3.2.0: {}
+
   fsevents@2.3.3:
     optional: true
 
@@ -1746,8 +1785,6 @@ snapshots:
   get-east-asian-width@1.6.0: {}
 
   graceful-fs@4.2.11: {}
-
-  htm@3.1.1: {}
 
   jiti@2.7.0: {}
 
@@ -1916,6 +1953,8 @@ snapshots:
   shell-quote@1.8.4: {}
 
   siginfo@2.0.0: {}
+
+  sorted-btree@1.8.1: {}
 
   source-map-js@1.2.1: {}
 

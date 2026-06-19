@@ -32,26 +32,6 @@ export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
   return new Response(res.body, { headers })
 }
 
-// GET /api/runs/:runId/ws — viewer WebSocket. Cookie auth (same-origin WS
-// handshakes carry cookies), then forward the upgrade to the PR's DO where
-// the socket is accepted, the backlog is replayed, and live events fan out.
-export const dashboardWs: AuthedHandler = async (req, env, _ctx, params) => {
-  if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
-    return new Response('Expected WebSocket', { status: 426 })
-  }
-  const runId = params.runId!
-  const run = await env.DB.prepare('SELECT repo, pr_number FROM runs WHERE id = ?1')
-    .bind(runId)
-    .first<{ repo: string; pr_number: number }>()
-  if (!run) return new Response('run not found', { status: 404 })
-
-  const doUrl = new URL('https://do/viewer-connect')
-  doUrl.searchParams.set('runId', runId)
-  const sinceSeq = new URL(req.url).searchParams.get('sinceSeq')
-  if (sinceSeq) doUrl.searchParams.set('sinceSeq', sinceSeq)
-  return prCoordinator(env, run.repo, run.pr_number).fetch(new Request(doUrl, req))
-}
-
 // GET /api/cloud/repos/:owner/:name/pr/:number/ws — PR viewer WebSocket. Cookie
 // auth at the edge, then forward the upgrade to the PR's DO, which replays the
 // whole PR's log (ordered by the PR-global id) and fans out live events. repo +
