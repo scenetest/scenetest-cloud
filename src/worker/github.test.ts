@@ -64,9 +64,9 @@ describe('postCommitStatus', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('skips a non-terminal status even with a token', async () => {
+  it('skips an unknown status even with a token', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
-    await postCommitStatus({ GITHUB_API_TOKEN: 't' }, { ...args, status: 'running' })
+    await postCommitStatus({ GITHUB_API_TOKEN: 't' }, { ...args, status: 'weird' })
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -75,6 +75,8 @@ describe('postCommitStatus', () => {
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 201 }))
     const cases: Array<[string, string]> = [
+      ['queued', 'pending'],
+      ['running', 'pending'],
       ['passed', 'success'],
       ['failed', 'failure'],
       ['cancelled', 'error'],

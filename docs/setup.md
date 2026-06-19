@@ -66,11 +66,12 @@ absent or under-scoped (it logs and skips, never failing the request):
 - **Pipeline stage-hashing** (read: trees/blobs/contents) — needs no scope
   for public repos (`public_repo` suffices), only lifts the worker egress
   IP's 60/hr unauthenticated rate limit.
-- **Commit statuses** (write: the run verdict posted on the PR's head sha so
-  the merge button reflects pass/fail) — needs `repo:status`. Without it the
-  verdict still lands on the dashboard; only the GitHub-side status is
-  skipped. (Check runs — annotations, re-run button — are the upgrade path
-  but require a GitHub App, not a PAT.)
+- **Commit statuses** (write: a `pending` status when a run starts and the
+  pass/fail verdict when it ends, on the PR's head sha, so the merge button
+  reflects the run) — needs `repo:status`. Without it the run still lands on
+  the dashboard; only the GitHub-side status is skipped. (Check runs —
+  annotations, re-run button — are the upgrade path but require a GitHub App,
+  not a PAT.)
 
 ## Database
 

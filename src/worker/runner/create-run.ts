@@ -2,6 +2,7 @@ import type { Env } from '../env.ts'
 import type { RunSpec } from './types.ts'
 import { getRunner } from './registry.ts'
 import { ensureBox, type PrRef } from './box.ts'
+import { postCommitStatus } from '../github.ts'
 
 export { getRunner }
 
@@ -40,6 +41,24 @@ export async function createRun(
       opts.triggeredByUserId ?? null,
     )
     .run()
+
+  // Open the loop on GitHub right away: a `pending` commit status so the check
+  // shows up while the run is live. The terminal verdict (postRunComplete)
+  // updates the same `scenetest` context. Best-effort — must not hold up or
+  // fail dispatch. Mirrors src/dashboard/lib/paths.ts pr(); the worker doesn't
+  // import dashboard code (kept in sync by hand).
+  const targetUrl = env.PUBLIC_BASE_URL
+    ? `${env.PUBLIC_BASE_URL}/repo/${opts.repo}/pr/${opts.prNumber}?run=${encodeURIComponent(runId)}`
+    : undefined
+  ctx.waitUntil(
+    postCommitStatus(env, {
+      repo: opts.repo,
+      sha: opts.headSha,
+      status: 'queued',
+      description: 'Run queued',
+      targetUrl,
+    }),
+  )
 
   const spec: RunSpec = {
     runId,
