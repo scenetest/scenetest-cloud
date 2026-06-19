@@ -289,6 +289,44 @@ idle-based teardown owned by the PR object (a Durable Object alarm reset on
 activity), with the age cap demoted to the hung-box backstop it should be.
 Unbuilt; the cap is the placeholder.
 
+### The runner is a swappable substrate
+
+The runner is not coupled to DigitalOcean. `Runner` is `provision()` +
+`dispatch()`, selected by `RUNNER_PROVIDER` in `registry.ts`, so the machine
+a box runs on swaps without touching the coordinator, the log, D1/R2, or the
+stage cache. The user contract is the same on every substrate: **bake an
+image, then run setup scripts** (the env-image stage plus the staged build).
+
+DigitalOcean is the first substrate because it is the most *flexible*: a
+stock VM faithfully recreates any dev box — including Docker-based local
+stacks (the Supabase CLI's, today), since the baked toolchain ships Docker.
+Users won't all be on the same stack, so the default has to run whatever a
+laptop runs and never declare a stack unsupported.
+
+Other substrates join behind the same interface, trading flexibility for
+something else. Cloudflare Containers are the natural second runner: less
+flexible (no nested virtualization, so a Docker stack must be re-baked as a
+direct image; tighter memory) but faster and simpler for images that fit,
+and a clear win for Cloudflare-ecosystem teams — the per-PR DO already
+fronts it, `sleepAfter` *is* the idle-teardown the note above calls unbuilt,
+and a one-cloud deploy sheds the `DO_API_TOKEN`, droplet billing, the
+builder state machine, and the reaper. Bake a Container-compatible image and
+you get the faster substrate; if you can't, DigitalOcean runs your box
+unchanged. That choice living in `RUNNER_PROVIDER` is the point.
+
+A second runner is also how the model earns its keep: one substrate can't
+prove the seam, and it's only worth its weight if a genuinely different
+machine slots in undisturbed. The one constraint every substrate honors is
+the build model — the stage cache's *state* stages mutate a live, warm box
+("this box now embodies state X"), so a container runs that same staged
+build inside itself; baking the whole box into one immutable image discards
+the per-PR cache rather than implementing it.
+
+Order of work: ship DigitalOcean, keep the seam honest, then add Cloudflare
+Containers — gated on a spike that bakes a compatible image and confirms app
++ DB + browser fit the memory ceiling. Always additive; the DigitalOcean
+path stays for any stack that needs a full VM.
+
 ### The build pipeline
 
 Provisioning and updating a box is staged, and each stage is keyed by a
