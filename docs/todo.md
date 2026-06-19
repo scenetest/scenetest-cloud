@@ -7,49 +7,73 @@ issue tracker is not the roadmap. The spine is.
 
 What is built and proven today: the cloud plumbing end of the pipe. A webhook
 creates a run, the PR Durable Object owns the event log in its SQLite, fans out
-to viewers over a hibernation WebSocket, writes settled projections to D1, and
-flushes each run's log to an R2 `.jsonl` artifact. The e2e exercises all of
-that. **But everything it exercises is driven by the stub runner**, which
-fabricates scenetest-shaped events straight into the coordinator's `/ingest`
-and never touches a box. The half of the system that runs real tests on real
-hardware is written and unproven.
+to viewers over a hibernation WebSocket, and flushes each run's log to an R2
+`.jsonl` artifact. Boxes provision and the agent connects. **But everything the
+e2e exercises is driven by the stub runner**, and the stub does something the
+real path doesn't: it hand-writes every D1 projection inline (see the gap
+below). Strip it away and the dashboard goes dark even while the live log
+fills.
 
 Status legend: **spine** = a load-bearing path the design assumes works and
-doesn't yet (or has never run) · **product** = promised to users, unbuilt ·
-**deferred** = real, gated behind a named trigger · **cleanup** = the tracked
-edges.
+doesn't yet · **product** = promised to users, unbuilt · **deferred** = real,
+gated behind a named trigger · **cleanup** = the tracked edges.
 
-## spine — the runner path has never run
+## spine — the projection writer was never built; the stub impersonates it
 
-This is the big one. The cloud-to-box contract is fully coded — `ensureBox`
-computes the stage plan and queues an `update`; `dispatch` rides the
-coordinator's box channel; the agent's `applyUpdate` and `runBatch` handle
-both — but the DigitalOcean provider has **never been exercised against the
-live API** (`runner/digitalocean.ts:19`), and the stub path that the e2e runs
-bypasses the box, the WebSocket dispatch, and the agent entirely. So the entire
-right half of the event-flow diagram is theoretical:
+This is the big one, and it's narrower than "the runner doesn't work." Boxes
+*do* provision, the agent connects, takes its `update`, and a `dispatch` runs
+the scenes command — and events *do* relay up the socket into the coordinator's
+SQLite log and fan out to live viewers. What's missing is the step that turns
+that log into the D1 projections the dashboard reads.
 
-- **First live provisioning, end to end.** One real PR: provision a droplet
-  from the self-built image, the agent connects its outbound WebSocket, takes
-  the queued `update`, checks out the sha, runs the pipeline stages, reports
-  the realized vector via `/ready` — then a `dispatch` arrives, `runBatch`
-  spawns the scenes command, the CLI streams events to the box-local ingest,
-  they relay up the socket into the coordinator's log, and a `run:end` settles
-  the verdict. **Every arrow in that sentence is untested.** No issue tracks
-  this; it's the precondition for trusting anything below it.
-- **An e2e that drives a box, not the stub.** Today's e2e proves the DO
-  fan-out with fabricated events. Nothing covers the agent's
-  dispatch→scenes→relay→verdict loop, the `update`→stage→`/ready` handshake, or
-  the warm-box stage-diff reuse in `ensureBox`. Until a test boots the agent
-  (even against a local fake droplet) and pushes an event through it, the
-  runner is a design, not a feature.
-- **The image build, verified.** `ensureImage` / `advanceImageBuilds` / the
-  pending-box completion in `tick.ts` form a multi-step async chain that the
-  stub never enters. First-live-provisioning is also the first real exercise of
-  the snapshot build and the cron's pending-box pickup.
+`architecture.md` says *"the object writes settled projections to D1 at run
+boundaries."* It doesn't. `PrCoordinator.ingestAndFanout`
+(`do/pr-coordinator.ts:199`) only appends to its log and fans out — it writes
+**no D1 row**. The agent reports events up the socket and calls `/ready` and
+`/complete`, but never `/scene-executions`, and nothing advances `runs.status`
+to `running`. The only thing standing in for the missing projection writer is
+the **stub** (`runner/stub.ts`), which hand-writes every projection as it
+fabricates events — `runs.status='running'` + `started_at`, the
+`scene_executions` rows, the terminal verdict. That's why the e2e looks
+healthy and a real box looks dead.
 
-Until this path runs once, the stage cache, the warm-box reuse, idle teardown,
-and reports-as-stages are all optimizations on top of an unproven foundation.
+Concretely, on a real (non-stub) run:
+
+- **`runs` never goes `running`.** It sits at `queued` until the agent's
+  `/complete` flips it straight to a terminal verdict. No `started_at`, no
+  in-progress state — the run lists show nothing happening, then a result.
+- **`scene_executions` is never written.** A `postSceneExecutions` endpoint
+  exists (`routes/runner-ingest.ts:32`) and is wired in the router, but the
+  agent never calls it and the coordinator never derives scene rows from
+  `scene:start` / `scene:end`. The per-scene grid is empty for every real run.
+- **The `overview_*` rollups are never written** — same root cause, and the
+  reason the home view has no live data (this is the projection half of #24/#25;
+  the root is here).
+
+**The fix is one component: a projection writer in the PR coordinator.** It
+already ingests every event into its log — have `ingestAndFanout` (or a
+boundary hook it calls) derive and upsert the D1 projections the architecture
+promised: `run:start` → `runs` running + `started_at`; `scene:start` /
+`scene:end` → `scene_executions` upserts; `run:end` → settled verdict + score +
+`overview_*` rollups. The architecture is explicit that this belongs to the
+*object* (it owns the log), not the agent making extra HTTP calls — so the
+`/scene-executions` endpoint is the wrong locus and can be retired once the
+coordinator projects. Once this lands, delete the stub's hand-written
+projection writes: the same code path must serve both, or the stub goes on
+hiding the gap.
+
+Supporting work, flushed out by the same effort:
+
+- **A box-driven e2e.** Today's e2e proves the DO fan-out with fabricated
+  events; nothing covers the agent's dispatch→scenes→relay→**projection**
+  loop. A test that boots the agent (against a local fake droplet) and pushes a
+  real event through to a D1 projection is what would have caught this. Until
+  then the stub's inline writes mask the missing writer by construction.
+- **Live-path validation of the rest of the chain.** With the projection
+  writer in place, confirm the warm-box stage-diff reuse in `ensureBox`, the
+  `update`→stage→`/ready` handshake, and the image-build / pending-box pickup
+  in `tick.ts` against a real droplet — the DigitalOcean provider is otherwise
+  only unit-tested (`runner/digitalocean.ts:19`).
 
 ## product — the user-facing promises, still unbuilt
 
@@ -120,12 +144,15 @@ payoff.
 
 ## Notes
 
-- **#16 and #24 are the same work** (home-view live layer) — consolidate.
-- **First live provisioning and a box-driven e2e have no issues** — they're the
+- **#16 and #24 are the same work** (home-view live layer) — consolidate. Note
+  their *live* layer sits on top of the spine: the rollups they fan out are D1
+  projections nothing currently writes.
+- **The projection writer and a box-driven e2e have no issues** — they're the
   spine, so they belong at the top of the tracker, not absent from it. File
   them.
-- Dependency order: the spine gates the runner-dependent deferred items
-  (idle teardown, save/restore). The two *product* items that don't touch the
-  box — the live run dashboard (#33) and the home view (#24/#16) — can proceed
-  in parallel with it, since both read the coordinator's already-proven
-  fan-out.
+- Dependency order: the spine (the projection writer) gates everything the
+  dashboard reads from D1 — run lists, scene grids, the home-view rollups. The
+  live run dashboard (#33) is the one product item that *doesn't* depend on it,
+  since it reads the coordinator's already-proven WebSocket fan-out rather than
+  D1; it can proceed in parallel. The runner-dependent deferred items (idle
+  teardown, save/restore) wait on live-path validation alongside the spine.
