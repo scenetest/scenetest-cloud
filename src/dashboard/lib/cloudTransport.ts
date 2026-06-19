@@ -1,5 +1,5 @@
 import type { ConnectionStatus, Transport } from '@scenetest/dashboard'
-import { isEventShaped } from '@scenetest/protocol'
+import { encodeCommand, isEventShaped } from '@scenetest/protocol'
 import { WebSocket as ReconnectingWebSocket } from 'partysocket'
 
 // Transport adapter for cloud: the worker API, session-authed (cookies ride
@@ -61,11 +61,19 @@ export function createCloudPrTransport(owner: string, name: string, prNumber: nu
       }
     },
 
-    // Commands are still run-scoped at the worker; the multi-run widget will
-    // route them to the active run, so sendCommand is pending that contract
-    // rather than guessing a target here.
-    async sendCommand() {
-      throw new Error('sendCommand not supported on the PR transport yet')
+    // Commands are PR-scoped: the PR is the unit and the address, not any one
+    // run. A command POSTs to the PR's /commands endpoint; the worker acts on it
+    // (run:replay starts a new run, run:stop reaches the box's in-flight batch),
+    // so the transport never picks a target run — there is none to pick. Cookies
+    // ride along on the same-origin fetch. The widget's Command vocabulary is the
+    // wire body verbatim (encodeCommand validates it before it leaves).
+    async sendCommand(command) {
+      const res = await fetch(`${base}/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ command: JSON.parse(encodeCommand(command)) }),
+      })
+      if (!res.ok) throw new Error(`command failed: ${res.status}`)
     },
   }
 }
