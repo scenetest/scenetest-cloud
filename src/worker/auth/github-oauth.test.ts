@@ -21,7 +21,7 @@ describe('safeNext', () => {
 
   it('passes through legitimate same-origin paths', () => {
     expect(safeNext('/')).toBe('/')
-    expect(safeNext('/r/abc/dashboard/')).toBe('/r/abc/dashboard/')
+    expect(safeNext('/repo/o/n/pr/1')).toBe('/repo/o/n/pr/1')
     expect(safeNext('/api/admin/users?page=2')).toBe('/api/admin/users?page=2')
   })
 })

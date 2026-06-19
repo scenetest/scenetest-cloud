@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // End-to-end check: boots the real worker (wrangler dev + workerd) against a
 // throwaway D1, then exercises the seams a unit test can't reach — auth
-// redirects, webhook HMAC + triggering, the stub runner driving the event
-// log, the dashboard shell + widget asset, command validation, and the
+// redirects, webhook HMAC + triggering, the stub runner driving the event log
+// (per-run and PR-anchored viewer streams), command validation, and the
 // latest-wins cancellation.
 //
 // Hermetic by construction: state lives in a temp --persist-to dir, secrets
@@ -114,12 +114,14 @@ function viewerWsUrl(path, cookie) {
   return `ws://127.0.0.1:${PORT}${path}${sep}session=${sessionToken(cookie)}`
 }
 
-// Connect a viewer WebSocket, collect { events, seqs } until `run:end` arrives
-// or maxMs elapses.
+// Connect a viewer WebSocket, collect { events, seqs, ids } until `run:end`
+// arrives or maxMs elapses. `ids` is populated only by the PR stream (frames
+// carry the PR-global id); per-run frames have no id, so it stays empty there.
 async function collectWs(path, cookie, maxMs = 8000) {
   return new Promise((resolve) => {
     const events = []
     const seqs = []
+    const ids = []
     let resolved = false
     let opened = false
     const finish = (status) => {
@@ -127,7 +129,7 @@ async function collectWs(path, cookie, maxMs = 8000) {
       resolved = true
       clearTimeout(timer)
       try { ws.close() } catch {}
-      resolve({ status, events, seqs })
+      resolve({ status, events, seqs, ids })
     }
     const timer = setTimeout(() => finish(0), maxMs)
     const ws = new WebSocket(viewerWsUrl(path, cookie))
@@ -139,6 +141,7 @@ async function collectWs(path, cookie, maxMs = 8000) {
       try { frame = JSON.parse(e.data) } catch { return }
       if (frame.kind !== 'event') return
       seqs.push(frame.seq)
+      if (typeof frame.id === 'number') ids.push(frame.id)
       let payload
       try { payload = JSON.parse(frame.payload) } catch { return }
       events.push(payload)
@@ -283,16 +286,8 @@ async function main() {
   check('scenes flowed through', types.filter((t) => t === 'scene:start').length === 4)
   check('no duplicate seq in replay', replay.seqs.length === new Set(replay.seqs).size)
 
-  // --- dashboard shell + widget + commands ---
-  console.log('· dashboard')
-  const anon = await fetch(`${BASE}/r/${webhookRunId}/dashboard`, { redirect: 'manual' })
-  check('dashboard anonymous → login redirect with next',
-    anon.status === 302 && (anon.headers.get('location') ?? '').includes('next=%2Fr%2F'))
-  const page = await fetch(`${BASE}/r/${webhookRunId}/dashboard`, { headers: { cookie } })
-  const html = await page.text()
-  check('dashboard authed → shell referencing widget', page.status === 200 && html.includes('/run-dashboard.js'))
-  const asset = await fetch(BASE + '/run-dashboard.js')
-  check('widget asset served', asset.status === 200 && (await asset.text()).includes('shadow'))
+  // --- run-scoped commands (no run-scoped page — the PR page is the unit) ---
+  console.log('· run commands')
   const cmdOk = await fetch(`${BASE}/api/runs/${webhookRunId}/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'run:stop' }),
@@ -397,6 +392,26 @@ async function main() {
   const partial = await collectWs('/api/runs/e2e-ws-run/ws?sinceSeq=2', cookie, 2500)
   check('sinceSeq=2 skips seq 1 and 2', partial.seqs.every((s) => s > 2), JSON.stringify(partial.seqs))
   check('sinceSeq=2 delivers seq 3', partial.seqs.includes(3))
+
+  // --- PR-anchored stream: the whole PR over one socket, framed on the
+  // PR-global id. e2e-ws-run is PR demo/watched#9; its events surface here keyed
+  // by id (ascending, no duplicates) with the per-run seq preserved. sinceId
+  // resumes past the cursor — same Last-Event-ID semantics, PR scope.
+  console.log('· PR-anchored viewer stream')
+  const prStream = await collectWs('/api/cloud/repos/demo/watched/pr/9/ws?sinceId=0', cookie, 2500)
+  check('PR stream replays the PR\'s events',
+    prStream.events.some((e) => e.type === 'scene:start' && e.name === 'ws scene'),
+    JSON.stringify(prStream.events.map((e) => e.type)))
+  check('PR stream ids ascend, no duplicates',
+    prStream.ids.length >= 3 &&
+      prStream.ids.length === new Set(prStream.ids).size &&
+      prStream.ids.every((v, i) => i === 0 || v > prStream.ids[i - 1]),
+    JSON.stringify(prStream.ids))
+  check('PR stream preserves the per-run seq', prStream.seqs.includes(1) && prStream.seqs.includes(3))
+  const lastId = Math.max(...prStream.ids)
+  const prResume = await collectWs(`/api/cloud/repos/demo/watched/pr/9/ws?sinceId=${lastId}`, cookie, 1500)
+  check('PR stream sinceId resumes past the cursor',
+    prResume.ids.every((v) => v > lastId), JSON.stringify(prResume.ids))
 
   box.close()
 
@@ -630,6 +645,34 @@ async function main() {
   check('replay has no duplicate seq',
     artifactReplay.seqs.length === new Set(artifactReplay.seqs).size, JSON.stringify(artifactReplay.seqs))
   artBox.close()
+
+  // --- re-fold: an archived run rejoins the PR stream after teardown ---------
+  // THE DO OWNS THE LOG and R2 can recreate it exactly. Reset the PR object's
+  // live log (modelling teardown), then reconnect the PR-anchored stream: the
+  // archived run is folded back from R2 under its original ids, so the whole-PR
+  // history survives the reset. e2e-artifact-run is PR demo/watched#11.
+  console.log('· re-fold archived run into the PR stream')
+  // Baseline: the ids the live log minted, before we throw the log away.
+  const preReset = await collectWs('/api/cloud/repos/demo/watched/pr/11/ws?sinceId=0', cookie, 2500)
+  check('PR stream serves the archived run before reset',
+    preReset.events.some((e) => e.type === 'run:end') && preReset.ids.length >= 3,
+    JSON.stringify(preReset.ids))
+
+  const reset = await fetch(`${BASE}/api/debug/reset-pr-log`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ repo: 'demo/watched', prNumber: 11 }),
+  })
+  check('reset-pr-log drops the live log', reset.status === 200, `got ${reset.status}`)
+
+  const reFold = await collectWs('/api/cloud/repos/demo/watched/pr/11/ws?sinceId=0', cookie, 2500)
+  const reFoldTypes = reFold.events.map((e) => e.type)
+  check('re-fold replays the archived run from R2',
+    reFoldTypes.includes('run:start') && reFoldTypes.includes('run:end'),
+    JSON.stringify(reFoldTypes))
+  check('re-fold preserves the original ids (same stream every time)',
+    JSON.stringify(reFold.ids) === JSON.stringify(preReset.ids),
+    `before=${JSON.stringify(preReset.ids)} after=${JSON.stringify(reFold.ids)}`)
+  check('re-fold preserves the per-run seq', reFold.seqs.includes(1) && reFold.seqs.includes(3))
 
   if (failures.length > 0 && serverErr) {
     console.error('\n--- wrangler dev stderr (tail) ---\n' + serverErr.split('\n').slice(-20).join('\n'))
