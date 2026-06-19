@@ -1,6 +1,6 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { prDashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
+import { prDashboardWs, postPrCommand, getRunLog } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
@@ -49,9 +49,11 @@ const router = new Router()
   // PR-anchored viewer stream: the whole PR's events over one WebSocket — the
   // only viewer. The PR is the unit; there is no run-scoped page or stream.
   .get('/api/cloud/repos/:owner/:name/pr/:number/ws', withSession(prDashboardWs))
-  // Run-scoped data plane (commands + the raw log download).
+  // Commands are PR-scoped: the PR names the coordinator, the run (if any) is a
+  // field in the body, not the address.
+  .post('/api/cloud/repos/:owner/:name/pr/:number/commands', withSession(postPrCommand))
+  // Per-run resource: the raw log download (runId names a real artifact here).
   .get('/api/runs/:runId/log', withSession(getRunLog))
-  .post('/api/runs/:runId/commands', withSession(postRunCommand))
   // GitHub webhooks (HMAC-authed inside the handler)
   .post('/webhook/github', postGithubWebhook)
   // Box channel + readiness (bearer-authed inside the handlers)
