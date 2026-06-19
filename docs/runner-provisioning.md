@@ -38,10 +38,11 @@ Background in [architecture.md](./architecture.md); setup steps in
    Down it come `{ kind: 'dispatch', run }` batches and
    `{ kind: 'command', runId, command }` protocol commands; up it go
    `{ kind: 'events', runId, events: [{ seq, payload }] }` envelopes, which
-   the coordinator writes through to D1 (where the SSE endpoint serves
-   viewers). The HTTP ingest API remains valid for batched reporting:
-   `POST /api/runs/:runId/scene-executions` and
-   `POST /api/runs/:runId/complete`.
+   the coordinator appends to its SQLite log, fans out to viewers, and
+   derives the D1 projections from (runs.status, scene_executions — at run
+   boundaries, not per event). The box no longer reports scene_executions
+   itself; `POST /api/runs/:runId/complete` remains as the terminal-state
+   backstop (a non-zero exit with no `run:end` event).
 6. The reaper (cron, every 10 minutes — `reapRunners()`) destroys droplets
    whose box is retired and anything older than `RUNNER_MAX_AGE_MINUTES`
    (default 30), marking them `destroyed` (or `lost` if the API call fails)
