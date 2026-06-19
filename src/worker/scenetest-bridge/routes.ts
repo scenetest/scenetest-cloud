@@ -66,24 +66,28 @@ export const prDashboardWs: Handler = async (req, env, _ctx, params) => {
   return prCoordinator(env, repo, prNumber).fetch(new Request(doUrl, req))
 }
 
-// POST /api/runs/:runId/commands — body is one encoded protocol command.
-// Validation is strict (decodeCommand): commands get acted on, so unknown
-// types are rejected rather than relayed. Valid commands go to the run's PR
-// coordinator, which sends them down the box's WebSocket — or queues them
-// until a box connects. 202 either way; `delivered` says which happened.
-export const postRunCommand: AuthedHandler = async (req, env, _ctx, params) => {
-  const command = decodeCommand(await req.text())
+// POST /api/cloud/repos/:owner/:name/pr/:number/commands — body is
+// { command, runId? }. The PR (owner/name + number) names the coordinator
+// directly, so there is no runId→PR lookup: the run is not the address, the PR
+// is. Commands act on the PR's active run (run:stop/pause/resume/replay); the
+// optional `runId` rides along as transport metadata for the box's per-run
+// bookkeeping, omitted when the command is run-agnostic. Validation is strict
+// (decodeCommand): commands get acted on, so unknown types are rejected rather
+// than relayed. Valid commands go to the PR coordinator, which sends them down
+// the box's WebSocket — or queues them until a box connects. 202 either way;
+// `delivered` says which happened.
+export const postPrCommand: AuthedHandler = async (req, env, _ctx, params) => {
+  const repo = `${params.owner}/${params.name}`
+  const prNumber = Number(params.number)
+  if (!Number.isFinite(prNumber)) return Response.json({ error: 'bad pr number' }, { status: 400 })
+
+  const body = (await req.json().catch(() => null)) as { command?: unknown; runId?: string } | null
+  const command = decodeCommand(body?.command)
   if (!command) return Response.json({ error: 'not a valid command' }, { status: 400 })
 
-  const runId = params.runId!
-  const run = await env.DB.prepare('SELECT repo, pr_number FROM runs WHERE id = ?1')
-    .bind(runId)
-    .first<{ repo: string; pr_number: number }>()
-  if (!run) return Response.json({ error: 'run not found' }, { status: 404 })
-
-  const res = await prCoordinator(env, run.repo, run.pr_number).fetch('https://do/command', {
+  const res = await prCoordinator(env, repo, prNumber).fetch('https://do/command', {
     method: 'POST',
-    body: JSON.stringify({ runId, command }),
+    body: JSON.stringify({ runId: body?.runId, command }),
   })
   const { delivered } = (await res.json()) as { delivered: boolean }
   return Response.json({ delivered }, { status: 202 })

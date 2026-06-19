@@ -137,9 +137,14 @@ stream", asserting the ids reproduce exactly across a reset.)
 
 ## Open decisions
 
-- **Commands on the PR transport.** `sendCommand` is run-scoped at the worker
-  (`/api/runs/:runId/commands`); the PR transport throws until the multi-run
-  widget defines routing to the active run.
+- **Commands on the PR transport.** Resolved: commands are PR-scoped
+  (`POST /api/cloud/repos/:owner/:name/pr/:number/commands`), mirroring the
+  viewer WS. The PR names the coordinator directly — no runId→PR lookup. The
+  body is `{ command, runId? }`: the run is an optional field for the box's
+  per-run bookkeeping, not the address. Today's commands (run:stop/pause/
+  resume/replay) all act on the PR's active run, so they ride run-agnostic;
+  teaching the box agent to act on a runId-less command (it currently requires
+  one, `infra/box/agent.mjs`) is the follow-up when a run-targeting UI needs it.
 - **Scene identity across runs** for "latest run per scene" queries. Decision:
   store `filename`, `title`, and `ordinal` (index within file) all as plain
   attributes on each event, and derive identity as `filename + title`, using

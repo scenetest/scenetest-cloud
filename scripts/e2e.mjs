@@ -325,17 +325,18 @@ async function main() {
   check('scenes flowed through', types.filter((t) => t === 'scene:start').length === 4)
   check('no duplicate seq in replay', replay.seqs.length === new Set(replay.seqs).size)
 
-  // --- run-scoped commands (no run-scoped page — the PR page is the unit) ---
-  console.log('· run commands')
-  const cmdOk = await fetch(`${BASE}/api/runs/${webhookRunId}/commands`, {
+  // --- PR-scoped commands (the PR is the unit; runId is an optional body
+  // field, not the address). This one is run-agnostic — no runId at all. ------
+  console.log('· pr commands')
+  const cmdOk = await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/5/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'run:stop' }),
+    body: JSON.stringify({ command: { type: 'run:stop' } }),
   })
   // No box is connected for this PR, so the coordinator queues it.
-  check('valid protocol command → 202 accepted', cmdOk.status === 202)
-  const cmdBad = await fetch(`${BASE}/api/runs/${webhookRunId}/commands`, {
+  check('valid run-agnostic command → 202 accepted', cmdOk.status === 202)
+  const cmdBad = await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/5/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'rm -rf' }),
+    body: JSON.stringify({ command: { type: 'rm -rf' } }),
   })
   check('garbage command → 400', cmdBad.status === 400)
   check('WS with tampered session → refused',
@@ -354,10 +355,11 @@ async function main() {
   })
   check('box channel rejects a bad token', badResult === 'refused')
 
-  // Command posted while no box is connected → queued, not delivered.
-  const queuedCmd = await fetch(`${BASE}/api/runs/e2e-ws-run/commands`, {
+  // Command posted while no box is connected → queued, not delivered. This one
+  // carries a runId in the body, so the box gets it back for per-run filing.
+  const queuedCmd = await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/9/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'run:pause' }),
+    body: JSON.stringify({ command: { type: 'run:pause' }, runId: 'e2e-ws-run' }),
   })
   check('command with no box connected → 202 queued',
     queuedCmd.status === 202 && (await j(queuedCmd)).delivered === false)
@@ -381,13 +383,14 @@ async function main() {
   }
 
   const flushed = await waitInbox((m) => m.kind === 'command')
-  check('queued command flushed to box on connect', flushed?.command?.type === 'run:pause',
+  check('queued command flushed to box on connect',
+    flushed?.command?.type === 'run:pause' && flushed?.runId === 'e2e-ws-run',
     JSON.stringify(inbox))
 
   // Command posted while connected → delivered live.
-  const liveCmd = await fetch(`${BASE}/api/runs/e2e-ws-run/commands`, {
+  const liveCmd = await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/9/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'run:resume' }),
+    body: JSON.stringify({ command: { type: 'run:resume' }, runId: 'e2e-ws-run' }),
   })
   check('command with box connected → 202 delivered',
     liveCmd.status === 202 && (await j(liveCmd)).delivered === true)
@@ -479,9 +482,9 @@ async function main() {
   })
   check('debug box-update queued (no box connected yet)',
     updateQueued.status === 202 && (await j(updateQueued)).delivered === false)
-  await fetch(`${BASE}/api/runs/e2e-agent-run/commands`, {
+  await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/10/commands`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'run:pause' }),
+    body: JSON.stringify({ command: { type: 'run:pause' }, runId: 'e2e-agent-run' }),
   })
   check('agent: ready endpoint rejects bad token',
     (await fetch(`${BASE}/api/boxes/e2e-box-2/ready`, {

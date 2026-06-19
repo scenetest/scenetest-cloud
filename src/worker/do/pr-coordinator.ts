@@ -30,7 +30,8 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   box → cloud: { kind: 'events', runId, events: [{ seq, payload }] }
 //     — same shape as the HTTP ingest body plus runId; payloads stay opaque
 //       (envelope-grade checks only, so newer event types relay through).
-//   cloud → box: { kind: 'command', runId, command }   (a protocol Command)
+//   cloud → box: { kind: 'command', runId?, command } (a protocol Command;
+//                  runId present only when the command targets a run)
 //                { kind: 'dispatch', run }              (a RunSpec batch)
 //                { kind: 'update', update }             (checkout + run
 //                  pipeline stages: { headSha, vector, stages: [{name,run}] })
@@ -48,7 +49,7 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   GET  /jsonl?runId=…                    — the run's log as .jsonl text
 //   POST /archive                          — { runId } → flush log to R2
 //   POST /reset                            — drop live log rows (PR teardown)
-//   POST /command                          — { runId, command } → send or queue
+//   POST /command                          — { runId?, command } → send or queue
 //   POST /dispatch                         — { run: RunSpec } → send or queue
 //   POST /retire                           — { boxId } → close sockets, drop queue
 //   POST /ingest/:runId                    — { events } → ingestAndFanout
@@ -198,7 +199,10 @@ export class PrCoordinator implements DurableObject {
     }
 
     if (url.pathname === '/command' && req.method === 'POST') {
-      const { runId, command } = (await req.json()) as { runId: string; command: unknown }
+      // runId is optional: it targets the box's per-run bookkeeping when a
+      // command names a run, and is absent for run-agnostic commands. JSON
+      // drops an undefined key, so the box sees runId only when one was sent.
+      const { runId, command } = (await req.json()) as { runId?: string; command: unknown }
       const delivered = await this.sendOrQueue({ kind: 'command', runId, command })
       return Response.json({ delivered })
     }
