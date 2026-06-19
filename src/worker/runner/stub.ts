@@ -2,11 +2,14 @@ import type { Env } from '../env.ts'
 import type { RunSpec, Runner } from './types.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
 
-// LocalStubRunner: fabricates a plausible run by writing scenetest-shaped
-// events + scene_executions straight to D1. It has no real machine, so
-// provision() is a no-op and dispatch() runs the fake batch in-worker.
-// A real runner provisions a droplet (provision) and sends batches to it over
-// the box's command channel (dispatch) — the Durable Object layer.
+// LocalStubRunner: fabricates a plausible run by emitting scenetest-shaped
+// events into the PR coordinator — the same path a real box's events take. It
+// has no real machine, so provision() is a no-op and dispatch() runs the fake
+// batch in-worker. A real runner provisions a droplet (provision) and sends
+// batches to it over the box's command channel (dispatch) — the Durable Object
+// layer. The D1 projections (runs.status, scene_executions) are NOT written
+// here: the coordinator derives them from the event stream, so one code path
+// serves real and stub runs (issue #36). The stub only asserts events.
 // Wire format documented in packages/scenetest-js/.../dashboard.ts handleEvent().
 
 const FAKE_SCENES = [
@@ -44,34 +47,9 @@ async function runStub(env: Env, run: RunSpec) {
     )
   }
 
-  await env.DB.prepare(
-    'UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
-  )
-    .bind('running', startTs, run.runId)
-    .run()
-
+  // run:start moves the run to 'running' and the per-scene grid fills in — the
+  // coordinator projects both from these events.
   await emit({ type: 'run:start', timestamp: startTs, sceneCount: targetScenes.length })
-
-  // Seed scene_executions as queued.
-  const seedStmt = env.DB.prepare(
-    `INSERT INTO scene_executions
-       (id, run_id, repo, pr_number, scene_id, scene_file, scene_name, head_sha, status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued')`,
-  )
-  await env.DB.batch(
-    targetScenes.map((s) =>
-      seedStmt.bind(
-        crypto.randomUUID(),
-        run.runId,
-        run.repo,
-        run.prNumber,
-        sceneId(s.file, s.name),
-        s.file,
-        s.name,
-        run.headSha,
-      ),
-    ),
-  )
 
   let pass = 0
   let fail = 0
@@ -84,15 +62,7 @@ async function runStub(env: Env, run: RunSpec) {
       .first<{ status: string }>()
     if (current?.status === 'cancelled') return
 
-    const sId = sceneId(scene.file, scene.name)
     const sceneStart = Date.now()
-    await env.DB.prepare(
-      `UPDATE scene_executions SET status = 'running', started_at = ?1
-         WHERE run_id = ?2 AND scene_id = ?3`,
-    )
-      .bind(sceneStart, run.runId, sId)
-      .run()
-
     await emit({
       type: 'scene:start',
       timestamp: sceneStart,
@@ -149,12 +119,6 @@ async function runStub(env: Env, run: RunSpec) {
       error: scene.pass ? undefined : { message: 'Expected $42.00, got $0.00' },
     })
 
-    await env.DB.prepare(
-      `UPDATE scene_executions SET status = ?1, ended_at = ?2 WHERE run_id = ?3 AND scene_id = ?4`,
-    )
-      .bind(scene.pass ? 'passed' : 'failed', sceneEnd, run.runId, sId)
-      .run()
-
     if (scene.pass) pass += 1
     else fail += 1
   }
@@ -167,11 +131,8 @@ async function runStub(env: Env, run: RunSpec) {
     summary: { scenes: targetScenes.length, completed: pass, failed: fail },
   })
 
-  await env.DB.prepare(
-    'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
-  )
-    .bind(fail === 0 ? 'passed' : 'failed', endTs, run.runId)
-    .run()
+  // run:end settles the verdict (passed/failed) via the coordinator's
+  // projection writer — the same path a real box's run:end takes.
 
   // Mirror the real box's end-of-run step: ask the PR object to flush its log
   // to the durable R2 artifact. The cancelled-mid-batch early return above

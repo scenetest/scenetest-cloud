@@ -215,6 +215,14 @@ async function main() {
 
   const cookie = await forgeSessionCookie()
   const j = (res) => res.json()
+  const waitFor = async (fn, maxMs = 6000) => {
+    const start = Date.now()
+    while (Date.now() - start < maxMs) {
+      if (await fn()) return true
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return false
+  }
 
   // --- auth seams ---
   console.log('· auth')
@@ -276,6 +284,35 @@ async function main() {
   const addedHook = await j(await hook('pull_request', prPayload('demo/Added-Via-API', 2, 'addr01')))
   check('newly watched repo triggers a run (case-insensitive match)',
     addedHook.result?.startsWith('run-created:'), JSON.stringify(addedHook))
+
+  // --- pr-closed teardown: a closed PR retires its box now -------------------
+  // The webhook handler tears the box down on close/merge rather than letting
+  // it bill until the age-cap reaper: retireBox cancels the PR's unfinished
+  // runs, drops the coordinator's queue/sockets, and marks the droplet
+  // destroyed. Seed a fresh PR with a live box + running run to drive it.
+  console.log('· pr-closed teardown')
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 12, 'closebox1', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-close', 'demo/watched', 12, 'closebox1', 'ready', '${boxTokenHash}', 0)`)
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-close-run', 'demo/watched', 12, 'closebox1', 'manual', 'running', 'e2e-box-close')")
+  const closedPayload = {
+    action: 'closed', number: 12,
+    repository: { full_name: 'demo/watched' },
+    pull_request: { state: 'closed', head: { sha: 'closebox1' }, base: { ref: 'main', sha: 'base000' } },
+  }
+  const closed = await j(await hook('pull_request', closedPayload))
+  check('closed PR with a live box → retired', closed.result === 'pr-closed:retired', JSON.stringify(closed))
+  const closedBox = d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-close'")
+  check('closed PR marked its box destroyed', closedBox[0].status === 'destroyed', `got ${closedBox[0].status}`)
+  const closedRun = d1Query(persistDir, "SELECT status, ended_at FROM runs WHERE id = 'e2e-close-run'")
+  check('closed PR cancelled its unfinished run',
+    closedRun[0].status === 'cancelled' && closedRun[0].ended_at != null, JSON.stringify(closedRun[0]))
+  // Idempotent: closing again finds no live box and is a plain pr-closed.
+  const closedAgain = await j(await hook('pull_request', closedPayload))
+  check('closing again with no live box → plain pr-closed',
+    closedAgain.result === 'pr-closed', JSON.stringify(closedAgain))
 
   // --- the run that webhook triggered, observed through the PR viewer --------
   // webhookRunId is the only run on demo/watched#5, so the whole-PR stream is
@@ -372,6 +409,20 @@ async function main() {
   check('coordinator acked the events batch',
     (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
 
+  // The coordinator derives D1 projections from the same event stream (#36):
+  // no /scene-executions call, no stub hand-writes. run:start moves the run to
+  // 'running' with a started_at; scene:start writes a scene_executions row.
+  check('run:start projected the run → running with started_at', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT status, started_at FROM runs WHERE id = 'e2e-ws-run'")
+    return r[0].status === 'running' && r[0].started_at != null
+  }), 'runs.e2e-ws-run never went running')
+  check('scene:start projected a scene_executions row from the stream', await waitFor(() => {
+    const r = d1Query(persistDir,
+      "SELECT status, scene_name, scene_file FROM scene_executions WHERE run_id = 'e2e-ws-run'")
+    return r.length === 1 && r[0].scene_name === 'ws scene' &&
+      r[0].scene_file === 'x.scene.ts' && r[0].status === 'running'
+  }), 'scene_executions not derived from the event stream')
+
   // PR viewer: replay the whole PR's log from the object, then live events.
   const wsReplay = await collectWs('/api/cloud/repos/demo/watched/pr/9/ws', cookie, 2500)
   check('box events reached viewer via WS replay',
@@ -458,15 +509,6 @@ async function main() {
   let agentLog = ''
   agent.stdout.on('data', (d) => { agentLog += d })
   agent.stderr.on('data', (d) => { agentLog += d })
-
-  const waitFor = async (fn, maxMs = 6000) => {
-    const start = Date.now()
-    while (Date.now() - start < maxMs) {
-      if (await fn()) return true
-      await new Promise((r) => setTimeout(r, 100))
-    }
-    return false
-  }
 
   check('agent connected its channel',
     await waitFor(() => agentLog.includes('channel connected')), agentLog)
@@ -607,6 +649,14 @@ async function main() {
     artInbox.some((m) => m.kind === 'ack' && m.runId === 'e2e-artifact-run' && m.count === 3))
   check('artifact run events acked by the coordinator', artAck, JSON.stringify(artInbox))
 
+  // run:end settles the verdict in D1 through the same projection writer (#36):
+  // the run was inserted 'running'; the event stream alone moves it to 'passed'
+  // (0 failed) with an ended_at — no /complete call on this path.
+  check('run:end projected the settled verdict (0 failed → passed)', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT status, ended_at FROM runs WHERE id = 'e2e-artifact-run'")
+    return r[0].status === 'passed' && r[0].ended_at != null
+  }), 'run:end did not settle the verdict in D1')
+
   check('run log anonymous → 401', (await fetch(`${BASE}/api/runs/e2e-artifact-run/log`)).status === 401)
 
   // Before archive: /log streams the live log straight from the object's SQLite.
@@ -616,8 +666,8 @@ async function main() {
     logPre.status === 200 && logPreText.includes('run:start') && logPreText.includes('run:end'),
     `${logPre.status} ${logPreText.slice(0, 120)}`)
 
-  // Terminal + no artifact_key → the cron archive backstop flushes it to R2.
-  d1Query(persistDir, "UPDATE runs SET status = 'passed', ended_at = 1 WHERE id = 'e2e-artifact-run'")
+  // Terminal (settled above by the projection writer) + no artifact_key → the
+  // cron archive backstop flushes it to R2.
   const sched = await fetch(`${BASE}/cdn-cgi/handler/scheduled`)
   check('scheduled handler reachable', sched.status === 200, `got ${sched.status}`)
   check('cron archive backstop wrote the artifact_key', await waitFor(() => {

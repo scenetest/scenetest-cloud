@@ -1,7 +1,7 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
 import { prDashboardWs, postPrCommand, getRunLog } from './scenetest-bridge/routes.ts'
-import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
+import { postEvents, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
 import { boxChannel, boxReady } from './routes/box-channel.ts'
@@ -48,7 +48,7 @@ const router = new Router()
   .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))
   // PR-anchored viewer stream: the whole PR's events over one WebSocket — the
   // only viewer. The PR is the unit; there is no run-scoped page or stream.
-  .get('/api/cloud/repos/:owner/:name/pr/:number/ws', withSession(prDashboardWs))
+  .get('/api/cloud/repos/:owner/:name/pr/:number/ws', prDashboardWs)
   // Commands are PR-scoped: the PR names the coordinator, the run (if any) is a
   // field in the body, not the address.
   .post('/api/cloud/repos/:owner/:name/pr/:number/commands', withSession(postPrCommand))
@@ -59,9 +59,11 @@ const router = new Router()
   // Box channel + readiness (bearer-authed inside the handlers)
   .get('/api/boxes/:boxId/channel', boxChannel)
   .post('/api/boxes/:boxId/ready', boxReady)
-  // Runner ingest (bearer-authed)
+  // Runner ingest (bearer-authed). scene_executions are no longer reported by
+  // the box: the PR coordinator derives them from the event stream (#36).
+  // /complete stays as the terminal-state backstop (a non-zero exit with no
+  // run:end event).
   .post('/api/events/:runId', postEvents)
-  .post('/api/runs/:runId/scene-executions', postSceneExecutions)
   .post('/api/runs/:runId/complete', postRunComplete)
   // Debug (env-gated inside the handler)
   .post('/api/debug/stub-run', debugStubRun)

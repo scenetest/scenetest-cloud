@@ -72,8 +72,39 @@ interface StoredEvent {
 const QUEUE_PREFIX = 'q:'
 const REPLAY_PAGE = 1000
 
+// The run/scene boundary events the D1 projections are derived from. Everything
+// else in the log (actions, assertions, …) is a fact for the live stream only —
+// projections settle at boundaries, "a couple of writes per run, not per event"
+// (architecture.md, "The log and its projections").
+const PROJECTED = new Set(['run:start', 'scene:start', 'scene:end', 'run:end'])
+
+// The boundary-event payloads the projection writer reads. Fields beyond `type`
+// are best-effort (the payload is opaque protocol JSON); a missing one just
+// drops that part of the projection.
+interface BoundaryPayload {
+  type: string
+  timestamp?: number
+  name?: string
+  file?: string
+  status?: string
+  error?: unknown
+  summary?: { failed?: number } & Record<string, unknown>
+}
+
+// Immutable per-run identity the scene_executions projection needs. Resolved
+// from D1 once per run and cached for the object's lifetime.
+interface RunMeta {
+  repo: string
+  prNumber: number
+  headSha: string
+}
+
 export class PrCoordinator implements DurableObject {
   private sql: SqlStorage
+  // Cache of each run's immutable D1 identity, so the projection writer resolves
+  // repo/pr/sha once per run rather than per ingest batch. Dropped on eviction
+  // and lazily rebuilt; the runs row is the source of truth.
+  private runMeta = new Map<string, RunMeta>()
 
   constructor(
     private state: DurableObjectState,
@@ -260,7 +291,121 @@ export class PrCoordinator implements DurableObject {
         .toArray()[0] as StoredEvent | undefined
       if (row) inserted.push(row)
     }
+    // Live fan-out first — viewers must not wait on the D1 write — then settle
+    // the projections derived from this batch's boundary events.
     this.fanoutPr(runId, inserted)
+    await this.projectToD1(runId, inserted, now)
+  }
+
+  // Derive D1 projections from the log the object already owns. This is the
+  // projection writer the architecture promises the object runs at run
+  // boundaries (architecture.md, "The log and its projections"): the box (or
+  // stub) only asserts events; runs.status, started_at/ended_at and the
+  // scene_executions grid are pure functions of the stream, computed here so
+  // one code path serves real and stub runs identically. INSERT OR IGNORE on
+  // the log means `inserted` is the deduped set, so re-delivery never
+  // double-projects; the boundary UPDATEs are idempotent regardless.
+  private async projectToD1(runId: string, inserted: StoredEvent[], now: number): Promise<void> {
+    const boundary: BoundaryPayload[] = []
+    for (const e of inserted) {
+      let payload: BoundaryPayload | null = null
+      try { payload = JSON.parse(e.payload) as BoundaryPayload } catch { continue }
+      if (payload && typeof payload.type === 'string' && PROJECTED.has(payload.type)) boundary.push(payload)
+    }
+    if (boundary.length === 0) return
+
+    // scene rows carry NOT NULL repo/pr/sha — resolve them only when a
+    // scene:start is actually in this batch.
+    const meta = boundary.some((p) => p.type === 'scene:start')
+      ? await this.resolveRunMeta(runId)
+      : null
+
+    const stmts: D1PreparedStatement[] = []
+    for (const p of boundary) {
+      const ts = typeof p.timestamp === 'number' ? p.timestamp : now
+      switch (p.type) {
+        case 'run:start':
+          // First sign of life: queued → running. The ended_at guard keeps a
+          // late/replayed run:start from resurrecting an already-settled or
+          // cancelled run (latest-wins sets ended_at on cancel).
+          stmts.push(
+            this.env.DB.prepare(
+              'UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
+            ).bind('running', ts, runId),
+          )
+          break
+        case 'scene:start': {
+          if (!meta || typeof p.file !== 'string' || typeof p.name !== 'string') break
+          const sceneId = `${p.file}:${p.name}`
+          // Deterministic id (`runId:sceneId`) so scene:start and the later
+          // scene:end settle the same row — and re-delivery is a no-op upsert.
+          stmts.push(
+            this.env.DB.prepare(
+              `INSERT INTO scene_executions
+                 (id, run_id, repo, pr_number, scene_id, scene_file, scene_name, head_sha, status, started_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
+               ON CONFLICT(id) DO UPDATE SET
+                 status = 'running',
+                 started_at = COALESCE(excluded.started_at, scene_executions.started_at)`,
+            ).bind(`${runId}:${sceneId}`, runId, meta.repo, meta.prNumber, sceneId, p.file, p.name, meta.headSha, ts),
+          )
+          break
+        }
+        case 'scene:end': {
+          // scene:end carries no scene id, so settle the run's currently-open
+          // scene. Scenes run sequentially in a box (one browser), so at most
+          // one row is 'running'; pick the most-recently-started to be safe.
+          const verdict = p.status === 'failed' ? 'failed' : p.status === 'skipped' ? 'skipped' : 'passed'
+          const summary =
+            p.summary != null ? JSON.stringify(p.summary) : p.error != null ? JSON.stringify({ error: p.error }) : null
+          stmts.push(
+            this.env.DB.prepare(
+              `UPDATE scene_executions SET status = ?1, ended_at = ?2, summary_json = COALESCE(?3, summary_json)
+                 WHERE id = (
+                   SELECT id FROM scene_executions
+                   WHERE run_id = ?4 AND status = 'running'
+                   ORDER BY started_at DESC LIMIT 1
+                 )`,
+            ).bind(verdict, ts, summary, runId),
+          )
+          break
+        }
+        case 'run:end': {
+          // The settled verdict, derived from the run's own summary. /complete
+          // stays as the box's terminal-state backstop (a non-zero exit with no
+          // run:end); both share the ended_at guard, so whichever lands first
+          // wins and the other no-ops.
+          const verdict = (p.summary?.failed ?? 0) > 0 ? 'failed' : 'passed'
+          stmts.push(
+            this.env.DB.prepare(
+              'UPDATE runs SET status = ?1, ended_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
+            ).bind(verdict, ts, runId),
+          )
+          break
+        }
+      }
+    }
+
+    // One D1 round-trip per batch. The batch is transactional and ordered, so a
+    // scene:start + scene:end arriving together settle in sequence.
+    if (stmts.length === 1) await stmts[0]!.run()
+    else if (stmts.length > 1) await this.env.DB.batch(stmts)
+  }
+
+  // The run's immutable identity for the scene_executions projection. Cached on
+  // hit; a missing run row (events before the run is recorded — shouldn't
+  // happen, createRun precedes dispatch) is left uncached so a later batch
+  // retries.
+  private async resolveRunMeta(runId: string): Promise<RunMeta | null> {
+    const cached = this.runMeta.get(runId)
+    if (cached) return cached
+    const row = await this.env.DB.prepare(
+      'SELECT repo, pr_number AS prNumber, head_sha AS headSha FROM runs WHERE id = ?1',
+    )
+      .bind(runId)
+      .first<RunMeta>()
+    if (row) this.runMeta.set(runId, row)
+    return row
   }
 
   // Fan live events to PR viewers (every viewer of this object — one DO is one

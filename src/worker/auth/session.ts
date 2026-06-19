@@ -13,13 +13,15 @@ interface SessionPayload {
 
 export async function getSessionUser(req: Request, env: Env): Promise<AuthedUser | null> {
   const cookies = parseCookies(req.headers.get('cookie'))
-  let token: string | undefined = cookies[SESSION_COOKIE]
-  // WebSocket upgrade requests from browsers carry cookies automatically
-  // (same-origin). Test clients that cannot set headers use ?session= instead.
-  if (!token && req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
-    token = new URL(req.url).searchParams.get('session') ?? undefined
-  }
+  const token = cookies[SESSION_COOKIE]
   if (!token) return null
+  return verifySessionToken(token, env)
+}
+
+// Verify a raw session token, independent of how it arrived. getSessionUser
+// pulls it from the cookie; the viewer WS route also accepts it via ?session=
+// for test clients that cannot set headers (so this stays transport-agnostic).
+export async function verifySessionToken(token: string, env: Env): Promise<AuthedUser | null> {
   const payload = await verifyPayload<SessionPayload>(token, env.SESSION_SECRET)
   if (!payload) return null
   if (payload.exp < Math.floor(Date.now() / 1000)) return null
