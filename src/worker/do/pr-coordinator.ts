@@ -1,6 +1,6 @@
 import type { Env } from '../env.ts'
 import type { RunEvent } from '../db.ts'
-import { artifactKey, getArtifactKey, readArtifactEvents, readArtifactLog } from '../artifacts.ts'
+import { artifactKey, readArtifactLog } from '../artifacts.ts'
 
 // One Durable Object per PR: the coordination point between the PR's box and
 // the rest of the system. It terminates the box's single outbound WebSocket
@@ -15,8 +15,8 @@ import { artifactKey, getArtifactKey, readArtifactEvents, readArtifactLog } from
 // sequence — UNIQUE, the resend idempotency key, a fact the box asserts. `id` is
 // a per-object autoincrement: the log's own record of receive-order, the
 // PR-global position the PR viewer (/pr-viewer-connect) streams and resumes on,
-// with run_id as the channel discriminator. (The per-run viewer keeps the seq
-// contract.) A subscriber tails the log, not the fact-stream — events arrive in
+// with run_id as the channel discriminator. A subscriber tails the log, not the
+// fact-stream — events arrive in
 // the order the DO logged them (frozen once minted), not necessarily as they
 // happened; deterministic and replayable, so multi-box ordering needn't be
 // reasoned about.
@@ -36,14 +36,14 @@ import { artifactKey, getArtifactKey, readArtifactEvents, readArtifactLog } from
 //                  pipeline stages: { headSha, vector, stages: [{name,run}] })
 //
 // Viewer-channel wire format (WS, cookie-authed at the worker edge):
-//   cloud → viewer: { kind: 'event', seq, payload }
-//     payload is the raw JSON string — same bytes SSE put after `data:`.
-//     Client calls JSON.parse(frame.payload) to recover the protocol event.
-//     Both live and replay frames use this shape so the client dedupes by seq.
+//   cloud → viewer: { kind: 'event', id, runId, seq, payload }
+//     `id` is the PR-global position (cursor + the client collection's key),
+//     run_id the channel discriminator, seq the box's per-run sequence, and
+//     payload the raw JSON string. Client JSON.parse(frame.payload)s to recover
+//     the protocol event, and dedupes the replay/live overlap on id.
 //
 // Internal HTTP surface (reachable only via the binding, never publicly):
 //   GET  /box-connect?boxId=…              — WebSocket upgrade for the box
-//   GET  /viewer-connect?runId=…&sinceSeq=… — WebSocket upgrade, one run
 //   GET  /pr-viewer-connect?sinceId=…       — WebSocket upgrade, whole PR
 //   GET  /jsonl?runId=…                    — the run's log as .jsonl text
 //   POST /archive                          — { runId } → flush log to R2
@@ -117,42 +117,28 @@ export class PrCoordinator implements DurableObject {
       return new Response(null, { status: 101, webSocket: pair[0]! })
     }
 
-    if (url.pathname === '/viewer-connect') {
-      if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
-        return new Response('Expected WebSocket', { status: 426 })
-      }
-      const runId = url.searchParams.get('runId')
-      if (!runId) return new Response('runId required', { status: 400 })
-      let sinceSeq = parseInt(url.searchParams.get('sinceSeq') ?? '0', 10)
-      if (!Number.isFinite(sinceSeq) || sinceSeq < 0) sinceSeq = 0
-
-      const pair = new WebSocketPair()
-      // Register FIRST so live frames during the replay window reach this
-      // socket. Any event delivered twice (live + replay) is deduped by the
-      // client on seq — no event is ever lost.
-      this.state.acceptWebSocket(pair[1]!, ['viewer', `v:${runId}`])
-      await this.replayTo(pair[1]!, runId, sinceSeq)
-      return new Response(null, { status: 101, webSocket: pair[0]! })
-    }
-
     if (url.pathname === '/pr-viewer-connect') {
       if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
         return new Response('Expected WebSocket', { status: 426 })
       }
       // Whole-PR stream: no run filter, just a resume cursor over the PR-global
-      // id. Register FIRST so live frames during replay arrive; client dedupes
-      // on id. repo + pr (the DO stores no identity) let rehydrate find the PR's
+      // id. repo + pr (the DO stores no identity) let rehydrate find the PR's
       // archived runs in D1.
       let sinceId = parseInt(url.searchParams.get('sinceId') ?? '0', 10)
       if (!Number.isFinite(sinceId) || sinceId < 0) sinceId = 0
       const repo = url.searchParams.get('repo')
       const prNumber = parseInt(url.searchParams.get('pr') ?? '', 10)
 
+      // Fold archived/reset runs back in BEFORE registering for live fan-out:
+      // rehydrate awaits (D1 + R2), and any live frame delivered during that
+      // await would land ahead of the not-yet-sent replay, jumping the client's
+      // id cursor past — and so dropping — the unreplayed lower ids. Those
+      // events are in the log regardless, so replay (after register) still
+      // covers them. Register THEN replay runs without an await between, so no
+      // live frame can interleave ahead of the replay.
+      if (repo && Number.isFinite(prNumber)) await this.rehydrateArchived(repo, prNumber)
       const pair = new WebSocketPair()
       this.state.acceptWebSocket(pair[1]!, ['viewer', 'prv'])
-      // Fold archived/reset runs back in before replay, so the stream is the
-      // PR's whole history even after a teardown.
-      if (repo && Number.isFinite(prNumber)) await this.rehydrateArchived(repo, prNumber)
       await this.replayPrTo(pair[1]!, sinceId)
       return new Response(null, { status: 101, webSocket: pair[0]! })
     }
@@ -270,26 +256,7 @@ export class PrCoordinator implements DurableObject {
         .toArray()[0] as StoredEvent | undefined
       if (row) inserted.push(row)
     }
-    this.fanout(runId, events)
     this.fanoutPr(runId, inserted)
-  }
-
-  // Fan live events to every viewer registered for this run.
-  // payload is re-serialized to a JSON string so replay and live frames are
-  // identical on the wire — client calls JSON.parse(frame.payload) for both.
-  private fanout(runId: string, events: RunEvent[]): void {
-    const sockets = this.state.getWebSockets(`v:${runId}`)
-    if (sockets.length === 0) return
-    for (const e of events) {
-      const frame = JSON.stringify({
-        kind: 'event',
-        seq: e.seq,
-        payload: JSON.stringify(e.payload ?? null),
-      })
-      for (const ws of sockets) {
-        try { ws.send(frame) } catch { /* socket closing; nothing to do */ }
-      }
-    }
   }
 
   // Fan live events to PR viewers (every viewer of this object — one DO is one
@@ -357,40 +324,6 @@ export class PrCoordinator implements DurableObject {
         after = row.id
       }
       if (rows.length < REPLAY_PAGE) break
-    }
-  }
-
-  // Replay stored events to a single viewer. Pages through the local SQLite to
-  // avoid loading an entire long run into memory at once. When the run's log is
-  // no longer here (its PR closed and the object was reset after the archive
-  // was written), SQLite yields nothing and replay falls back to the R2
-  // artifact — same frame shape, so the viewer can't tell the difference.
-  private async replayTo(ws: WebSocket, runId: string, sinceSeq: number): Promise<void> {
-    let after = sinceSeq
-    let sawAny = false
-    for (;;) {
-      const rows = this.sql
-        .exec(
-          'SELECT seq, payload FROM log WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?',
-          runId,
-          after,
-          REPLAY_PAGE,
-        )
-        .toArray() as Array<{ seq: number; payload: string }>
-      for (const row of rows) {
-        // row.payload is already a JSON string (ingest stores JSON.stringify).
-        ws.send(JSON.stringify({ kind: 'event', seq: row.seq, payload: row.payload }))
-        after = row.seq
-        sawAny = true
-      }
-      if (rows.length < REPLAY_PAGE) break
-    }
-
-    if (sawAny) return
-    const key = await getArtifactKey(this.env, runId)
-    if (!key) return
-    for (const e of await readArtifactEvents(this.env, key, sinceSeq)) {
-      ws.send(JSON.stringify({ kind: 'event', seq: e.seq, payload: e.payload }))
     }
   }
 

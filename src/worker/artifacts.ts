@@ -19,13 +19,6 @@ export function artifactKey(repo: string, runId: string): string {
   return `runs/${repo}/${runId}.jsonl`
 }
 
-export async function getArtifactKey(env: Env, runId: string): Promise<string | null> {
-  const run = await env.DB.prepare('SELECT artifact_key FROM runs WHERE id = ?1')
-    .bind(runId)
-    .first<{ artifact_key: string | null }>()
-  return run?.artifact_key ?? null
-}
-
 // A log row as it round-trips through R2. `id`/`ts` are the log's own metadata
 // (nullable: pre-id archives omit them). payload is re-stringified so callers
 // embed it without reparsing.
@@ -60,19 +53,6 @@ export async function readArtifactLog(env: Env, key: string): Promise<ArchivedRo
     })
   }
   return out
-}
-
-// Per-run replay frames (seq > sinceSeq) for the per-run viewer's R2 fallback,
-// once a run's log is no longer in its object.
-export async function readArtifactEvents(
-  env: Env,
-  key: string,
-  sinceSeq: number,
-): Promise<Array<{ seq: number; payload: string }>> {
-  const rows = await readArtifactLog(env, key)
-  return rows
-    .filter((r) => r.seq > sinceSeq)
-    .map((r) => ({ seq: r.seq, payload: r.payload }))
 }
 
 // The archive projected to the box's {seq,payload} .jsonl — the /log download

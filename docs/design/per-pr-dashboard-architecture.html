@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Per-PR Dashboard — Architecture</title>
+<style>
+  :root {
+    --ink: #16181d; --muted: #5b6270; --faint: #8a909c; --line: #d9dce2;
+    --paper: #fbfbfa; --card: #ffffff; --accent: #2f6df6; --accent-bg: #eaf1ff;
+    --pass: #1a7f4b; --pass-bg: #e7f5ec; --warn-bg: #fff4e5; --warn: #9a6400;
+    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --serif: 'Source Serif 4', Georgia, serif;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans);
+         line-height: 1.5; padding: 2.5rem 1.25rem 4rem; }
+  main { max-width: 1080px; margin: 0 auto; }
+  h1 { font-family: var(--mono); font-weight: 600; letter-spacing: -0.02em; font-size: 1.9rem; margin: 0 0 .25rem; }
+  h1 .tag { font-family: var(--mono); font-size: .7rem; font-weight: 600; vertical-align: middle;
+            background: var(--ink); color: #fff; padding: .15rem .45rem; border-radius: 5px; margin-left: .4rem; }
+  .lede { font-family: var(--serif); font-size: 1.18rem; color: var(--muted); margin: 0 0 2rem; max-width: 70ch; }
+  h2 { font-family: var(--mono); font-weight: 600; font-size: 1.05rem; margin: 2.5rem 0 1rem;
+       padding-bottom: .4rem; border-bottom: 1px solid var(--line); }
+  code { font-family: var(--mono); font-size: .86em; background: #f1f2f4; padding: .08em .35em; border-radius: 4px; }
+  .grid { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line);
+          border-radius: 12px; overflow: hidden; }
+
+  /* ---- flow diagram ---- */
+  .flow { display: grid; grid-template-columns: 1fr; gap: 0; }
+  .tier { background: var(--card); padding: 1.1rem 1.25rem; position: relative; }
+  .tier + .tier { border-top: 1px solid var(--line); }
+  .tier h3 { font-family: var(--mono); font-size: .78rem; text-transform: uppercase; letter-spacing: .08em;
+             color: var(--faint); margin: 0 0 .7rem; }
+  .nodes { display: flex; gap: .8rem; flex-wrap: wrap; align-items: stretch; }
+  .node { flex: 1; min-width: 200px; border: 1px solid var(--line); border-radius: 9px; padding: .8rem .9rem;
+          background: var(--card); }
+  .node.accent { border-color: var(--accent); background: var(--accent-bg); }
+  .node.run { background: #fcfcfb; }
+  .node .t { font-family: var(--mono); font-weight: 600; font-size: .92rem; margin-bottom: .25rem; }
+  .node .d { font-size: .82rem; color: var(--muted); }
+  .node .d code { font-size: .8em; }
+  .arrow { text-align: center; font-family: var(--mono); color: var(--accent); font-size: .8rem;
+           padding: .5rem 0 .1rem; font-weight: 600; }
+  .arrow span { background: var(--accent-bg); padding: .15rem .6rem; border-radius: 20px; }
+
+  .pill { display: inline-block; font-family: var(--mono); font-size: .72rem; padding: .12rem .5rem;
+          border-radius: 20px; background: var(--pass-bg); color: var(--pass); font-weight: 600; }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+
+  /* ---- before/after ---- */
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .ba .col { border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.1rem; background: var(--card); }
+  .ba .col.old { background: #fcfaf8; }
+  .ba .col.new { border-color: var(--accent); background: var(--accent-bg); }
+  .ba h4 { font-family: var(--mono); font-size: .85rem; margin: 0 0 .6rem; }
+  .ba ul { margin: 0; padding-left: 1.1rem; }
+  .ba li { font-size: .86rem; color: var(--muted); margin-bottom: .35rem; }
+  .ba li b { color: var(--ink); font-weight: 600; }
+  pre { font-family: var(--mono); font-size: .8rem; background: #16181d; color: #e7e9ee; padding: .9rem 1rem;
+        border-radius: 9px; overflow-x: auto; line-height: 1.6; }
+  pre .c { color: #8a909c; }
+  pre .k { color: #7db3ff; }
+  pre .s { color: #9ee6a8; }
+  .note { font-size: .86rem; color: var(--muted); font-family: var(--serif); font-size: 1rem; }
+  @media (max-width: 720px) { .ba { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Per-PR Dashboard <span class="tag">scenetest cloud</span></h1>
+  <p class="lede">
+    One pull request is the unit of work. The cloud SPA mounts the
+    <code>@scenetest/dashboard</code> 0.13 widget directly inside a per-PR route, and that
+    widget streams the <b>whole PR's event log</b> — every run — from the PR's Durable Object
+    over a single socket, keyed on a PR-global cursor.
+  </p>
+
+  <h2>1 · Data flow — box to widget</h2>
+  <div class="flow grid">
+    <div class="tier">
+      <h3>Producer</h3>
+      <div class="nodes">
+        <div class="node run">
+          <div class="t">Runner box</div>
+          <div class="d">Per-PR droplet runs scenes, streams events up its one outbound socket:
+            <code>{ kind:'events', runId, events:[{seq,payload}] }</code></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><span>box WebSocket ↓</span></div>
+
+    <div class="tier">
+      <h3>Coordinator — one Durable Object per PR <span class="pill">main</span></h3>
+      <div class="nodes">
+        <div class="node accent">
+          <div class="t">PrCoordinator · SQLite <code>log</code></div>
+          <div class="d">
+            <code>id INTEGER PK AUTOINCREMENT</code> · <code>run_id</code> · <code>seq</code> · <code>payload</code><br>
+            <code>UNIQUE(run_id, seq)</code> — box's per-run resend key.<br>
+            <b><code>id</code> is the PR-global cursor</b> the whole-PR viewer streams &amp; resumes on.
+            <code>INSERT … RETURNING id</code> on ingest; end-of-run flush to an R2 <code>.jsonl</code> archive.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><span>/pr-viewer-connect?sinceId=… &nbsp;·&nbsp; fanoutPr + replayPrTo ↓</span></div>
+
+    <div class="tier">
+      <h3>Worker edge — cookie-authed routes</h3>
+      <div class="nodes">
+        <div class="node">
+          <div class="t">prDashboardWs</div>
+          <div class="d"><code>GET /api/cloud/repos/:owner/:name/pr/:number/ws</code><br>
+            forwards the upgrade to the PR's DO <code>/pr-viewer-connect</code>.</div>
+        </div>
+        <div class="node">
+          <div class="t">command + log</div>
+          <div class="d"><code>POST /api/runs/:runId/commands</code> · <code>GET /api/runs/:runId/log</code> (R2 or live).</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><span>frame { kind:'event', id, runId, seq, payload } ↓</span></div>
+
+    <div class="tier">
+      <h3>Browser — the cloud SPA (one preact-iso app)</h3>
+      <div class="nodes">
+        <div class="node">
+          <div class="t">createCloudPrTransport</div>
+          <div class="d">partysocket to <code>…/ws?sinceId=</code>; tracks the last <code>id</code>, dedupes the
+            replay/live overlap, resumes from the cursor on reconnect.</div>
+        </div>
+        <div class="node accent">
+          <div class="t">&lt;Dashboard&gt; <span class="pill">0.13</span></div>
+          <div class="d">Plain Preact component in the light DOM. Folds the one PR stream into its
+            read model once and renders the matched view.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>2 · Routing — the host owns the URL</h2>
+  <p class="note">
+    The SPA already owns the single <code>LocationProvider</code> + <code>&lt;Router&gt;</code>. The PR page is just
+    a route; the widget rides that router instead of touching <code>history</code> itself — so tab clicks
+    deep-link and survive reload, and <code>&lt;Dashboard&gt;</code> stays mounted across views (stream + read
+    model built once).
+  </p>
+  <pre><span class="c">// App.tsx — the dashboard mounts under the SPA's own optional :view? param</span>
+&lt;<span class="k">Route</span> path=<span class="s">'/repo/:owner/:name/pr/:number/:view?'</span> component={<span class="k">PrDetail</span>} /&gt;
+
+<span class="c">// PrDetail.tsx — render the bare component; it reads :view from useRoute()</span>
+&lt;<span class="k">Dashboard</span>
+  transport={transport}                                  <span class="c">// one PR stream</span>
+  basePath={<span class="s">`/repo/${owner}/${name}/pr/${prNumber}`</span>}       <span class="c">// router mount → tab hrefs</span>
+  apiBase={<span class="s">`/api/cloud/repos/${owner}/${name}/pr/${prNumber}`</span>} <span class="c">// API lives elsewhere</span>
+/&gt;</pre>
+
+  <h2>3 · What 0.13 changed here</h2>
+  <div class="ba">
+    <div class="col old">
+      <h4>Before — 0.11 widget</h4>
+      <ul>
+        <li><b>Shadow-root</b> widget; <code>mountDashboard(node, …)</code> imperative mount via <code>useEffect</code>/<code>ref</code>.</li>
+        <li>Widget rewrote the host's URL with its own <code>pushState</code> — embedded tabs lied; reload / deep-link 404'd.</li>
+        <li>Transport needed a <code>fetchState()</code> snapshot alongside <code>subscribe</code>.</li>
+      </ul>
+    </div>
+    <div class="col new">
+      <h4>After — 0.13 component</h4>
+      <ul>
+        <li><b>Light-DOM Preact component</b> (<code>&lt;Dashboard&gt;</code>), styled by the shipped stylesheet; declarative.</li>
+        <li>Routing rides the <b>host's preact-iso router</b> via <code>{base}/:view?</code>; <code>basePath</code>/<code>apiBase</code> split.</li>
+        <li>Transport is just <code>subscribe</code> + <code>sendCommand</code> — replay-on-connect covers history; <code>fetchState()</code> gone.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>4 · Branch lineage</h2>
+  <p class="note">
+    <code>main</code> carries the per-PR Durable Object log (SQLite + R2 archive) but its
+    <b>frontend was still the old per-run page</b>. The per-PR backend — the <code>id</code> cursor,
+    <code>/pr-viewer-connect</code>, <code>prDashboardWs</code>, and "drop <code>/r/:runId</code>" — lives on
+    <code>per-pr-dashboard</code> (= <code>main</code> + that work). This branch stacks on
+    <code>per-pr-dashboard</code> and adds the one missing piece: the <b>0.13 dashboard adoption</b>.
+  </p>
+  <p class="note">
+    The <b>per-run viewer is now removed</b> — the PR viewer is the only viewer. Gone:
+    <code>/api/runs/:runId/ws</code>, the DO's <code>/viewer-connect</code> + per-run fan-out/replay
+    (and its R2-fallback helpers); the e2e checks moved to the PR stream. Removing it surfaced
+    a latent ordering bug — <code>rehydrateArchived</code>'s <code>await</code> sat between
+    <i>register</i> and <i>replay</i>, so a live frame on an in-flight run could jump the client's
+    <code>id</code> cursor ahead of the unreplayed lower ids and drop them; rehydrate now runs
+    <i>before</i> register, so register→replay is synchronous and nothing interleaves.
+  </p>
+</main>
+</body>
+</html>

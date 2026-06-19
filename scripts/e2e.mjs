@@ -2,8 +2,8 @@
 // End-to-end check: boots the real worker (wrangler dev + workerd) against a
 // throwaway D1, then exercises the seams a unit test can't reach — auth
 // redirects, webhook HMAC + triggering, the stub runner driving the event log
-// (per-run and PR-anchored viewer streams), command validation, and the
-// latest-wins cancellation.
+// (the PR-anchored viewer stream), command validation, and the latest-wins
+// cancellation.
 //
 // Hermetic by construction: state lives in a temp --persist-to dir, secrets
 // are inline --var values invented below, and the port is off to the side.
@@ -277,9 +277,11 @@ async function main() {
   check('newly watched repo triggers a run (case-insensitive match)',
     addedHook.result?.startsWith('run-created:'), JSON.stringify(addedHook))
 
-  // --- the run that webhook triggered, observed through the viewer WebSocket --
-  console.log('· stub run → viewer WS')
-  const replay = await collectWs(`/api/runs/${webhookRunId}/ws`, cookie)
+  // --- the run that webhook triggered, observed through the PR viewer --------
+  // webhookRunId is the only run on demo/watched#5, so the whole-PR stream is
+  // just that run.
+  console.log('· stub run → PR viewer WS')
+  const replay = await collectWs('/api/cloud/repos/demo/watched/pr/5/ws', cookie)
   const types = replay.events.map((e) => e.type)
   check('WS replays run:start first', types[0] === 'run:start')
   check('WS reaches run:end', types.includes('run:end'))
@@ -300,7 +302,7 @@ async function main() {
   })
   check('garbage command → 400', cmdBad.status === 400)
   check('WS with tampered session → refused',
-    (await wsStatus(`/api/runs/${webhookRunId}/ws`, 'session=tampered.sig')) === 'refused')
+    (await wsStatus('/api/cloud/repos/demo/watched/pr/5/ws', 'session=tampered.sig')) === 'refused')
 
   // --- PR coordinator: the script plays the box over the WebSocket channel --
   console.log('· PR coordinator (box channel)')
@@ -367,31 +369,19 @@ async function main() {
   check('coordinator acked the events batch',
     (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
 
-  // Viewer WS: replay from the object's log, then live events.
-  const wsReplay = await collectWs('/api/runs/e2e-ws-run/ws', cookie, 2500)
+  // PR viewer: replay the whole PR's log from the object, then live events.
+  const wsReplay = await collectWs('/api/cloud/repos/demo/watched/pr/9/ws', cookie, 2500)
   check('box events reached viewer via WS replay',
     wsReplay.events.some((e) => e.type === 'scene:start' && e.name === 'ws scene'))
 
-  // --- overlap dedup: replay and live may both deliver the same seq ----------
-  // Connect a new viewer, then push a fresh event. The viewer gets the new
-  // event exactly once — either from fanout before replay reaches it, or from
-  // replay; the client's seq filter drops any duplicate.
-  console.log('· replay/live overlap dedup + reconnect')
+  // Add a third event to e2e-ws-run; the PR-anchored stream below asserts replay
+  // + id-cursor resume over all three (the PR stream is the only viewer now, and
+  // dedupes the replay/live overlap on the PR-global id).
   box.send(JSON.stringify({
     kind: 'events', runId: 'e2e-ws-run',
     events: [{ seq: 3, payload: { type: 'action:start', timestamp: Date.now(), actor: 'A', action: 'click', target: 'x' } }],
   }))
   await waitInbox((m) => m.kind === 'ack' && m.runId === 'e2e-ws-run' && m.count >= 1)
-
-  // Full replay (sinceSeq=0): seq 1, 2, 3 — no duplicates.
-  const full = await collectWs('/api/runs/e2e-ws-run/ws?sinceSeq=0', cookie, 2500)
-  check('full replay delivers all three events', full.seqs.length >= 3, JSON.stringify(full.seqs))
-  check('no duplicates in full replay', full.seqs.length === new Set(full.seqs).size)
-
-  // Reconnect with sinceSeq=2: should only see seq 3, never seq 1 or 2.
-  const partial = await collectWs('/api/runs/e2e-ws-run/ws?sinceSeq=2', cookie, 2500)
-  check('sinceSeq=2 skips seq 1 and 2', partial.seqs.every((s) => s > 2), JSON.stringify(partial.seqs))
-  check('sinceSeq=2 delivers seq 3', partial.seqs.includes(3))
 
   // --- PR-anchored stream: the whole PR over one socket, framed on the
   // PR-global id. e2e-ws-run is PR demo/watched#9; its events surface here keyed
@@ -486,13 +476,16 @@ async function main() {
     }), agentLog)
 
   // The scenes CLI on a box reports to the agent's local ingest; the agent
-  // relays up the channel and the coordinator appends to its SQLite log.
+  // relays up the channel and the coordinator appends to its SQLite log. seq 0
+  // shares this run's seq space with the dispatch's scenes report below (run:start
+  // seq 0, run:end seq 1) — one producer, one seq sequence — so run:end (seq 1)
+  // is a distinct (run_id, seq) and isn't dropped by the log's INSERT OR IGNORE.
   const localIngest = await fetch('http://127.0.0.1:4998/events/e2e-agent-run', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ events: [{ payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } }] }),
+    body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } }] }),
   })
   check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
-  const agentReplay = await collectWs('/api/runs/e2e-agent-run/ws', cookie, 2500)
+  const agentReplay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 2500)
   check('agent-relayed event reached viewer via WS',
     agentReplay.events.some((e) => e.type === 'run:start'))
 
@@ -508,7 +501,7 @@ async function main() {
   })
   check('scenes command ran and its events relayed (run:end via report-url)',
     await waitFor(async () => {
-      const replay = await collectWs('/api/runs/e2e-agent-run/ws', cookie, 1200)
+      const replay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 1200)
       return replay.events.some((e) => e.type === 'run:end')
     }, 8000))
   check('agent settled the verdict from run:end (1 failing scene → failed)',
@@ -555,7 +548,7 @@ async function main() {
   }))).runId
   const run1 = await stubRun()
   const run2 = await stubRun()
-  await collectWs(`/api/runs/${run2}/ws`, cookie) // closes when run2 emits run:end
+  await collectWs('/api/cloud/repos/demo/repo/pr/1/ws', cookie) // closes when the PR emits run:end
   await new Promise((r) => setTimeout(r, 300)) // let run1's bailing loop settle
 
   const statuses = d1Query(persistDir,
@@ -636,9 +629,10 @@ async function main() {
     logPost.status === 200 && logPostText.includes('run:start') && logPostText.includes('run:end'),
     `${logPost.status} ${logPostText.slice(0, 120)}`)
 
-  // The object keeps its log (no prune), so viewer replay still serves it; the
-  // R2 archive is the fallback only once the object is reset at PR teardown.
-  const artifactReplay = await collectWs('/api/runs/e2e-artifact-run/ws', cookie, 2500)
+  // The object keeps its log (no prune), so the PR viewer replay still serves it
+  // after archive; the R2 fold-back only matters once the object is reset at PR
+  // teardown (the re-fold section below).
+  const artifactReplay = await collectWs('/api/cloud/repos/demo/watched/pr/11/ws', cookie, 2500)
   const artTypes = artifactReplay.events.map((e) => e.type)
   check('viewer replay serves the full log after archive',
     artTypes.includes('run:start') && artTypes.includes('run:end'), JSON.stringify(artTypes))

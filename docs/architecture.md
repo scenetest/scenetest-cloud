@@ -75,28 +75,34 @@ that is its design center.
 
 ### Dashboard widget
 
-The Preact dashboard is packaged as a mountable widget:
+The Preact dashboard is packaged as a component that renders into the host's
+light DOM:
 
-```ts
-mountDashboard(element, { transport })
+```tsx
+<Dashboard transport={transport} basePath={base} apiBase={api} />
 ```
 
-The widget renders the same UI in dev and cloud; the host page supplies a
-transport adapter and a DOM element, nothing else. It mounts into any host —
-the `/__scenetest` route, a worker-served page, an Astro island — without
-requiring the host to use Preact.
+The widget renders the same UI in dev and cloud; the host supplies a transport
+adapter, a `basePath` (the route mount its tab links point under), and an
+optional `apiBase` (the base for the Runner's server fetches, defaulting to
+`basePath`). Its view selection rides the host's `preact-iso` router: the host
+mounts it on a `{basePath}/:view?` route and the widget reads the matched view,
+so it never rewrites the URL itself. A standalone `BrowserDashboard` export
+supplies the one `LocationProvider` + `Router` for a host that owns no router
+(the dev shell); an app that already owns a `LocationProvider` (cloud) renders
+the bare `<Dashboard>` under its own `:view?` route.
 
 ### The transport adapter
 
 The injection point where dev and cloud differ. The widget calls the adapter
-to fetch state and subscribe to live events; the adapter speaks to whatever
-backend is present. In dev that is the Vite middleware (fetch + SSE); in
-cloud it is the worker API (fetch + WebSocket). Because the difference
-between the two environments is confined to this object, the dashboard
-behaves the same in both by construction. Both adapters implement one shape —
-a snapshot fetch plus a live subscription — which is the read primitive of
-"The log and its projections" seen from the client: a cursor read of the
-ordered stream, then deltas.
+to subscribe to the run stream and to send commands; the adapter speaks to
+whatever backend is present. In dev that is the Vite middleware (SSE); in
+cloud it is the worker API (WebSocket). Because the difference between the two
+environments is confined to this object, the dashboard behaves the same in
+both by construction. The subscription is the read primitive of "The log and
+its projections" seen from the client: it replays the ordered stream from a
+cursor on connect, then delivers live deltas through the same channel — there
+is no separate snapshot fetch, so history and live fold the same way.
 
 ## The log and its projections
 
@@ -494,15 +500,15 @@ element, not something to blend away.
 
 How this holds in practice:
 
-- `mountDashboard()` renders into a shadow root with its own styles and
-  fonts. The dev overlay needs this anyway (it injects into arbitrary user
-  apps); the cloud shell inherits the same isolation. Styles cannot leak in
-  either direction.
-- The widget's only theming surface is a small set of CSS custom properties
-  (`--st-bg`, `--st-accent`, font size, a terminal color scheme) — the scope
-  of a terminal emulator's settings. The shell may set these; it cannot
-  reach internals. They are versioned with the widget, like the wire
-  protocol.
+- The widget renders into the light DOM under its own `.scenetest-dashboard`
+  root class and ships a stylesheet scoped to that class. Its rules are
+  namespaced to the widget rather than shadow-isolated — the host loads the
+  stylesheet (the cloud SPA's bundle pulls it in) and the scope keeps the
+  widget's styles off the surrounding page.
+- The widget's only theming surface is the `theme` prop — background, accent,
+  font, font size, the scope of a terminal emulator's settings. The shell may
+  set these; it cannot reach internals. They are versioned with the widget,
+  like the wire protocol.
 - The docs aesthetic is copied, not shared: the shell copies the docs site's
   tokens (type scale, palette, spacing) into a stylesheet in this repo. This
   is visual similarity, not runtime reliability — drift costs a stylesheet

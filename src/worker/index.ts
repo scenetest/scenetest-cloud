@@ -1,6 +1,6 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { dashboardWs, prDashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
+import { prDashboardWs, postRunCommand, getRunLog } from './scenetest-bridge/routes.ts'
 import { postEvents, postSceneExecutions, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
@@ -46,11 +46,10 @@ const router = new Router()
   // Cloud dashboard data
   .get('/api/cloud/overview', withSession(getOverview))
   .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))
-  // PR-anchored viewer stream: the whole PR's events over one WebSocket.
+  // PR-anchored viewer stream: the whole PR's events over one WebSocket — the
+  // only viewer. The PR is the unit; there is no run-scoped page or stream.
   .get('/api/cloud/repos/:owner/:name/pr/:number/ws', withSession(prDashboardWs))
-  // Run-scoped data plane (no run-scoped page — the PR page is the unit). The
-  // per-run viewer WS backs run-granular observation (and R2 artifact replay).
-  .get('/api/runs/:runId/ws', withSession(dashboardWs))
+  // Run-scoped data plane (commands + the raw log download).
   .get('/api/runs/:runId/log', withSession(getRunLog))
   .post('/api/runs/:runId/commands', withSession(postRunCommand))
   // GitHub webhooks (HMAC-authed inside the handler)

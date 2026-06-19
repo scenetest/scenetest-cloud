@@ -31,7 +31,7 @@ function Dashboard({ me }: { me: Me }) {
       <Router>
         <Route path='/' component={Overview} />
         <Route path='/projects' component={ProjectsView} />
-        <Route path='/repo/:owner/:name/pr/:number' component={PrDetail} />
+        <Route path='/repo/:owner/:name/pr/:number/:view?' component={PrDetail} />
         <Route path='/repo/:owner/:name' component={RepoDetail} />
         <Route default component={NotFound} />
       </Router>
