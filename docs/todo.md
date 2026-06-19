@@ -18,7 +18,45 @@ Status legend: **spine** = a load-bearing path the design assumes works and
 doesn't yet · **product** = promised to users, unbuilt · **deferred** = real,
 gated behind a named trigger · **cleanup** = the tracked edges.
 
-## spine — the projection writer was never built; the stub impersonates it
+## Landing now — the per-PR dashboard
+
+The `claude/per-pr-dashboard` branch (merging today) is the architecture's
+"one-collection-per-PR" work — the thing the doc anticipates when it parentheses
+"*a per-PR object-assigned cursor and a channel discriminator arrive with the
+one-collection-per-PR dashboard work*." It:
+
+- retires `/r/:runId` — the **PR** is the unit; runs are picked in-page
+  (`?run=`) under `/repo/:owner/:name/pr/:number`;
+- gives the DO log a **PR-global autoincrement `id`** (`UNIQUE(run_id, seq)`,
+  `INSERT OR IGNORE … RETURNING id`) and streams the whole PR over one socket
+  (`/pr-viewer-connect?sinceId`) via a new `createCloudPrTransport`;
+- re-folds R2-archived runs back into the PR stream under their original id
+  (`rehydrateArchived`, `POST /reset`).
+
+Two consequences for this list. **(1)** It largely implements / supersedes #33 —
+the cloud `Transport` adapter is now the PR-anchored `createCloudPrTransport`,
+not a per-run one; reconcile #33 against the merge rather than building it
+fresh. **(2)** Its ~200-line rework of `pr-coordinator.ts` is all PR-global
+ordering and rehydration — **no D1 projection writes** — so the spine gap below
+survives the merge, and the projection writer (#36) must be built on the
+*post-merge* ingest path (the `RETURNING id` one), not today's.
+
+## The box agent / relay — landed (answering a recurring question)
+
+The "piece of technology maintained in this repo, embedded on the box, that
+relays data up to the Durable Object and resolves protocol-version skew" is the
+**box agent** (`infra/box/agent.mjs`), landed in `d96aa04`. The version-skew
+resolution is its **envelope-grade relay rule**: it forwards opaque
+`{seq, payload}` frames upstream without parsing them, so event types newer than
+the relay pass straight through (`architecture.md` → "Receiver core" is the
+decision record; the cloud deliberately does *not* run `@scenetest/receiver`).
+The *log-tailing* form specifically did **not** survive: the agent originally
+tailed a `.jsonl` events file, and `404fdee` deleted that tail/sweep machinery
+when scenetest CLI 0.15 shipped `--report-url` — the CLI now POSTs event batches
+to the agent's local HTTP ingest instead. So the relay landed; the tail was
+replaced by a push. Nothing to build here; recorded so it stops being re-asked.
+
+## spine — the projection writer was never built; the stub impersonates it (#36)
 
 This is the big one, and it's narrower than "the runner doesn't work." Boxes
 *do* provision, the agent connects, takes its `update`, and a `dispatch` runs
@@ -64,12 +102,13 @@ hiding the gap.
 
 Supporting work, flushed out by the same effort:
 
-- **A box-driven e2e.** Today's e2e proves the DO fan-out with fabricated
+- **A box-driven e2e (#37).** Today's e2e proves the DO fan-out with fabricated
   events; nothing covers the agent's dispatch→scenes→relay→**projection**
-  loop. A test that boots the agent (against a local fake droplet) and pushes a
-  real event through to a D1 projection is what would have caught this. Until
-  then the stub's inline writes mask the missing writer by construction.
-- **Live-path validation of the rest of the chain.** With the projection
+  loop. A test that boots the agent (against a local fake droplet, using its
+  `SCENETEST_SKIP_CHECKOUT` / `SCENETEST_NO_POWEROFF` hooks) and pushes a real
+  event through to a D1 projection is what would have caught this. Until then
+  the stub's inline writes mask the missing writer by construction.
+- **Live-path validation of the rest of the chain (#38).** With the projection
   writer in place, confirm the warm-box stage-diff reuse in `ensureBox`, the
   `update`→stage→`/ready` handshake, and the image-build / pending-box pickup
   in `tick.ts` against a real droplet — the DigitalOcean provider is otherwise
@@ -77,12 +116,12 @@ Supporting work, flushed out by the same effort:
 
 ## product — the user-facing promises, still unbuilt
 
-- **The run dashboard isn't consuming the live stream.** [#33] The coordinator
-  fans out frames over the viewer WebSocket, but the cloud `Transport` adapter
-  that feeds them into `@scenetest/dashboard` collections isn't wired —
-  `sinceSeq` resume and seq-dedupe over partysocket. The widget exists; nothing
-  yet drives it live in cloud. This is the "watch a run happen" half of the
-  product.
+- **The run dashboard's live stream — mostly landing via the per-PR branch.**
+  [#33] The cloud `Transport` adapter that feeds the coordinator's WebSocket
+  into `@scenetest/dashboard` collections is being delivered as the PR-anchored
+  `createCloudPrTransport` (see "Landing now"). Treat #33 as a reconcile-against-
+  the-merge item, not greenfield: confirm `sinceId` resume + dedupe and the
+  widget mount survived, then close or re-scope it.
 - **The home view doesn't update and doesn't notify.** [#24 / #16 — duplicates,
   consolidate] The largest unbuilt *section* of the architecture and the
   day-one promise ("it sends me a notification when a job is done"). Needs a
@@ -142,17 +181,31 @@ payoff.
   cookie-authed route runs through. Give `dashboardWs` its own auth via a
   `verifySessionToken` helper.
 
+## Tracker map
+
+Every architecture.md gap now has an issue. The spine ones were filed off this
+audit; the rest pre-existed.
+
+- Spine: **#36** projection writer · **#37** box-driven e2e · **#38** live-DO
+  validation.
+- Product: **#33** run-dashboard transport (largely the per-PR branch) ·
+  **#24/#16** home-view live layer · **#27** box command semantics ·
+  **#25** reports-as-stages.
+- Deferred: **#30** idle teardown · **#26** pipeline v1/v2 · **#28** queues ·
+  **#31** analytics · **PR #35** CF Containers.
+- Cleanup: **#13** runId→DO routing · **#12** session WS auth.
+- Already built (no work): R2 archive (#23), DO→viewer WS fan-out, pipeline v0,
+  three-surface auth, the box agent / envelope relay.
+
 ## Notes
 
-- **#16 and #24 are the same work** (home-view live layer) — consolidate. Note
-  their *live* layer sits on top of the spine: the rollups they fan out are D1
-  projections nothing currently writes.
-- **The projection writer and a box-driven e2e have no issues** — they're the
-  spine, so they belong at the top of the tracker, not absent from it. File
-  them.
-- Dependency order: the spine (the projection writer) gates everything the
-  dashboard reads from D1 — run lists, scene grids, the home-view rollups. The
-  live run dashboard (#33) is the one product item that *doesn't* depend on it,
-  since it reads the coordinator's already-proven WebSocket fan-out rather than
-  D1; it can proceed in parallel. The runner-dependent deferred items (idle
-  teardown, save/restore) wait on live-path validation alongside the spine.
+- **#16 and #24 are the same work** (home-view live layer) — consolidate. Their
+  *live* layer sits on top of the spine: the rollups they fan out are D1
+  projections nothing currently writes (#36).
+- Dependency order: the spine (#36) gates everything the dashboard reads from
+  D1 — run lists, scene grids, the home-view rollups. The run-dashboard
+  transport (#33) is the one product item that *doesn't* depend on it, since it
+  reads the coordinator's WebSocket fan-out rather than D1, and it's largely
+  landing on the per-PR branch anyway. The runner-dependent deferred items
+  (idle teardown #30, save/restore #26) wait on live-path validation (#38)
+  alongside the spine.
