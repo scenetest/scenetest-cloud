@@ -2,6 +2,7 @@ import type { Handler } from '../router.ts'
 import type { Env } from '../env.ts'
 import { verifyWebhookSignature } from '../github.ts'
 import { createRun } from '../runner/create-run.ts'
+import { retireBox } from '../runner/box.ts'
 
 // POST /webhook/github
 //
@@ -147,7 +148,20 @@ async function handleEvent(
     )
       .bind(now, repo, prNumber)
       .run()
-    return { ...base, result: 'pr-closed' }
+    // Tear the box down now: a closed or merged PR gets no more pushes, so
+    // holding its droplet only bills until the age-cap reaper would have
+    // caught it (up to RUNNER_MAX_AGE_MINUTES later). retireBox cancels the
+    // PR's unfinished runs, tells the coordinator to drop its queue and close
+    // sockets, and marks the box for the reaper to destroy on its next pass.
+    // The box may already be gone (a prior retire, or never provisioned), so
+    // this is a no-op when there's no live box.
+    const box = await env.DB.prepare(
+      `SELECT id FROM boxes WHERE repo = ?1 AND pr_number = ?2 AND status != 'destroyed'`,
+    )
+      .bind(repo, prNumber)
+      .first<{ id: string }>()
+    if (box) await retireBox(env, box.id)
+    return { ...base, result: box ? 'pr-closed:retired' : 'pr-closed' }
   }
 
   const headSha = payload.pull_request.head.sha
