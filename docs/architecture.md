@@ -508,21 +508,42 @@ a projection of events the system already has, at a coarser granularity.
   assertion events never fan out beyond the PR's own viewers.
 - The PR list comes from GitHub webhooks rather than runs: PR
   opened/closed/merged → HMAC-verified worker handler → upsert into D1.
-- Past that, the home view is an ordinary web app over D1: it renders the open
-  PRs and their last-known statuses from the projection tables and keeps them
-  live. *How* it stays live — poll, SSE, a WebSocket, a fan-out object — is an
-  implementation choice, not an architectural commitment; the load-bearing
-  fact is that it reads projections, never the log. The one real constraint is
-  notifications: a "job finished" push must fire with no tab open, so whatever
-  triggers it lives server-side, not in the page.
-- The home view is cloud-only code in this repo; it has no dev-mode
-  counterpart. It is a shell built around the shared widget: tiles consume
-  protocol status events, and clicking a run mounts the same widget. If the
-  shell ever needs the widget's internals rather than the protocol and URLs,
-  the boundary is being broken.
+- How it stays live (as built): a singleton **`HomeCoordinator`** Durable Object
+  sits above the per-PR coordinators. On each run boundary a `PrCoordinator`
+  computes the coarse rollup (`status`, `pct`, `failing`) from the state it just
+  projected and pushes it **up to `HomeCoordinator` by direct object-to-object
+  call** — one-way and sparse (`run:start` / throttled `run:progress` ≤ ~2s /
+  `run:end`), never a socket. Only this rollup crosses up; raw assertion/action
+  events stay with the PR's own viewers. The worker can't be that rendezvous —
+  it's stateless and per-request, so it can hold neither the connections nor a
+  cross-PR aggregate; the DO is the connection-holding primitive, the same
+  reason `PrCoordinator` exists, one level up.
+- `HomeCoordinator` owns **no canonical state**: it holds a last-write-wins tile
+  cache rebuilt from the D1 projections on cold start, and fans deltas out to
+  the home dashboard's WebSocket subscribers. It is a partyserver `Server`
+  (hibernating fan-out); the browser is a partysocket client, mirroring the
+  per-PR viewer transport. `PrCoordinator` stays hand-rolled — migrating it is a
+  later call, decided on this evaluation.
+- Writes stay at the source: each `PrCoordinator` writes its own projections to
+  D1 **and** pushes the rollup up; `HomeCoordinator` writes nothing. D1 is the
+  durable, rebuildable store; the home cache is the live copy.
+- The PR list comes from GitHub webhooks rather than runs: PR
+  opened/closed/merged → HMAC-verified worker handler → upsert into D1 → poke
+  `HomeCoordinator`, so a PR appearing/closing ticks the list live.
+- Snapshot-plus-deltas: the home view paints from the D1 snapshot
+  (`/api/cloud/overview`) and overlays live tiles from the `HomeCoordinator`
+  subscription. Tiles are painted by cloud code in the docs aesthetic (text, a
+  progress bar) — not the run widget, which appears only on the run page.
+- The home view is cloud-only code in this repo; it has no dev-mode counterpart.
 
-Trace for one tile: assertion events → PR-object rollup → D1 projection → the
-home view. On finish: the same path, plus a server-side push.
+Trace for one tile: assertion events → PR-object rollup → object-to-object →
+`HomeCoordinator` → home view (D1 snapshot for the first paint, live deltas
+after).
+
+**Not yet built:** background notifications. partysocket only reaches an open
+tab; "notify me when a job's done with no tab open" needs Web Push (VAPID +
+service-worker push + a subscriptions table) — an external dependency, parked as
+a separate slice. The live layer above delivers in-app updates while watching.
 
 ## Visual style
 

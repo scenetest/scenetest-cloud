@@ -1,5 +1,6 @@
 import type { Env } from '../env.ts'
 import type { RunEvent } from '../db.ts'
+import type { HomeTile } from './home-coordinator.ts'
 import { artifactKey, readArtifactLog } from '../artifacts.ts'
 
 // One Durable Object per PR: the coordination point between the PR's box and
@@ -78,6 +79,11 @@ const REPLAY_PAGE = 1000
 // (architecture.md, "The log and its projections").
 const PROJECTED = new Set(['run:start', 'scene:start', 'scene:end', 'run:end'])
 
+// Coarse run-status rollups to the home view are throttled to this cadence for
+// progress (scene:end) updates; run:start / run:end always emit so status
+// transitions are never delayed (architecture.md, "The home view").
+const ROLLUP_THROTTLE_MS = 2000
+
 // The boundary-event payloads the projection writer reads. Fields beyond `type`
 // are best-effort (the payload is opaque protocol JSON); a missing one just
 // drops that part of the projection.
@@ -88,7 +94,20 @@ interface BoundaryPayload {
   file?: string
   status?: string
   error?: unknown
+  sceneCount?: number
   summary?: { failed?: number } & Record<string, unknown>
+}
+
+// Parse a batch's boundary events out of the just-inserted log rows. The shared
+// input to both the D1 projection writer and the home-view rollup emit.
+function parseBoundary(inserted: StoredEvent[]): BoundaryPayload[] {
+  const out: BoundaryPayload[] = []
+  for (const e of inserted) {
+    let p: BoundaryPayload | null = null
+    try { p = JSON.parse(e.payload) as BoundaryPayload } catch { continue }
+    if (p && typeof p.type === 'string' && PROJECTED.has(p.type)) out.push(p)
+  }
+  return out
 }
 
 // Immutable per-run identity the scene_executions projection needs. Resolved
@@ -105,6 +124,8 @@ export class PrCoordinator implements DurableObject {
   // repo/pr/sha once per run rather than per ingest batch. Dropped on eviction
   // and lazily rebuilt; the runs row is the source of truth.
   private runMeta = new Map<string, RunMeta>()
+  // Last home-view rollup emit per run, for throttling progress updates.
+  private lastRollupAt = new Map<string, number>()
 
   constructor(
     private state: DurableObjectState,
@@ -291,10 +312,15 @@ export class PrCoordinator implements DurableObject {
         .toArray()[0] as StoredEvent | undefined
       if (row) inserted.push(row)
     }
-    // Live fan-out first — viewers must not wait on the D1 write — then settle
-    // the projections derived from this batch's boundary events.
+    // Live fan-out first — viewers must not wait on anything downstream — then
+    // settle the D1 projections, then push the coarse rollup up to the home
+    // view. The three are independent; only fan-out is on the live path. The
+    // rollup runs last so it reads the freshly-projected run/scene state.
     this.fanoutPr(runId, inserted)
-    await this.projectToD1(runId, inserted, now)
+    const boundary = parseBoundary(inserted)
+    if (boundary.length === 0) return
+    await this.projectToD1(runId, boundary, now)
+    await this.emitRollup(runId, boundary, now)
   }
 
   // Derive D1 projections from the log the object already owns. This is the
@@ -305,15 +331,7 @@ export class PrCoordinator implements DurableObject {
   // one code path serves real and stub runs identically. INSERT OR IGNORE on
   // the log means `inserted` is the deduped set, so re-delivery never
   // double-projects; the boundary UPDATEs are idempotent regardless.
-  private async projectToD1(runId: string, inserted: StoredEvent[], now: number): Promise<void> {
-    const boundary: BoundaryPayload[] = []
-    for (const e of inserted) {
-      let payload: BoundaryPayload | null = null
-      try { payload = JSON.parse(e.payload) as BoundaryPayload } catch { continue }
-      if (payload && typeof payload.type === 'string' && PROJECTED.has(payload.type)) boundary.push(payload)
-    }
-    if (boundary.length === 0) return
-
+  private async projectToD1(runId: string, boundary: BoundaryPayload[], now: number): Promise<void> {
     // scene rows carry NOT NULL repo/pr/sha — resolve them only when a
     // scene:start is actually in this batch.
     const meta = boundary.some((p) => p.type === 'scene:start')
@@ -325,13 +343,14 @@ export class PrCoordinator implements DurableObject {
       const ts = typeof p.timestamp === 'number' ? p.timestamp : now
       switch (p.type) {
         case 'run:start':
-          // First sign of life: queued → running. The ended_at guard keeps a
+          // First sign of life: queued → running. scene_count (the run's scene
+          // total) feeds the home view's progress %. The ended_at guard keeps a
           // late/replayed run:start from resurrecting an already-settled or
           // cancelled run (latest-wins sets ended_at on cancel).
           stmts.push(
             this.env.DB.prepare(
-              'UPDATE runs SET status = ?1, started_at = ?2 WHERE id = ?3 AND ended_at IS NULL',
-            ).bind('running', ts, runId),
+              'UPDATE runs SET status = ?1, started_at = ?2, scene_count = COALESCE(?3, scene_count) WHERE id = ?4 AND ended_at IS NULL',
+            ).bind('running', ts, typeof p.sceneCount === 'number' ? p.sceneCount : null, runId),
           )
           break
         case 'scene:start': {
@@ -406,6 +425,67 @@ export class PrCoordinator implements DurableObject {
       .first<RunMeta>()
     if (row) this.runMeta.set(runId, row)
     return row
+  }
+
+  // Push a coarse run-status rollup up to the singleton home view object
+  // (DO-to-DO), so the home tiles tick live. Only this rollup crosses up; the
+  // raw events stayed with the PR's own viewers. Computed from the run/scene
+  // state projectToD1 just wrote, so it's accurate without in-memory counters
+  // (which a mid-run eviction would lose). Throttled for progress; boundaries
+  // (run:start/run:end) always emit.
+  private async emitRollup(runId: string, boundary: BoundaryPayload[], now: number): Promise<void> {
+    if (!this.env.HOME_COORDINATOR) return
+    const isBoundary = boundary.some((b) => b.type === 'run:start' || b.type === 'run:end')
+    if (!isBoundary) {
+      const last = this.lastRollupAt.get(runId) ?? 0
+      if (now - last < ROLLUP_THROTTLE_MS) return
+    }
+    this.lastRollupAt.set(runId, now)
+
+    const tile = await this.computeTile(runId, now)
+    if (!tile) return
+    if (tile.status === 'passed' || tile.status === 'failed' || tile.status === 'cancelled') {
+      this.lastRollupAt.delete(runId) // run done; drop its throttle slot
+    }
+    try {
+      await this.env.HOME_COORDINATOR.get(this.env.HOME_COORDINATOR.idFromName('global')).fetch(
+        'https://home/rollup',
+        { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tile }) },
+      )
+    } catch (err) {
+      console.error(`home rollup(${runId}) failed: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+
+  // The run's current home tile, derived from D1 (the projection writer ran
+  // first this batch). pct = settled scenes / scene_count; a terminal run with
+  // no scene_count still reads 100.
+  private async computeTile(runId: string, now: number): Promise<HomeTile | null> {
+    const row = await this.env.DB.prepare(
+      `SELECT r.repo AS repo, r.pr_number AS prNumber, r.status AS status, r.scene_count AS sceneCount,
+              (SELECT COUNT(*) FROM scene_executions se
+                 WHERE se.run_id = r.id AND se.status IN ('passed','failed','skipped')) AS settled,
+              (SELECT COUNT(*) FROM scene_executions se
+                 WHERE se.run_id = r.id AND se.status = 'failed') AS failing
+         FROM runs r WHERE r.id = ?1`,
+    )
+      .bind(runId)
+      .first<{ repo: string; prNumber: number; status: string; sceneCount: number | null; settled: number; failing: number }>()
+    if (!row) return null
+    const terminal = row.status === 'passed' || row.status === 'failed' || row.status === 'cancelled'
+    const pct =
+      row.sceneCount && row.sceneCount > 0
+        ? Math.min(100, Math.round((row.settled / row.sceneCount) * 100))
+        : terminal ? 100 : 0
+    return {
+      repo: row.repo,
+      prNumber: row.prNumber,
+      runId,
+      status: row.status,
+      pct,
+      failing: row.failing ?? 0,
+      updatedAt: now,
+    }
   }
 
   // Fan live events to PR viewers (every viewer of this object — one DO is one

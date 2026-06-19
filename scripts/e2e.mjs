@@ -565,6 +565,56 @@ async function main() {
   })
   check('failed stage report → box retired', (await j(failReady)).retired === true)
 
+  // --- home view live layer: rollups → HomeCoordinator → live tiles ---------
+  // Connect the cross-PR home WebSocket, then drive a stub run on a fresh PR.
+  // The PR coordinator pushes coarse run-status rollups up to the singleton
+  // HomeCoordinator (DO-to-DO); it fans them out here. The PR's tile should go
+  // running → failed live (the stub's checkout scene always fails), carrying a
+  // progress %. Proves partyserver fan-out + the upward emit end-to-end.
+  console.log('· home view live layer')
+  const homeResult = await new Promise((resolve) => {
+    const tiles = []
+    let snapshot = null
+    let triggered = false
+    let resolved = false
+    const finish = () => {
+      if (resolved) return
+      resolved = true
+      clearTimeout(timer)
+      try { hws.close() } catch {}
+      resolve({ snapshot, tiles })
+    }
+    const timer = setTimeout(finish, 15000)
+    const hws = new WebSocket(viewerWsUrl('/api/cloud/home/ws', cookie))
+    hws.addEventListener('error', finish)
+    hws.addEventListener('message', async (e) => {
+      let m
+      try { m = JSON.parse(e.data) } catch { return }
+      if (m.kind === 'snapshot') {
+        snapshot = m.tiles
+        if (!triggered) {
+          // Subscribed now — trigger the run so we catch its tiles live (not in
+          // the connect-time snapshot).
+          triggered = true
+          await fetch(BASE + '/api/debug/stub-run', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ prNumber: 7 }),
+          })
+        }
+      } else if (m.kind === 'tile') {
+        tiles.push(m.tile)
+        if (m.tile.repo === 'demo/repo' && m.tile.prNumber === 7 &&
+            (m.tile.status === 'failed' || m.tile.status === 'passed')) finish()
+      }
+    })
+  })
+  const homeTiles7 = homeResult.tiles.filter((t) => t.repo === 'demo/repo' && t.prNumber === 7)
+  check('home WS sent an initial snapshot', Array.isArray(homeResult.snapshot))
+  check('home tile went running live (DO→DO rollup → fan-out)',
+    homeTiles7.some((t) => t.status === 'running'), JSON.stringify(homeTiles7))
+  check('home tile settled failed with pct 100 (stub checkout scene fails)',
+    homeTiles7.some((t) => t.status === 'failed' && t.pct === 100), JSON.stringify(homeTiles7))
+
   // --- the add-a-project wizard's status checklist ---------------------------
   console.log('· repo setup status')
   check('status endpoint anonymous → 401',
