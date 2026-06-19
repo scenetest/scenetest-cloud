@@ -53,10 +53,24 @@ wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
 wrangler secret put SESSION_SECRET          # openssl rand -hex 32
 wrangler secret put GITHUB_WEBHOOK_SECRET
 wrangler secret put DO_API_TOKEN            # only for RUNNER_PROVIDER=digitalocean
-wrangler secret put GITHUB_API_TOKEN        # optional: a GitHub PAT (public_repo scope) from the operator's account; lifts API rate limits for pipeline stage-hashing
+wrangler secret put GITHUB_API_TOKEN        # optional: a GitHub PAT from the operator's account; see scopes below
 ```
 
 Locally, the same names go in `.dev.vars` (see `.dev.vars.example`).
+
+### `GITHUB_API_TOKEN` scopes
+
+The token is optional and each capability degrades gracefully when it is
+absent or under-scoped (it logs and skips, never failing the request):
+
+- **Pipeline stage-hashing** (read: trees/blobs/contents) — needs no scope
+  for public repos (`public_repo` suffices), only lifts the worker egress
+  IP's 60/hr unauthenticated rate limit.
+- **Commit statuses** (write: the run verdict posted on the PR's head sha so
+  the merge button reflects pass/fail) — needs `repo:status`. Without it the
+  verdict still lands on the dashboard; only the GitHub-side status is
+  skipped. (Check runs — annotations, re-run button — are the upgrade path
+  but require a GitHub App, not a PAT.)
 
 ## Database
 
