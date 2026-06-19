@@ -1,117 +1,131 @@
 # scenetest-cloud — To-do list
 
-A prioritized roadmap for the cloud service. The authoritative detail for each
-item is its GitHub issue; this file is the ordering and dependency map across
-them. The shape follows `architecture.md`'s "Order of work": protocol first,
-then the dev-tool refactor (both done upstream), then the cloud service — which
-is where everything below lives.
+The real work lives in `architecture.md`: this file maps where the running
+system falls short of that design. The open GitHub issues are mostly the
+swept-up edges of larger pieces — they're cross-referenced below, but the
+issue tracker is not the roadmap. The spine is.
 
-Status legend: **now** = on the critical path to the product promise ·
-**next** = unblocked once *now* lands · **later** = real but deferred behind a
-named trigger · **debt** = correctness/clarity cleanup, land anytime.
+What is built and proven today: the cloud plumbing end of the pipe. A webhook
+creates a run, the PR Durable Object owns the event log in its SQLite, fans out
+to viewers over a hibernation WebSocket, writes settled projections to D1, and
+flushes each run's log to an R2 `.jsonl` artifact. The e2e exercises all of
+that. **But everything it exercises is driven by the stub runner**, which
+fabricates scenetest-shaped events straight into the coordinator's `/ingest`
+and never touches a box. The half of the system that runs real tests on real
+hardware is written and unproven.
 
-## now — make the live product actually live
+Status legend: **spine** = a load-bearing path the design assumes works and
+doesn't yet (or has never run) · **product** = promised to users, unbuilt ·
+**deferred** = real, gated behind a named trigger · **cleanup** = the tracked
+edges.
 
-The original day-one promise is two things that don't work end-to-end yet: a
-run dashboard that updates as scenes resolve, and a home view that pushes a
-notification when a job finishes. Both are wired structurally; neither is live.
+## spine — the runner path has never run
 
-- **[#33] Cloud `Transport` adapter (partysocket).** Feed the PR Durable
-  Object's WebSocket stream into `@scenetest/dashboard` collections. The
-  collection/source/projection layer already shipped upstream; this is only the
-  adapter behind the `Transport` seam — frame unwrap, `sinceSeq` resume, and
-  the load-bearing `seq`-dedupe. This is the closest item to "the run dashboard
-  is live." *Pairs with the partysocket swap already in `cloudTransport.ts`.*
+This is the big one. The cloud-to-box contract is fully coded — `ensureBox`
+computes the stage plan and queues an `update`; `dispatch` rides the
+coordinator's box channel; the agent's `applyUpdate` and `runBatch` handle
+both — but the DigitalOcean provider has **never been exercised against the
+live API** (`runner/digitalocean.ts:19`), and the stub path that the e2e runs
+bypasses the box, the WebSocket dispatch, and the agent entirely. So the entire
+right half of the event-flow diagram is theoretical:
 
-- **[#24 / #16] Home view live layer.** The largest unbuilt *section*: a
-  per-workspace Durable Object above the per-PR coordinators, holding the live
-  "all my PRs and their runs" snapshot, fanning out over a hibernation
-  WebSocket, and firing Web Push on terminal run states (must work with no tab
-  open). Today the Overview/Projects/RepoDetail shell exists but is D1 polling
-  only. **These two issues are the same work** — #16 came out of the dashboard
-  review, #24 from the architecture pass. Close one as a duplicate before
-  starting so the backlog has a single source of truth.
+- **First live provisioning, end to end.** One real PR: provision a droplet
+  from the self-built image, the agent connects its outbound WebSocket, takes
+  the queued `update`, checks out the sha, runs the pipeline stages, reports
+  the realized vector via `/ready` — then a `dispatch` arrives, `runBatch`
+  spawns the scenes command, the CLI streams events to the box-local ingest,
+  they relay up the socket into the coordinator's log, and a `run:end` settles
+  the verdict. **Every arrow in that sentence is untested.** No issue tracks
+  this; it's the precondition for trusting anything below it.
+- **An e2e that drives a box, not the stub.** Today's e2e proves the DO
+  fan-out with fabricated events. Nothing covers the agent's
+  dispatch→scenes→relay→verdict loop, the `update`→stage→`/ready` handshake, or
+  the warm-box stage-diff reuse in `ensureBox`. Until a test boots the agent
+  (even against a local fake droplet) and pushes an event through it, the
+  runner is a design, not a feature.
+- **The image build, verified.** `ensureImage` / `advanceImageBuilds` / the
+  pending-box completion in `tick.ts` form a multi-step async chain that the
+  stub never enters. First-live-provisioning is also the first real exercise of
+  the snapshot build and the cron's pending-box pickup.
 
-## next — runner reaches production
+Until this path runs once, the stage cache, the warm-box reuse, idle teardown,
+and reports-as-stages are all optimizations on top of an unproven foundation.
 
-The runner is stubbed by default (`RUNNER_PROVIDER = "stub"`); the DigitalOcean
-path is written but cold.
+## product — the user-facing promises, still unbuilt
 
-- **First live DigitalOcean provisioning.** `runner/digitalocean.ts` carries
-  the note *"NOT yet exercised against the live DigitalOcean API."* The code,
-  the image build, and the box agent all exist — this is the validation pass
-  that turns the stub into a real box: a single PR provisions a droplet, builds
-  its image, streams events up its WebSocket, and tears down. **No tracked
-  issue yet — file one.** Everything below gets easier to validate once this is
-  proven once. *(Open PR #35 weighs Cloudflare Containers as an additive third
-  provider — orthogonal; the DO path stays.)*
+- **The run dashboard isn't consuming the live stream.** [#33] The coordinator
+  fans out frames over the viewer WebSocket, but the cloud `Transport` adapter
+  that feeds them into `@scenetest/dashboard` collections isn't wired —
+  `sinceSeq` resume and seq-dedupe over partysocket. The widget exists; nothing
+  yet drives it live in cloud. This is the "watch a run happen" half of the
+  product.
+- **The home view doesn't update and doesn't notify.** [#24 / #16 — duplicates,
+  consolidate] The largest unbuilt *section* of the architecture and the
+  day-one promise ("it sends me a notification when a job is done"). Needs a
+  per-workspace Durable Object above the PR coordinators, `run.progress`
+  rollups emitted upward, a hibernation fan-out to the home dashboard, and Web
+  Push on terminal states (must fire with no tab open). Today the
+  Overview/Projects/RepoDetail shell is D1 polling only — the "60% done, 1
+  failing" tiles never move.
+- **Commands are inert on the box.** [#27] The command transport is complete
+  end to end — viewer → worker → coordinator queue → box socket — but the agent
+  appends each command to `runs/<id>.commands.jsonl` and **nothing reads it**.
+  "Re-run as a different team," the first command the product ever imagined,
+  re-runs nothing. `run:stop` is box-side (kill the batch, post `cancelled`);
+  `run:replay` is really worker-side run creation via `createRun`.
+- **The PR comparison view has no data.** [#25] The `overview_*` tables have
+  existed since migration 0001 and nothing writes them — they encode the
+  original motivation screenshots (lint deltas, typecheck before/after,
+  bundle-size base-vs-PR). Reports are stage outputs keyed by stage input hash,
+  so identical inputs share one report across runs and PRs; the comparison is
+  "report at base hash vs head hash." Pairs with the pipeline vocabulary.
 
-- **[#30] DO-alarm idle teardown.** Replace the blunt `RUNNER_MAX_AGE_MINUTES`
-  age cap with an activity-reset Durable Object alarm owned by the PR
-  coordinator; demote the cap to the hung-box backstop it's documented to be.
-  `architecture.md` names the cap a placeholder explicitly. Wants a real box to
-  validate against, so it sits behind first-live-provisioning.
+## deferred — real, but gated on a named trigger
 
-- **[#27] Command semantics on the box.** The command transport is complete end
-  to end, but the agent appends commands to `.commands.jsonl` and *nothing
-  reads it* — "re-run as a different team," the first command the product ever
-  imagined, re-runs nothing. Split by where each acts: `run:stop` is box-side
-  (kill the batch, post `cancelled`); `run:replay` is really worker-side run
-  creation via `createRun`; `pause`/`resume` depend on upstream CLI support.
+Each is designed; pulling it forward before its trigger adds surface for no
+payoff.
 
-## later — named-trigger work, don't build speculatively
+- **Idle teardown.** [#30] `RUNNER_MAX_AGE_MINUTES` (default 30) destroys every
+  box past the cap, warm ones included — `architecture.md` names it the
+  placeholder. The target is a DO alarm owned by the PR coordinator, reset on
+  activity, with the cap demoted to the hung-box backstop. *Wants a live box to
+  validate against — sits behind the spine.*
+- **Pipeline `save`/`restore` (v1) and `toolchain` (v2).** [#26] Both fields
+  already parse-and-ignore in `parsePipeline`. v1 is the cold-path artifact
+  cache (the `stage_cache.artifact_ref` column waits); v2 makes the env image a
+  per-project stage. *Trigger: cold-box resurrection is slow (v1); a real
+  project's `apt-get` in a run line hurts (v2).*
+- **Queues.** [#28] Decouple the coordinator's D1 write-through from fan-out and
+  absorb webhook bursts. Explicitly off the live path. *Trigger: measured D1
+  write latency delaying fan-out, webhook drops under burst, or D1 contention
+  in prod.*
+- **Analytics axis — Pipelines→Iceberg.** [#31] A derived second sink for
+  cross-run rollups behind R2 SQL, `.jsonl` staying canonical. *Trigger: D1
+  metadata queries feel slow across many runs, or product wants cross-run
+  analytics.*
+- **Cloudflare Containers as a third runner provider.** [PR #35] Decision
+  record in flight; additive to the DO path, gated on a spike (nested-virt
+  blocker for the Docker-based Supabase stack).
 
-Each of these is real and designed, with an explicit "build it when X" gate.
-Pulling any forward before its trigger is observed adds surface for no payoff.
+## cleanup — the tracked edges, land anytime
 
-- **[#25] Reports-as-stages.** The `overview_*` tables have existed since
-  migration 0001 and nothing writes them — they encode the original
-  motivation screenshots (lint deltas, typecheck before/after, bundle-size
-  base-vs-PR). Key reports by *stage input hash*, not run id, so dedupe across
-  runs and PRs falls out for free. *Trigger: a real pipeline whose stages
-  produce reports worth diffing.* Pairs naturally with the pipeline vocabulary.
-
-- **[#26] Pipeline v1 (`save`/`restore`) and v2 (`toolchain`).** Both fields
-  already parse-and-ignore in `parsePipeline`, so files written today survive
-  the upgrade. v1 is the cold-path artifact cache (blocked on the R2 bucket,
-  now landed in #23); v2 makes the env image a per-project stage. *Trigger:
-  v1 when cold-box resurrection is painfully slow; v2 when a real project's
-  `apt-get` in a `run` line hurts.*
-
-- **[#28] Queues.** Decouple the coordinator's D1 write-through from the
-  fan-out hot path and absorb webhook bursts. Explicitly optional and off the
-  live path. *Trigger: measured D1 write latency delaying fan-out, webhook
-  drops under burst, or D1 write contention in prod logs — none observed.*
-  #23 landing reduces D1 ingest pressure, which may defer this indefinitely.
-
-- **[#31] Analytics axis — Pipelines→Iceberg.** A derived second sink for
-  cross-run rollups (flakiest scenes, p95 durations, pass-rate trends) behind
-  R2 SQL, with `.jsonl` staying canonical. *Trigger: D1 metadata queries feel
-  slow across many runs, product wants cross-run analytics, or CF Pipelines +
-  R2 SQL reach GA.*
-
-## debt — land anytime
-
-Small, self-contained correctness/clarity fixes with no dependencies.
-
-- **[#13] Routing: resolve `runId → DO` without the repeated D1 join.** Both
+- **[#13] Resolve `runId → DO` without the repeated D1 join.** Both
   `dashboardWs` and `postRunCommand` query D1 for `repo, pr_number` to name the
-  coordinator. Recommended fix (Option A): denormalize a `do_name` column into
-  `runs`, populated at `createRun`. Same round-trip, explicit intent, kills the
-  repeated pattern. On the viewer-WS critical path, so worth doing alongside
-  #33.
-
+  coordinator. Recommended: denormalize a `do_name` column into `runs` at
+  `createRun`. On the viewer-WS critical path — do it alongside #33.
 - **[#12] Move the `?session=` WS fallback out of shared `getSessionUser`.**
   The viewer-WS query-param token fallback leaked into the auth function every
-  cookie-authed route runs through. Narrow blast radius, but it makes the
-  shared auth path harder to audit. Fix: give `dashboardWs` its own auth via a
-  `verifySessionToken` helper and drop the `withSession` wrapper for that route.
+  cookie-authed route runs through. Give `dashboardWs` its own auth via a
+  `verifySessionToken` helper.
 
 ## Notes
 
-- **#16 and #24 are duplicates** (home-view live layer) — consolidate.
-- **First live DigitalOcean provisioning has no issue** — file one; it gates
-  the whole *next* tier's validation.
-- Dependency spine: #33 (run dashboard live) and #24/#16 (home view live) are
-  independent and both *now*; everything in *next* wants first-live-provisioning
-  proven; *later* items each wait on their own trigger, not on each other.
+- **#16 and #24 are the same work** (home-view live layer) — consolidate.
+- **First live provisioning and a box-driven e2e have no issues** — they're the
+  spine, so they belong at the top of the tracker, not absent from it. File
+  them.
+- Dependency order: the spine gates the runner-dependent deferred items
+  (idle teardown, save/restore). The two *product* items that don't touch the
+  box — the live run dashboard (#33) and the home view (#24/#16) — can proceed
+  in parallel with it, since both read the coordinator's already-proven
+  fan-out.
