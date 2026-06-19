@@ -1,10 +1,12 @@
 import { useLocation } from 'preact-iso'
 import { useRepo } from '../hooks/useRepo.ts'
+import { useHomeLive, homeTileKey } from '../hooks/useHomeLive.ts'
 import { paths } from '../lib/paths.ts'
 import { relativeTime, absoluteTime } from '../lib/time.ts'
 import { StatusPip } from './StatusPip.tsx'
 import { Badge } from './Badge.tsx'
 import { Button } from './Button.tsx'
+import { ProgressBar } from './ProgressBar.tsx'
 
 interface Props {
   owner: string
@@ -14,6 +16,8 @@ interface Props {
 export function RepoDetail({ owner, name }: Props) {
   const { route, query } = useLocation()
   const q = useRepo(owner, name)
+  // Live overlay over the D1 snapshot — same home WebSocket as the Overview.
+  const live = useHomeLive()
   const back = () => route(paths.overview())
 
   // The selected PR (from ?pr=N) filters the runs list below. Clicking a PR
@@ -48,6 +52,8 @@ export function RepoDetail({ owner, name }: Props) {
         <div class='list-panel mb-12'>
           {d.open_prs.map((pr) => {
             const selected = pr.pr_number === selectedPr
+            const tile = live.get(homeTileKey(pr.repo, pr.pr_number))
+            const status = tile?.status ?? pr.latest_status ?? 'queued'
             return (
               <div
                 key={pr.pr_number}
@@ -57,12 +63,13 @@ export function RepoDetail({ owner, name }: Props) {
                 class='list-row'
                 style={selected ? { boxShadow: 'inset 3px 0 0 var(--color-indigo-500)', background: 'var(--color-card)' } : undefined}
               >
-                <StatusPip status={pr.latest_status ?? 'queued'} />
+                <StatusPip status={status} />
                 <div class='flex-1 min-w-0'>
                   <div class='font-serif text-lg text-ink truncate'>{pr.title ?? `PR #${pr.pr_number}`}</div>
                   <div class='font-mono text-2xs text-faint mt-1' title={absoluteTime(pr.updated_at)}>
                     #{pr.pr_number} · {pr.base_ref} · {pr.run_count} run{pr.run_count !== 1 ? 's' : ''} · updated {relativeTime(pr.updated_at)}
                   </div>
+                  {status === 'running' && tile != null && <ProgressBar pct={tile.pct} />}
                 </div>
                 <Badge tone='pass'>✓ {pr.pass_count ?? 0}</Badge>
                 <Badge tone={(pr.fail_count ?? 0) > 0 ? 'fail' : 'neutral'}>✗ {pr.fail_count ?? 0}</Badge>

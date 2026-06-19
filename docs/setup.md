@@ -105,3 +105,17 @@ The default `RUNNER_PROVIDER = "stub"` needs nothing. To run real boxes:
 ```sh
 pnpm deploy   # builds the dashboard, then wrangler deploy
 ```
+
+### Durable Object migrations and gradual deploys
+
+Adding a new Durable Object class (a `[[migrations]]` entry in `wrangler.toml`,
+e.g. `HomeCoordinator`) **cannot** ship via `wrangler versions upload` — gradual
+deployments can't apply a DO migration, and the upload fails with
+`code: 10211`. The first deploy that introduces the new class must be a full,
+non-versioned **`wrangler deploy`** (top-level and `--env production`); once the
+migration is applied, `wrangler versions upload` works again for later changes.
+
+So when a change adds or renames a DO: run `wrangler deploy` once (or point the
+Workers Builds deploy command at `wrangler deploy` for that release), then resume
+the usual `versions upload` flow.
+

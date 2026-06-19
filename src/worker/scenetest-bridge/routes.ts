@@ -66,6 +66,22 @@ export const prDashboardWs: Handler = async (req, env, _ctx, params) => {
   return prCoordinator(env, repo, prNumber).fetch(new Request(doUrl, req))
 }
 
+// GET /api/cloud/home/ws — home view live layer. Same auth shape as the PR
+// viewer WS (cookie or ?session=), then forwards the upgrade to the singleton
+// HomeCoordinator, which replays the current tile snapshot and fans out live
+// run-status rollups. One socket for the whole cross-PR home view.
+export const homeDashboardWs: Handler = async (req, env) => {
+  if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+    return new Response('Expected WebSocket', { status: 426 })
+  }
+  const cookies = parseCookies(req.headers.get('cookie'))
+  const token = cookies[SESSION_COOKIE] ?? new URL(req.url).searchParams.get('session') ?? undefined
+  const user = token ? await verifySessionToken(token, env) : null
+  if (!user) return jsonUnauthorized()
+
+  return env.HOME_COORDINATOR.get(env.HOME_COORDINATOR.idFromName('global')).fetch(req)
+}
+
 // POST /api/cloud/repos/:owner/:name/pr/:number/commands — body is
 // { command, runId? }. The PR (owner/name + number) names the coordinator
 // directly, so there is no runId→PR lookup: the run is not the address, the PR

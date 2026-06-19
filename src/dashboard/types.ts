@@ -29,6 +29,19 @@ export interface PrSummary {
   latest_status: string | null
 }
 
+// A live home-view tile pushed by the HomeCoordinator over the home WebSocket.
+// Mirrors the worker's HomeTile (src/worker/do/home-coordinator.ts). Overlaid on
+// the D1 snapshot from useOverview/useRepo so tiles move without a refetch.
+export interface HomeTile {
+  repo: string
+  prNumber: number
+  runId: string | null
+  status: string
+  pct: number
+  failing: number
+  updatedAt: number
+}
+
 export interface OverviewStats {
   repos: Repo[]
   open_prs: PrSummary[]

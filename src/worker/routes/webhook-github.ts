@@ -161,6 +161,7 @@ async function handleEvent(
       .bind(repo, prNumber)
       .first<{ id: string }>()
     if (box) await retireBox(env, box.id)
+    pokeHome(env, ctx, repo, prNumber) // PR left the open set → tile disappears live
     return { ...base, result: box ? 'pr-closed:retired' : 'pr-closed' }
   }
 
@@ -205,5 +206,24 @@ async function handleEvent(
     trigger: subset ? 'auto-filter' : 'push',
     subset,
   })
+  pokeHome(env, ctx, repo, prNumber) // new/updated open PR → tile appears/refreshes live
   return { ...base, result: `run-created:${runId}` }
+}
+
+// Tell the singleton home view object that a PR's list state changed
+// (opened/closed/merged) so its tiles tick live. Best-effort and off the
+// webhook response path; the home object re-reads the PR from D1.
+function pokeHome(env: Env, ctx: ExecutionContext, repo: string, prNumber: number): void {
+  ctx.waitUntil(
+    env.HOME_COORDINATOR.get(env.HOME_COORDINATOR.idFromName('global'))
+      .fetch('https://home/refresh', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ repo, prNumber }),
+      })
+      .then(() => undefined)
+      .catch((err) =>
+        console.error(`home refresh(${repo}#${prNumber}) failed: ${err instanceof Error ? err.message : err}`),
+      ),
+  )
 }

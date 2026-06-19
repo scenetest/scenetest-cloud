@@ -8,6 +8,11 @@ export interface Env {
   ARTIFACTS?: R2Bucket
   // One Durable Object per PR: box channel, command queue, event write-through.
   PR_COORDINATOR: DurableObjectNamespace
+  // Singleton Durable Object for the home view's live layer (idFromName
+  // 'global'): PR coordinators push coarse run-status rollups here (DO-to-DO),
+  // and it fans them out to the home dashboard's WebSocket subscribers. Holds no
+  // canonical state — a rebuildable cache over the D1 projections.
+  HOME_COORDINATOR: DurableObjectNamespace
   // GitHub OAuth (identity)
   GITHUB_OAUTH_CLIENT_ID: string
   GITHUB_OAUTH_CLIENT_SECRET: string

@@ -34,11 +34,20 @@ not_found_handling = "single-page-application"
 # WebSocket, queues commands/dispatches, and owns the PR's event log in its
 # own SQLite (flushed to R2 at end of run; D1 never holds log lines).
 [durable_objects]
-bindings = [{ name = "PR_COORDINATOR", class_name = "PrCoordinator" }]
+bindings = [
+  { name = "PR_COORDINATOR", class_name = "PrCoordinator" },
+  # Singleton above the per-PR coordinators: holds the home view's live tile
+  # cache and fans rollups out to home-dashboard WebSocket subscribers.
+  { name = "HOME_COORDINATOR", class_name = "HomeCoordinator" },
+]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PrCoordinator"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["HomeCoordinator"]
 
 [[d1_databases]]
 binding = "DB"
@@ -100,7 +109,10 @@ zone_name = "msnook.xyz"
 custom_domain = true
 
 [env.production.durable_objects]
-bindings = [{ name = "PR_COORDINATOR", class_name = "PrCoordinator" }]
+bindings = [
+  { name = "PR_COORDINATOR", class_name = "PrCoordinator" },
+  { name = "HOME_COORDINATOR", class_name = "HomeCoordinator" },
+]
 
 [[env.production.d1_databases]]
 binding = "DB"
