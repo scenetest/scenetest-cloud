@@ -14,23 +14,29 @@ export function ghHeaders(env: { GITHUB_API_TOKEN?: string }): Record<string, st
     : { ...GH_API_HEADERS }
 }
 
-// Map a run's terminal status to a GitHub commit-status state. `cancelled`
-// becomes `error` (commit statuses have no neutral) so a retired box never
-// leaves a stale `pending` on the PR. A non-terminal status maps to nothing
-// and is skipped.
-const RUN_STATUS_STATE: Record<string, 'success' | 'failure' | 'error'> = {
+// Map a run status to a GitHub commit-status state. The pre-terminal states
+// (`queued`/`running`) become `pending` so the check shows up while the run is
+// live; `cancelled` becomes `error` (commit statuses have no neutral) so a
+// retired box never leaves a stale `pending` on the PR. An unknown status maps
+// to nothing and is skipped.
+const RUN_STATUS_STATE: Record<string, 'pending' | 'success' | 'failure' | 'error'> = {
+  queued: 'pending',
+  running: 'pending',
   passed: 'success',
   failed: 'failure',
   cancelled: 'error',
 }
 
-// Report a run's verdict back to GitHub as a commit status on the PR's head
+// Report a run's state back to GitHub as a commit status on the PR's head
 // sha — the one leg of the loop that closes back to GitHub, so the merge
-// button reflects what the dashboard already knows. Best-effort by contract:
-// callers run it through `ctx.waitUntil` and a GitHub hiccup must not fail the
-// box's /complete. Needs GITHUB_API_TOKEN with the `repo:status` scope; when
-// the token is absent or under-scoped (or on any API error) we log and skip,
-// exactly like the read path degrades to the coarse plan.
+// button reflects what the dashboard already knows. Posted twice in a run's
+// life: `pending` at creation (from `createRun`) and the terminal verdict
+// (from `postRunComplete`); both share the `scenetest` context so they update
+// the same check line. Best-effort by contract: callers run it through
+// `ctx.waitUntil` and a GitHub hiccup must not fail the request. Needs
+// GITHUB_API_TOKEN with the `repo:status` scope; when the token is absent or
+// under-scoped (or on any API error) we log and skip, exactly like the read
+// path degrades to the coarse plan.
 //
 // Commit status is the first cut (one POST, works with a PAT). Check runs are
 // the upgrade path — richer (annotations, re-run, summary markdown) but
