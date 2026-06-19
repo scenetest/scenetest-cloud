@@ -48,7 +48,7 @@ const router = new Router()
   .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))
   // PR-anchored viewer stream: the whole PR's events over one WebSocket — the
   // only viewer. The PR is the unit; there is no run-scoped page or stream.
-  .get('/api/cloud/repos/:owner/:name/pr/:number/ws', withSession(prDashboardWs))
+  .get('/api/cloud/repos/:owner/:name/pr/:number/ws', prDashboardWs)
   // Run-scoped data plane (commands + the raw log download).
   .get('/api/runs/:runId/log', withSession(getRunLog))
   .post('/api/runs/:runId/commands', withSession(postRunCommand))
