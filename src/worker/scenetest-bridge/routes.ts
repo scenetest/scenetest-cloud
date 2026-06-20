@@ -1,7 +1,6 @@
 import { decodeCommand } from '@scenetest/protocol'
 import type { AuthedHandler } from '../auth/session.ts'
-import { SESSION_COOKIE, jsonUnauthorized, verifySessionToken } from '../auth/session.ts'
-import { parseCookies } from '../auth/cookies.ts'
+import { getWsSessionUser, jsonUnauthorized } from '../auth/session.ts'
 import type { Handler } from '../router.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
 import { readArtifactBoxJsonl } from '../artifacts.ts'
@@ -38,19 +37,18 @@ export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
 // GET /api/cloud/repos/:owner/:name/pr/:number/ws — PR viewer WebSocket. Owns
 // its auth (registered as a plain Handler, not via withSession) because it
 // accepts the session token via ?session= as well as the cookie — a WS-only
-// concession that does not belong in the shared cookie-auth path. After auth it
-// forwards the upgrade to the PR's DO, which replays the whole PR's log (ordered
-// by the PR-global id) and fans out live events. repo + pr name the
-// coordinator; the DO needs no run filter (it is the PR).
+// concession (gated to dev/test, see getWsSessionUser) that does not belong in
+// the shared cookie-auth path. After auth it forwards the upgrade to the PR's
+// DO, which replays the whole PR's log (ordered by the PR-global id) and fans
+// out live events. repo + pr name the coordinator; the DO needs no run filter
+// (it is the PR).
 export const prDashboardWs: Handler = async (req, env, _ctx, params) => {
   if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return new Response('Expected WebSocket', { status: 426 })
   }
-  // Browsers send cookies automatically on same-origin WS; test clients that
-  // cannot set headers pass ?session= explicitly.
-  const cookies = parseCookies(req.headers.get('cookie'))
-  const token = cookies[SESSION_COOKIE] ?? new URL(req.url).searchParams.get('session') ?? undefined
-  const user = token ? await verifySessionToken(token, env) : null
+  // Browsers send the cookie automatically on same-origin WS; the ?session=
+  // fallback for header-less test clients is honored only under dev gating.
+  const user = await getWsSessionUser(req, env)
   if (!user) return jsonUnauthorized()
 
   const repo = `${params.owner}/${params.name}`
@@ -67,16 +65,15 @@ export const prDashboardWs: Handler = async (req, env, _ctx, params) => {
 }
 
 // GET /api/cloud/home/ws — home view live layer. Same auth shape as the PR
-// viewer WS (cookie or ?session=), then forwards the upgrade to the singleton
-// HomeCoordinator, which replays the current tile snapshot and fans out live
-// run-status rollups. One socket for the whole cross-PR home view.
+// viewer WS (cookie always; ?session= only under dev gating), then forwards the
+// upgrade to the singleton HomeCoordinator, which replays the current tile
+// snapshot and fans out live run-status rollups. One socket for the whole
+// cross-PR home view.
 export const homeDashboardWs: Handler = async (req, env) => {
   if (req.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
     return new Response('Expected WebSocket', { status: 426 })
   }
-  const cookies = parseCookies(req.headers.get('cookie'))
-  const token = cookies[SESSION_COOKIE] ?? new URL(req.url).searchParams.get('session') ?? undefined
-  const user = token ? await verifySessionToken(token, env) : null
+  const user = await getWsSessionUser(req, env)
   if (!user) return jsonUnauthorized()
 
   return env.HOME_COORDINATOR.get(env.HOME_COORDINATOR.idFromName('global')).fetch(req)

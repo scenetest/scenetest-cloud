@@ -19,13 +19,36 @@ export async function getSessionUser(req: Request, env: Env): Promise<AuthedUser
 }
 
 // Verify a raw session token, independent of how it arrived. getSessionUser
-// pulls it from the cookie; the viewer WS route also accepts it via ?session=
-// for test clients that cannot set headers (so this stays transport-agnostic).
+// pulls it from the cookie; getWsSessionUser also accepts it via ?session=
+// under dev gating (so this stays transport-agnostic).
 export async function verifySessionToken(token: string, env: Env): Promise<AuthedUser | null> {
   const payload = await verifyPayload<SessionPayload>(token, env.SESSION_SECRET)
   if (!payload) return null
   if (payload.exp < Math.floor(Date.now() / 1000)) return null
   return { github_id: payload.sub, github_login: payload.login }
+}
+
+// Session auth for the WebSocket routes. The cookie is always honored; the
+// `?session=` query fallback is honored ONLY under dev/test gating
+// (ENABLE_DEBUG_ROUTES), and refused in cloud.
+//
+// Why the fallback is gated rather than unconditional: `?session=` carries the
+// same 30-day HMAC-signed bearer token as the cookie, and a bearer in a URL is
+// a recognized anti-pattern (OWASP "session ID in URL"; CWE-598) — query
+// strings land in access/proxy/CDN logs, browser history, and Referer, where a
+// cookie never does. The signature stops forgery, not theft-and-replay, so a
+// token read from a log is a live credential. Real browsers send the cookie
+// automatically and never build a `?session=` URL; the fallback exists purely
+// for test clients (Node's global WebSocket follows WHATWG and drops custom
+// headers, so they cannot send the cookie). That affordance belongs in
+// local/test, not against the production deployment.
+export async function getWsSessionUser(req: Request, env: Env): Promise<AuthedUser | null> {
+  const cookies = parseCookies(req.headers.get('cookie'))
+  let token = cookies[SESSION_COOKIE]
+  if (!token && env.ENABLE_DEBUG_ROUTES === '1') {
+    token = new URL(req.url).searchParams.get('session') ?? undefined
+  }
+  return token ? verifySessionToken(token, env) : null
 }
 
 export async function makeSessionCookie(

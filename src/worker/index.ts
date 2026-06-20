@@ -51,7 +51,7 @@ const router = new Router()
   // only viewer. The PR is the unit; there is no run-scoped page or stream.
   .get('/api/cloud/repos/:owner/:name/pr/:number/ws', prDashboardWs)
   // Home view live layer: one cross-PR WebSocket served by the HomeCoordinator
-  // (owns its auth, like the PR viewer — accepts ?session= as well as cookie).
+  // (owns its auth, like the PR viewer — cookie always; ?session= dev-gated).
   .get('/api/cloud/home/ws', homeDashboardWs)
   // Commands are PR-scoped: the PR names the coordinator, the run (if any) is a
   // field in the body, not the address.
