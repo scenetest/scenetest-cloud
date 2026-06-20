@@ -103,7 +103,10 @@ async function waitForServer(child, maxMs = 30_000) {
 
 // Extract the raw session token value from a Cookie header string.
 // The viewer WS route accepts ?session=<token> as a fallback for clients
-// (like Node's global WebSocket) that cannot set request headers.
+// (like Node's global WebSocket) that cannot set request headers — honored
+// only under ENABLE_DEBUG_ROUTES (set below), refused in cloud. This harness
+// runs gated-on, so the fallback is live here; the cloud-refused boundary is
+// unit-tested in src/worker/auth/session.test.ts.
 function sessionToken(cookie) {
   return (/(?:^|;\s*)session=([^;]*)/.exec(cookie) ?? [])[1] ?? ''
 }

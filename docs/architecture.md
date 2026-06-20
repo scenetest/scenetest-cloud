@@ -433,7 +433,12 @@ Three surfaces:
    matters — OAuth-only, no passwords stored, sessions are signed not
    stored — and is covered by crypto unit tests, so it stays. A library
    becomes worth revisiting if auth grows surface (orgs, multiple
-   providers).
+   providers). The viewer/home WebSocket routes additionally accept the
+   session token via `?session=` for header-less test clients (Node's global
+   `WebSocket` drops custom headers, so they can't send the cookie). A bearer
+   in a URL is loggable where a cookie isn't (OWASP "session ID in URL",
+   CWE-598), so that fallback is gated to dev/test (`ENABLE_DEBUG_ROUTES`) and
+   refused in cloud — see `getWsSessionUser`; the cookie path is unconditional.
 2. Runner box and CLI: a bearer token minted when the box is provisioned,
    scoped to that box and dead when the box is destroyed; the PR's Durable
    Object validates it on the WebSocket handshake. Scoped API keys for CI
