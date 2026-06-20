@@ -44,6 +44,15 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //     payload the raw JSON string. Client JSON.parse(frame.payload)s to recover
 //     the protocol event, and dedupes the replay/live overlap on id.
 //
+// Idle teardown — the object owns *when* a box is retired (architecture.md,
+// "Runner"). Every activity signal (box connect, viewer connect, an events
+// batch, a command/dispatch) resets a Durable Object alarm; when it fires with
+// all of this PR's runs settled, the box is marked destroyed (the cron reaper
+// then destroys the backing droplet). An in-flight run re-arms instead — a
+// genuinely hung box whose run never settles is left to the age-cap backstop
+// (RUNNER_MAX_AGE_MINUTES). The window is RUNNER_IDLE_TIMEOUT_MINUTES (default
+// 5). The tracked box id lives in storage, set on box connect.
+//
 // Internal HTTP surface (reachable only via the binding, never publicly):
 //   GET  /box-connect?boxId=…              — WebSocket upgrade for the box
 //   GET  /pr-viewer-connect?sinceId=…       — WebSocket upgrade, whole PR
@@ -53,6 +62,7 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   POST /command                          — { runId?, command } → send or queue
 //   POST /dispatch                         — { run: RunSpec } → send or queue
 //   POST /retire                           — { boxId } → close sockets, drop queue
+//   POST /idle-check                       — run the idle-alarm logic now (test hook)
 //   POST /ingest/:runId                    — { events } → ingestAndFanout
 
 interface EventsEnvelope {
@@ -72,6 +82,10 @@ interface StoredEvent {
 
 const QUEUE_PREFIX = 'q:'
 const REPLAY_PAGE = 1000
+// The box this object is coordinating, persisted on box connect so the idle
+// alarm knows what to retire (the DO can't read its own name).
+const BOX_ID_KEY = 'boxId'
+const IDLE_DEFAULT_MINUTES = 5
 
 // The run/scene boundary events the D1 projections are derived from. Everything
 // else in the log (actions, assertions, …) is a fact for the live stream only —
@@ -166,6 +180,10 @@ export class PrCoordinator implements DurableObject {
 
       const pair = new WebSocketPair()
       this.state.acceptWebSocket(pair[1]!, ['box', boxId])
+      // Remember which box we coordinate (the idle alarm retires it) and treat
+      // the connect itself as activity.
+      await this.state.storage.put(BOX_ID_KEY, boxId)
+      await this.resetIdleAlarm()
       await this.flushQueue(pair[1]!)
       return new Response(null, { status: 101, webSocket: pair[0]! })
     }
@@ -190,6 +208,7 @@ export class PrCoordinator implements DurableObject {
       // covers them. Register THEN replay runs without an await between, so no
       // live frame can interleave ahead of the replay.
       if (repo && Number.isFinite(prNumber)) await this.rehydrateArchived(repo, prNumber)
+      await this.resetIdleAlarm()
       const pair = new WebSocketPair()
       this.state.acceptWebSocket(pair[1]!, ['viewer', 'prv'])
       await this.replayPrTo(pair[1]!, sinceId)
@@ -245,10 +264,14 @@ export class PrCoordinator implements DurableObject {
 
     if (url.pathname === '/retire' && req.method === 'POST') {
       const { boxId } = (await req.json()) as { boxId: string }
-      for (const ws of this.state.getWebSockets(boxId)) ws.close(1001, 'box retired')
-      // Queued work targeted the retired state; the new box gets fresh
-      // dispatches from createRun, so stale queue entries would be wrong.
-      await this.clearQueue()
+      await this.retireBoxLocally(boxId)
+      return Response.json({ ok: true })
+    }
+
+    if (url.pathname === '/idle-check' && req.method === 'POST') {
+      // Run the idle-alarm logic on demand. The runtime calls alarm() on the
+      // timer; this lets the e2e drive the same path deterministically.
+      await this.alarm()
       return Response.json({ ok: true })
     }
 
@@ -292,8 +315,61 @@ export class PrCoordinator implements DurableObject {
     // queue persists precisely for the box-not-connected case.
   }
 
+  // Idle teardown. The runtime fires this when the idle window elapses with no
+  // activity. If a run is still in flight the box is busy, not idle — re-arm and
+  // wait (a hung run that never settles is the age cap's job, not ours). With
+  // every run settled, mark the box destroyed: the DO owns the teardown
+  // *decision*; the cron reaper destroys the droplet on its next pass (boxes
+  // with status 'destroyed' are swept regardless of age). retireBox in box.ts is
+  // not reused — it fetches this same object's /retire, and a DO awaiting a
+  // subrequest to itself deadlocks; the equivalent runs inline here instead.
+  async alarm(): Promise<void> {
+    const boxId = await this.state.storage.get<string>(BOX_ID_KEY)
+    if (!boxId) return
+    const active = await this.env.DB.prepare(
+      `SELECT 1 FROM runs WHERE box_id = ?1 AND ended_at IS NULL LIMIT 1`,
+    )
+      .bind(boxId)
+      .first()
+    if (active) {
+      await this.resetIdleAlarm()
+      return
+    }
+    await this.env.DB.prepare(
+      `UPDATE boxes SET status = 'destroyed', destroyed_at = ?1 WHERE id = ?2 AND status != 'destroyed'`,
+    )
+      .bind(Date.now(), boxId)
+      .run()
+    await this.retireBoxLocally(boxId)
+  }
+
+  private idleTimeoutMs(): number {
+    const minutes = Number(this.env.RUNNER_IDLE_TIMEOUT_MINUTES ?? IDLE_DEFAULT_MINUTES)
+    return (Number.isFinite(minutes) && minutes > 0 ? minutes : IDLE_DEFAULT_MINUTES) * 60_000
+  }
+
+  // Push the idle alarm out by one window. setAlarm replaces any pending one, so
+  // each activity signal extends the window from now.
+  private async resetIdleAlarm(): Promise<void> {
+    await this.state.storage.setAlarm(Date.now() + this.idleTimeoutMs())
+  }
+
+  // Close the box's sockets and drop the command queue — the queue targeted the
+  // retired box's state, and a fresh box gets new dispatches from createRun. If
+  // this is the box we were tracking, forget it and disarm the idle alarm.
+  private async retireBoxLocally(boxId: string): Promise<void> {
+    for (const ws of this.state.getWebSockets(boxId)) ws.close(1001, 'box retired')
+    await this.clearQueue()
+    if ((await this.state.storage.get<string>(BOX_ID_KEY)) === boxId) {
+      await this.state.storage.delete(BOX_ID_KEY)
+      await this.state.storage.deleteAlarm()
+    }
+  }
+
   private async ingestAndFanout(runId: string, events: RunEvent[]): Promise<void> {
     if (events.length === 0) return
+    // A batch arriving (even a box's resend) is activity: push the idle alarm out.
+    await this.resetIdleAlarm()
     const now = Date.now()
     // INSERT OR IGNORE: a box reconnect can replay events it already sent;
     // (run_id, seq) is the dedup key, so re-delivery is a no-op. RETURNING
@@ -634,6 +710,8 @@ export class PrCoordinator implements DurableObject {
   }
 
   private async sendOrQueue(message: object): Promise<boolean> {
+    // Dispatching a command/run/update is activity too.
+    await this.resetIdleAlarm()
     const box = this.boxSocket()
     if (box) {
       box.send(JSON.stringify(message))

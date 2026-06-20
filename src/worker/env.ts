@@ -44,9 +44,14 @@ export interface Env {
   RUNNER_SIZE?: string
   RUNNER_IMAGE?: string
   PUBLIC_BASE_URL?: string
-  // Hard cap on box lifetime in minutes (default 30). The reaper destroys
-  // anything older regardless of run state.
+  // Hung-box backstop: hard cap on box lifetime in minutes (default 30). The
+  // reaper destroys anything older regardless of run state, catching boxes the
+  // idle alarm never retired (a crashed object, a run that never settled).
   RUNNER_MAX_AGE_MINUTES?: string
+  // Primary teardown: idle window in minutes (default 5). The PR coordinator
+  // resets a Durable Object alarm on every activity signal and retires the box
+  // when the alarm fires with all the PR's runs settled (PrCoordinator.alarm).
+  RUNNER_IDLE_TIMEOUT_MINUTES?: string
 }
 
 export interface AuthedUser {

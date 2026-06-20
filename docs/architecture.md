@@ -281,13 +281,20 @@ and the build pipeline's cache makes resurrection cheap (boot the cached
 image, replay invalidated stages). The warm box is a performance
 optimization; the cache is the correctness story.
 
-Today's teardown is cruder than the target: the reaper's hard age cap
-(`RUNNER_MAX_AGE_MINUTES`, default 30) destroys *every* box past it,
-healthy-and-warm included — so warm reuse only exists inside that window,
-and a long-lived PR rebuilds its box twice an hour. The target is an
-idle-based teardown owned by the PR object (a Durable Object alarm reset on
-activity), with the age cap demoted to the hung-box backstop it should be.
-Unbuilt; the cap is the placeholder.
+Teardown is idle-based and owned by the PR object. The coordinator
+(`PrCoordinator`) resets a Durable Object alarm on every activity signal — a
+box or viewer connect, an events batch, a command/dispatch — and when the alarm
+fires `RUNNER_IDLE_TIMEOUT_MINUTES` (default 5) after the last one, with the
+PR's runs all settled, it marks the box destroyed; the reaper destroys the
+droplet on its next pass. So teardown is proportional to actual activity, not a
+wall-clock cap: a fast run's box goes shortly after it finishes, and a warm box
+survives as long as it keeps being used. An in-flight run re-arms the alarm
+rather than retiring (the box is busy, not idle). The age cap
+(`RUNNER_MAX_AGE_MINUTES`, default 30) is demoted to the hung-box backstop it
+should be: it catches boxes the alarm never retired — a crashed object, a run
+that never settled. (The DO can't call its own `/retire` — a DO awaiting a
+subrequest to itself deadlocks — so the alarm runs the teardown inline rather
+than reusing `retireBox`.)
 
 ### The runner is a swappable substrate
 
@@ -308,9 +315,9 @@ something else. Cloudflare Containers are the natural second runner: less
 flexible (no nested virtualization, so a Docker stack must be re-baked as a
 direct image; tighter memory) but faster and simpler for images that fit,
 and a clear win for Cloudflare-ecosystem teams — the per-PR DO already
-fronts it, `sleepAfter` *is* the idle-teardown the note above calls unbuilt,
-and a one-cloud deploy sheds the `DO_API_TOKEN`, droplet billing, the
-builder state machine, and the reaper. Bake a Container-compatible image and
+fronts it, `sleepAfter` is the platform's native take on the idle-teardown the
+coordinator's alarm implements for DigitalOcean, and a one-cloud deploy sheds
+the `DO_API_TOKEN`, droplet billing, the builder state machine, and the reaper. Bake a Container-compatible image and
 you get the faster substrate; if you can't, DigitalOcean runs your box
 unchanged. That choice living in `RUNNER_PROVIDER` is the point.
 

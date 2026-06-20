@@ -80,6 +80,11 @@ RUNNER_PROVIDER = "stub"
 # itself (stage_cache). Setting it pins a specific snapshot id, bypassing
 # the self-built one (escape hatch; see docs/runner-provisioning.md).
 # PUBLIC_BASE_URL = "https://scenetest-cloud.<account>.workers.dev"
+# Idle teardown (primary): the PR coordinator's Durable Object alarm retires a
+# box this many minutes after its last activity, once its runs have settled.
+# RUNNER_IDLE_TIMEOUT_MINUTES = "5"
+# Hung-box backstop: the reaper hard-kills any box older than this regardless of
+# run state, catching boxes the idle alarm never retired.
 # RUNNER_MAX_AGE_MINUTES = "30"
 # Bootstrap: first user whose GitHub login matches gets auto-inserted into
 # allowed_user when the table is empty. Set this to your own login before the

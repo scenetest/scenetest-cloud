@@ -771,6 +771,76 @@ async function main() {
     `before=${JSON.stringify(preReset.ids)} after=${JSON.stringify(reFold.ids)}`)
   check('re-fold preserves the per-run seq', reFold.seqs.includes(1) && reFold.seqs.includes(3))
 
+  // --- idle teardown: the coordinator's alarm retires a box once idle --------
+  // #30: activity-based retirement replaces the age cap. The PR object resets a
+  // DO alarm on every activity signal and, when it fires with the PR's runs all
+  // settled, marks the box destroyed (the reaper then drops the droplet) —
+  // promptly, without waiting out RUNNER_MAX_AGE_MINUTES. An in-flight run
+  // re-arms instead. We drive the alarm logic via /api/debug/idle-check so the
+  // test is deterministic rather than timing the real window. Last in the run:
+  // the retire briefly bounces the dev server's connections (a local wrangler
+  // artifact — no error, no production analog), so nothing should open a box
+  // channel after it.
+  console.log('· idle teardown (DO alarm)')
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 13, 'idlebox1', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-idle', 'demo/watched', 13, 'idlebox1', 'ready', '${boxTokenHash}', 0)`)
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-idle-run', 'demo/watched', 13, 'idlebox1', 'manual', 'running', 'e2e-box-idle')")
+
+  // Connect the box channel: the coordinator records the box it coordinates (the
+  // alarm's retire target) and arms the idle alarm.
+  const idleBox = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/e2e-box-idle/channel?token=${boxToken}`)
+  const idleInbox = []
+  idleBox.addEventListener('message', (e) => idleInbox.push(JSON.parse(e.data)))
+  await new Promise((resolve, reject) => {
+    idleBox.addEventListener('open', resolve)
+    idleBox.addEventListener('error', () => reject(new Error('idle box channel refused')))
+  })
+  const waitIdleInbox = async (pred, maxMs = 4000) => {
+    const start = Date.now()
+    while (Date.now() - start < maxMs) {
+      const hit = idleInbox.find(pred)
+      if (hit) return hit
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return null
+  }
+
+  const idleCheck = () => fetch(`${BASE}/api/debug/idle-check`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ repo: 'demo/watched', prNumber: 13 }),
+  })
+  const idleBoxStatus = () =>
+    d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-idle'")[0].status
+
+  // A run is in flight (ended_at NULL) → the box is busy: the alarm re-arms, the
+  // box survives. (A hung run that never settles is the age cap's job.)
+  await idleCheck()
+  check('idle check keeps a box with an in-flight run', idleBoxStatus() === 'ready', `got ${idleBoxStatus()}`)
+
+  // Settle the run from the event stream (run:end → ended_at set).
+  idleBox.send(JSON.stringify({
+    kind: 'events', runId: 'e2e-idle-run',
+    events: [
+      { seq: 1, payload: { type: 'run:start', timestamp: 1, sceneCount: 1 } },
+      { seq: 2, payload: { type: 'run:end', timestamp: 2, duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
+    ],
+  }))
+  await waitIdleInbox((m) => m.kind === 'ack' && m.runId === 'e2e-idle-run' && m.count === 2)
+  check('idle run settled to a verdict', await waitFor(() => {
+    const r = d1Query(persistDir, "SELECT ended_at FROM runs WHERE id = 'e2e-idle-run'")
+    return r[0].ended_at != null
+  }), 'e2e-idle-run never settled')
+
+  // Idle with every run settled → the alarm retires the box now, well short of
+  // the age cap.
+  await idleCheck()
+  check('idle check retires the box once its runs settle', await waitFor(() => idleBoxStatus() === 'destroyed'),
+    `got ${idleBoxStatus()}`)
+  idleBox.close()
+
   if (failures.length > 0 && serverErr) {
     console.error('\n--- wrangler dev stderr (tail) ---\n' + serverErr.split('\n').slice(-20).join('\n'))
   }

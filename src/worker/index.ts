@@ -2,7 +2,7 @@ import type { Env } from './env.ts'
 import { Router } from './router.ts'
 import { prDashboardWs, postPrCommand, getRunLog, homeDashboardWs } from './scenetest-bridge/routes.ts'
 import { postEvents, postRunComplete } from './routes/runner-ingest.ts'
-import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog } from './routes/debug.ts'
+import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog, debugIdleCheck } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
 import { boxChannel, boxReady } from './routes/box-channel.ts'
 import { tick } from './runner/tick.ts'
@@ -74,6 +74,7 @@ const router = new Router()
   .post('/api/debug/box-update', debugBoxUpdate)
   .post('/api/debug/box-dispatch', debugBoxDispatch)
   .post('/api/debug/reset-pr-log', debugResetPrLog)
+  .post('/api/debug/idle-check', debugIdleCheck)
 
 const REQUIRED_VARS = ['GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET', 'SESSION_SECRET'] as const
 

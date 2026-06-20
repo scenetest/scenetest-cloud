@@ -73,6 +73,23 @@ export const debugResetPrLog: Handler = async (req, env) => {
   return Response.json(await res.json(), { status: 200 })
 }
 
+// POST /api/debug/idle-check
+// Body: { repo, prNumber } — run a PR coordinator's idle-alarm logic now,
+// instead of waiting out the real RUNNER_IDLE_TIMEOUT_MINUTES window, so the
+// e2e can prove the box is retired on idle (and kept while a run is in flight).
+// DEV-ONLY, same gate as the rest.
+export const debugIdleCheck: Handler = async (req, env) => {
+  if (env.ENABLE_DEBUG_ROUTES !== '1') {
+    return new Response('Not Found', { status: 404 })
+  }
+  const { repo, prNumber } = await req.json<{ repo: string; prNumber: number }>()
+  if (!repo || !Number.isFinite(prNumber)) {
+    return Response.json({ error: 'repo and prNumber required' }, { status: 400 })
+  }
+  const res = await prCoordinator(env, repo, prNumber).fetch('https://do/idle-check', { method: 'POST' })
+  return Response.json(await res.json(), { status: 200 })
+}
+
 // POST /api/debug/stub-run
 // Body: { prNumber?: number, subset?: string[] }
 // Upserts a fake PR and creates a run through the normal path (ensure box →
