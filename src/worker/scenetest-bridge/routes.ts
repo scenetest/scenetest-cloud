@@ -4,6 +4,7 @@ import { SESSION_COOKIE, jsonUnauthorized, verifySessionToken } from '../auth/se
 import { parseCookies } from '../auth/cookies.ts'
 import type { Handler } from '../router.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
+import { replayRun } from '../runner/create-run.ts'
 import { readArtifactBoxJsonl } from '../artifacts.ts'
 
 // GET /api/runs/:runId/log — download the raw event log as .jsonl. Serves the
@@ -84,15 +85,18 @@ export const homeDashboardWs: Handler = async (req, env) => {
 
 // POST /api/cloud/repos/:owner/:name/pr/:number/commands — body is
 // { command, runId? }. The PR (owner/name + number) names the coordinator
-// directly, so there is no runId→PR lookup: the run is not the address, the PR
-// is. Commands act on the PR's active run (run:stop/pause/resume/replay); the
-// optional `runId` rides along as transport metadata for the box's per-run
-// bookkeeping, omitted when the command is run-agnostic. Validation is strict
-// (decodeCommand): commands get acted on, so unknown types are rejected rather
-// than relayed. Valid commands go to the PR coordinator, which sends them down
-// the box's WebSocket — or queues them until a box connects. 202 either way;
-// `delivered` says which happened.
-export const postPrCommand: AuthedHandler = async (req, env, _ctx, params) => {
+// directly: the run is not the address, the PR is. Commands are PR-scoped, and
+// where each one acts depends on the command:
+//   - run:replay is worker-side run creation — it starts a NEW run against the
+//     PR's warm box (replayRun), so it never touches the command queue.
+//   - run:stop/pause/resume go down to the box, which acts on its in-flight
+//     batch. The optional `runId` rides along as transport metadata for the
+//     box's per-run bookkeeping, omitted when the command is run-agnostic.
+// Validation is strict (decodeCommand): commands get acted on, so unknown types
+// are rejected rather than relayed. Box-bound commands go to the PR coordinator,
+// which sends them down the box's WebSocket — or queues them until a box
+// connects. 202 either way; `delivered` says which happened.
+export const postPrCommand: AuthedHandler = async (req, env, ctx, params, user) => {
   const repo = `${params.owner}/${params.name}`
   const prNumber = Number(params.number)
   if (!Number.isFinite(prNumber)) return Response.json({ error: 'bad pr number' }, { status: 400 })
@@ -100,6 +104,20 @@ export const postPrCommand: AuthedHandler = async (req, env, _ctx, params) => {
   const body = (await req.json().catch(() => null)) as { command?: unknown; runId?: string } | null
   const command = decodeCommand(body?.command)
   if (!command) return Response.json({ error: 'not a valid command' }, { status: 400 })
+
+  if (command.type === 'run:replay') {
+    const created = await replayRun(env, ctx, {
+      repo,
+      prNumber,
+      file: command.file,
+      team: command.team,
+      triggeredByUserId: user.github_id,
+    })
+    if (!created) return Response.json({ error: 'pr not found' }, { status: 404 })
+    // A new run is born here, not queued — it is created and dispatched, so
+    // `delivered` is always true.
+    return Response.json({ runId: created.runId, delivered: true }, { status: 202 })
+  }
 
   const res = await prCoordinator(env, repo, prNumber).fetch('https://do/command', {
     method: 'POST',

@@ -20,9 +20,13 @@
 //      {events:[{seq,payload}]} shape as the cloud ingest); envelopes go up
 //      the socket and into runs/<runId>.jsonl (debug trail + future R2
 //      artifact).
-//   5. On {kind:'command'}: append to runs/<runId>.commands.jsonl where the
-//      scenes command can consume it. (v0 — a richer hand-off to the CLI
-//      comes with the receiver-core integration.)
+//   5. On {kind:'command'}: run:stop kills the in-flight batch's process group
+//      (the exit handler settles the run 'cancelled'); any other command is
+//      appended to runs/<runId>.commands.jsonl as the escape hatch a custom
+//      scenes command can tail (pause/resume live there until the CLI honors
+//      them mid-run). Commands are PR-scoped — runId is optional bookkeeping,
+//      not the address. run:replay never arrives here: it is worker-side run
+//      creation (a new batch), not a box poke.
 //   6. Power off when the channel closes with "box retired".
 //
 // Zero dependencies: node >= 22 builtins only (global WebSocket included).
@@ -58,6 +62,8 @@ let ws = null
 let currentScenes = null // from the latest pipeline update
 const seqByRun = new Map()
 const runEndByRun = new Map() // runId -> run:end payload (settles the verdict)
+const childByRun = new Map() // runId -> the batch's child process (for run:stop)
+const stoppedRuns = new Set() // runIds run:stop killed → verdict is 'cancelled'
 
 // ---------- checkout + project setup -----------------------------------------
 
@@ -208,6 +214,9 @@ function runBatch(run, repoDir) {
   const child = spawn('bash', ['-c', command], {
     cwd: repoDir ?? WORK_DIR,
     stdio: 'inherit',
+    // Own process group, so run:stop can SIGTERM the whole tree (bash → scenes
+    // CLI → Playwright → browser) by signalling the group, not just bash.
+    detached: true,
     env: {
       ...process.env,
       SCENETEST_RUN_ID: run.runId,
@@ -221,12 +230,20 @@ function runBatch(run, repoDir) {
       SCENETEST_REPORT_URL: `${localIngest}/events/${run.runId}`,
     },
   })
+  childByRun.set(run.runId, child)
 
   child.on('exit', (code) => {
-    log(`batch ${run.runId} exited ${code}`)
+    childByRun.delete(run.runId)
+    const stopped = stoppedRuns.delete(run.runId)
     const end = runEndByRun.get(run.runId)
     runEndByRun.delete(run.runId)
-    if (code !== 0) {
+    log(`batch ${run.runId} exited ${code}${stopped ? ' (stopped)' : ''}`)
+    if (stopped) {
+      // run:stop killed it: the verdict is the human's cancellation, not the
+      // non-zero exit the kill produced. One completion path (here) so the
+      // /complete call always lands after the process is truly dead.
+      void completeRun(run.runId, 'cancelled')
+    } else if (code !== 0) {
       // Backstop: no batch is left dangling.
       void completeRun(run.runId, 'failed')
     } else if (end) {
@@ -237,6 +254,54 @@ function runBatch(run, repoDir) {
     // Exit 0 with no run:end: the command reported through the ingest /
     // /complete itself; leave it be.
   })
+}
+
+// run:stop — kill the in-flight batch's process group; the exit handler above
+// settles the run as 'cancelled'. Commands are PR-scoped (the PR is the address,
+// not the run — see docs/architecture.md), and a box runs one batch at a time,
+// so with no runId we stop the sole active batch. A run:stop that finds nothing
+// running posts 'cancelled' best-effort; /complete's `ended_at IS NULL` guard
+// makes that a no-op if the run already reached a verdict.
+function stopRun(runId) {
+  const targetId = runId ?? (childByRun.size === 1 ? [...childByRun.keys()][0] : null)
+  const child = targetId ? childByRun.get(targetId) : null
+  if (!child) {
+    log(`run:stop: no active batch${runId ? ` for ${runId}` : ''}`)
+    if (targetId) void completeRun(targetId, 'cancelled')
+    return
+  }
+  stoppedRuns.add(targetId)
+  log(`run:stop: killing batch ${targetId} (pgid ${child.pid})`)
+  try {
+    process.kill(-child.pid, 'SIGTERM')
+  } catch (err) {
+    log(`run:stop kill failed: ${err.message}`)
+  }
+  // Escalate if the group ignores SIGTERM. Unref'd so it never holds the agent
+  // open; cleared implicitly once the child exits and clears childByRun.
+  setTimeout(() => {
+    if (childByRun.has(targetId)) {
+      try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+    }
+  }, 5000).unref()
+}
+
+// A command arrived down the channel. run:stop acts on the box here; every other
+// command is appended to the run's commands file — the escape hatch a custom
+// scenes command can tail (pause/resume map onto it until the CLI honors them
+// mid-run). Run-agnostic commands with no box-side handler are just logged.
+function handleCommand(command, runId) {
+  if (!command || typeof command.type !== 'string') return
+  if (command.type === 'run:stop') {
+    stopRun(runId)
+    return
+  }
+  if (runId) {
+    appendFileSync(join(WORK_DIR, `${runId}.commands.jsonl`), JSON.stringify(command) + '\n')
+    log(`command for ${runId}: ${command.type}`)
+  } else {
+    log(`command (no run): ${command.type} — no box-side handler, ignored`)
+  }
 }
 
 // ---------- the channel -------------------------------------------------------
@@ -259,13 +324,8 @@ function connectChannel(repoDir, attempt = 0) {
     }
     if (msg.kind === 'dispatch' && msg.run?.runId) runBatch(msg.run, repoDir)
     else if (msg.kind === 'update') void applyUpdate(msg.update, repoDir)
-    else if (msg.kind === 'command' && msg.runId) {
-      appendFileSync(
-        join(WORK_DIR, `${msg.runId}.commands.jsonl`),
-        JSON.stringify(msg.command) + '\n',
-      )
-      log(`command for ${msg.runId}: ${msg.command?.type}`)
-    } else if (msg.kind === 'error') log('channel error message:', msg.message)
+    else if (msg.kind === 'command' && msg.command) handleCommand(msg.command, msg.runId)
+    else if (msg.kind === 'error') log('channel error message:', msg.message)
   })
 
   ws.addEventListener('close', (e) => {

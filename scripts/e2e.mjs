@@ -554,6 +554,48 @@ async function main() {
       const rows = d1Query(persistDir, "SELECT status FROM runs WHERE id = 'e2e-agent-run'")
       return rows[0].status === 'failed'
     }, 5000))
+
+  // --- run:stop kills the in-flight batch and cancels the run (box-side) -----
+  // Point the box at a long-running scenes command (report run:start, then
+  // sleep), dispatch a fresh run, wait until it's live, then post a PR-scoped
+  // run:stop — no runId, because the PR is the address, not the run. The agent
+  // SIGTERMs the batch's process group; its exit handler settles 'cancelled'.
+  console.log('· run:stop kills the batch (box-side)')
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-stop-run', 'demo/watched', 10, 'agbox1', 'manual', 'queued', 'e2e-box-2')")
+  const stopScenes = `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"sceneCount":1}}]}'; sleep 30`
+  await fetch(`${BASE}/api/debug/box-update`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      boxId: 'e2e-box-2', headSha: 'agbox1', vector: { setup: 'hash-setup-1' },
+      stages: [{ name: 'setup', run: 'touch stop-update.marker' }], scenes: stopScenes,
+    }),
+  })
+  check('run:stop test: scenes repointed at a long batch (update applied)',
+    await waitFor(() => existsSync(join(agentWork, 'stop-update.marker'))), agentLog)
+  await fetch(`${BASE}/api/debug/box-dispatch`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      boxId: 'e2e-box-2',
+      run: { runId: 'e2e-stop-run', boxId: 'e2e-box-2', repo: 'demo/watched', prNumber: 10, headSha: 'agbox1', subset: null },
+    }),
+  })
+  check('run:stop test: batch is running before the stop',
+    await waitFor(() => {
+      const r = d1Query(persistDir, "SELECT status FROM runs WHERE id = 'e2e-stop-run'")
+      return r[0].status === 'running'
+    }, 6000), agentLog)
+  const stopCmd = await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/10/commands`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ command: { type: 'run:stop' } }),
+  })
+  check('run:stop command → 202 accepted', stopCmd.status === 202)
+  check('run:stop killed the batch and cancelled the run',
+    await waitFor(() => {
+      const r = d1Query(persistDir, "SELECT status, ended_at FROM runs WHERE id = 'e2e-stop-run'")
+      return r[0].status === 'cancelled' && r[0].ended_at != null
+    }, 8000), agentLog)
+
   agent.kill('SIGTERM')
 
   // A failed pipeline stage retires the box (its runs cancel; reaper would
@@ -665,6 +707,44 @@ async function main() {
   check('failed-stage box destroyed and its run cancelled',
     failedBox[0].status === 'destroyed' && failedBox[0].run_status === 'cancelled',
     JSON.stringify(failedBox[0]))
+
+  // --- run:replay is worker-side run creation, not a box poke ----------------
+  // A PR-scoped run:replay starts a NEW run against the PR's warm box (the same
+  // createRun path as a manual re-run), so it never touches the command queue.
+  // demo/repo#1 has a live stub box from the latest-wins section above.
+  console.log('· run:replay creates a new run (worker-side)')
+  const replayCmd = await fetch(`${BASE}/api/cloud/repos/demo/repo/pr/1/commands`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ command: { type: 'run:replay' } }),
+  })
+  const replayBody = await j(replayCmd)
+  check('run:replay → 202 with a freshly-created runId',
+    replayCmd.status === 202 && typeof replayBody.runId === 'string' && replayBody.delivered === true,
+    JSON.stringify(replayBody))
+  check('run:replay created a new run (manual trigger, all scenes)',
+    await waitFor(() => {
+      const r = d1Query(persistDir, `SELECT trigger, subset_json FROM runs WHERE id = '${replayBody.runId}'`)
+      return r.length === 1 && r[0].trigger === 'manual' && r[0].subset_json == null
+    }), 'replay run not created')
+  check('run:replay run settled a verdict (full batch → failed)',
+    await waitFor(() => {
+      const r = d1Query(persistDir, `SELECT status FROM runs WHERE id = '${replayBody.runId}'`)
+      return r[0].status === 'failed'
+    }, 8000), 'replay run never settled')
+
+  // A file replay lands as the run's one-scene subset (the box receives it via
+  // SCENETEST_SUBSET). We assert the subset is recorded, not the stub's verdict
+  // (the stub keys on scene id, while `file` is a scene file).
+  const replayFile = await fetch(`${BASE}/api/cloud/repos/demo/repo/pr/1/commands`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ command: { type: 'run:replay', file: 'specs/login.scene.ts' } }),
+  })
+  const replayFileBody = await j(replayFile)
+  check('run:replay {file} recorded a one-scene subset',
+    await waitFor(() => {
+      const r = d1Query(persistDir, `SELECT subset_json FROM runs WHERE id = '${replayFileBody.runId}'`)
+      return r.length === 1 && r[0].subset_json === '["specs/login.scene.ts"]'
+    }), 'replay file subset not recorded')
 
   // --- R2 durable artifacts: log in the object → archive → serve from R2 ----
   // The event log lives in the PR object's SQLite. At end of run the object

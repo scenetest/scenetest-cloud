@@ -489,11 +489,26 @@ receiver core → `.jsonl` sink + in-process broadcast (SSE) → the dashboard
 at `/__scenetest`. Same events, same widget, same receiver, minus the
 Cloudflare hops.
 
-Commands flow the reverse path: viewer clicks "re-run as a different team" →
-transport adapter → worker → PR object's command queue → down the box's
-WebSocket → CLI executes → resulting events flow back up as above. Because
-the box is warm and actor changes sit below every build stage, that command
-is a batch of one execution, not a provisioning cycle.
+Commands flow the reverse path, and they are **PR-scoped** — the PR is the
+address, not any one run (a command carries no run id; the transport posts it to
+the PR). Where a command *acts* depends on the command:
+
+- `run:replay` ("re-run as a different team") is **worker-side run creation**,
+  not a box poke: the worker starts a NEW run against the PR's warm box through
+  the same `createRun` path as any other run (viewer → transport → worker →
+  `createRun` → dispatch). Because the box is warm and actor/team changes sit
+  below every build stage, that run is a batch of one execution, not a
+  provisioning cycle.
+- `run:stop` rides the command queue down the box's WebSocket; the agent kills
+  the in-flight batch's process group and reports the run `cancelled`.
+- `run:pause` / `run:resume` also ride the queue, but their mid-run semantics
+  depend on what the scenes CLI can honor; until it grows that, the agent files
+  them to a per-run commands file as the escape hatch a custom scenes command
+  can tail. Team selection in `run:replay` is the same upstream-blocked shape —
+  accepted but inert until the CLI accepts a team
+  (`scene_executions.params_json` is where it lands once it does).
+
+Resulting events flow back up as above.
 
 ## The home view
 
