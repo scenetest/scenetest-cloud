@@ -320,6 +320,17 @@ a docs-only push does nothing. When a push rebuilds the box, in-flight runs on t
 old state are cancelled immediately — latest wins; the only state worth a verdict
 is the one that might merge.
 
+**Reports** are stage outputs keyed the same way. A report (lines of code, lint
+findings, unit-test results, bundle size) lives in the `overview_*` tables under
+the hash of its declared inputs, so identical inputs share one report across runs
+and PRs, a cache-hit report already exists, and the PR view is just "report at
+base hash vs report at head hash." Report types are a pluggable registry: the
+pipeline file enables and parameterizes them, the box runs or collects each one
+and ships its raw output up the box channel, and the worker owns the parsers, so
+adding a type is one adapter, with no schema, agent, or protocol change.
+Scenetest's own scene and assertion results are the same kind of per-PR signal,
+read from the log's projections rather than re-derived.
+
 The pipeline definition (stage commands and watch globs) lives in the user's repo,
 because it must change atomically with the code it builds, and is hashed like any
 other input. The cloud UI gets only operational verbs (full reset, re-seed,

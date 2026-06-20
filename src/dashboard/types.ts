@@ -65,6 +65,56 @@ export interface RepoDetail {
   recent_runs: RecentRun[]
 }
 
+// Static-analysis reports for a PR (GET …/pr/:number/reports). Mirrors the
+// worker's ReportComparison (src/worker/reports.ts): one report per stage input
+// hash, paired base-vs-head. See architecture.md, "The build pipeline".
+export interface ReportIssue {
+  file?: string
+  line?: number
+  col?: number
+  severity?: string
+  message?: string
+  raw?: string
+}
+
+export interface MetricComparison {
+  stage: string
+  name: string
+  unit: string | null
+  base: number | null
+  head: number | null
+  delta: number | null
+}
+
+export interface SummaryComparison {
+  stage: string
+  kind: string
+  base: unknown | null
+  head: unknown | null
+}
+
+export interface IssuesComparison {
+  stage: string
+  kind: string
+  added: ReportIssue[]
+  resolved: ReportIssue[]
+  unchanged: number
+}
+
+export interface ReportComparison {
+  metrics: MetricComparison[]
+  summaries: SummaryComparison[]
+  issues: IssuesComparison[]
+  baseMissing: boolean
+}
+
+export interface PrReports {
+  available: boolean
+  head_sha?: string
+  base_sha?: string | null
+  comparison: ReportComparison
+}
+
 // Add-a-project wizard checklist (GET /api/admin/repos/:owner/:name/status).
 export interface RepoSetupStatus {
   registered: boolean
