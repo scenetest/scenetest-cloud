@@ -43,10 +43,16 @@ Background in [architecture.md](./architecture.md); setup steps in
    boundaries, not per event). The box no longer reports scene_executions
    itself; `POST /api/runs/:runId/complete` remains as the terminal-state
    backstop (a non-zero exit with no `run:end` event).
-6. The reaper (cron, every 10 minutes — `reapRunners()`) destroys droplets
-   whose box is retired and anything older than `RUNNER_MAX_AGE_MINUTES`
-   (default 30), marking them `destroyed` (or `lost` if the API call fails)
-   and cancelling any runs that never completed.
+6. An idle box is retired by the PR coordinator's Durable Object alarm
+   (`PrCoordinator.alarm`), reset on every activity signal and firing
+   `RUNNER_IDLE_TIMEOUT_MINUTES` (default 5) after the last one with the PR's
+   runs settled — it marks the box `destroyed` (an in-flight run re-arms
+   instead). The reaper (cron, every 10 minutes — `reapRunners()`) then
+   destroys the droplet of any retired box, and hard-kills anything older than
+   `RUNNER_MAX_AGE_MINUTES` (default 30) regardless of run state — the hung-box
+   backstop for boxes the alarm never retired (a crashed object, a run that
+   never settled). It marks droplets `destroyed` (or `lost` if the API call
+   fails) and cancels any runs that never completed.
 
 ## The image builds itself
 
@@ -128,7 +134,8 @@ watched repo. Public repos work without either.
 | `RUNNER_REGION`, `RUNNER_SIZE` | var | droplet parameters |
 | `RUNNER_IMAGE` | var | optional pin; normally unset (image self-builds) |
 | `PUBLIC_BASE_URL` | var | this deployment's origin, for `SCENETEST_INGEST_URL` |
-| `RUNNER_MAX_AGE_MINUTES` | var | hard kill cap, default 30 |
+| `RUNNER_IDLE_TIMEOUT_MINUTES` | var | idle teardown window, default 5 |
+| `RUNNER_MAX_AGE_MINUTES` | var | hung-box backstop hard cap, default 30 |
 | `DO_API_TOKEN` | secret | droplet read/write + snapshot scope |
 
 The stub provider (`runner/stub.ts`) fabricates a plausible run in-worker

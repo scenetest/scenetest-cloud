@@ -95,10 +95,12 @@ The default `RUNNER_PROVIDER = "stub"` needs nothing. To run real boxes:
    when it's ready). See "The image builds itself" in
    [runner-provisioning.md](./runner-provisioning.md). `RUNNER_IMAGE`
    exists only to pin a snapshot manually.
-4. The cron trigger (every 10 minutes, already in wrangler.toml) advances
-   image builds, provisions boxes that waited on them, and reaps finished
-   and over-age droplets; `RUNNER_MAX_AGE_MINUTES` (default 30) is the
-   hard cap.
+4. Idle boxes are retired by the PR coordinator's Durable Object alarm
+   `RUNNER_IDLE_TIMEOUT_MINUTES` (default 5) after their runs settle; the cron
+   trigger (every 10 minutes, already in wrangler.toml) then destroys the
+   droplet, alongside advancing image builds and provisioning boxes that waited
+   on them. `RUNNER_MAX_AGE_MINUTES` (default 30) is now only the hung-box
+   backstop — a hard cap for boxes the idle alarm never retired.
 
 ## Deploy
 
