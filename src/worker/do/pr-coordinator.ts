@@ -2,6 +2,8 @@ import type { Env } from '../env.ts'
 import type { RunEvent } from '../db.ts'
 import type { HomeTile } from './home-coordinator.ts'
 import { artifactKey, readArtifactLog } from '../artifacts.ts'
+import type { ReportItem } from '../reports.ts'
+import { ingestReports } from '../reports-ingest.ts'
 
 // One Durable Object per PR: the coordination point between the PR's box and
 // the rest of the system. It terminates the box's single outbound WebSocket
@@ -31,6 +33,10 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   box → cloud: { kind: 'events', runId, events: [{ seq, payload }] }
 //     — same shape as the HTTP ingest body plus runId; payloads stay opaque
 //       (envelope-grade checks only, so newer event types relay through).
+//   box → cloud: { kind: 'report', stage, inputHash, reports: [ReportItem] }
+//     — static-analysis stage output (#25), NOT a run event: stage-scoped, no
+//       runId, keyed by the stage's content hash. The coordinator upserts the
+//       overview_* tables (global, deduped by hash). See src/worker/reports.ts.
 //   cloud → box: { kind: 'command', runId?, command } (a protocol Command;
 //                  runId present only when the command targets a run)
 //                { kind: 'dispatch', run }              (a RunSpec batch)
@@ -64,11 +70,19 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   POST /retire                           — { boxId } → close sockets, drop queue
 //   POST /idle-check                       — run the idle-alarm logic now (test hook)
 //   POST /ingest/:runId                    — { events } → ingestAndFanout
+//   POST /report-ingest                    — { stage, inputHash, reports } → overview_*
 
 interface EventsEnvelope {
   kind: 'events'
   runId: string
   events: RunEvent[]
+}
+
+interface ReportEnvelope {
+  kind: 'report'
+  stage: string
+  inputHash: string
+  reports: ReportItem[]
 }
 
 // A stored log row, as returned by the ingest RETURNING clause: `id` is the
@@ -286,6 +300,15 @@ export class PrCoordinator implements DurableObject {
       return Response.json({ ok: true, count: valid.length })
     }
 
+    if (url.pathname === '/report-ingest' && req.method === 'POST') {
+      const body = (await req.json()) as Partial<ReportEnvelope>
+      if (typeof body.stage !== 'string' || typeof body.inputHash !== 'string') {
+        return new Response('stage and inputHash required', { status: 400 })
+      }
+      const count = await ingestReports(this.env, body.stage, body.inputHash, body.reports ?? [])
+      return Response.json({ ok: true, count })
+    }
+
     return new Response('Not Found', { status: 404 })
   }
 
@@ -296,6 +319,19 @@ export class PrCoordinator implements DurableObject {
       parsed = JSON.parse(message)
     } catch {
       ws.send(JSON.stringify({ kind: 'error', message: 'not json' }))
+      return
+    }
+    const kind = (parsed as { kind?: unknown }).kind
+    if (kind === 'report') {
+      // Static-analysis stage output (#25): stage-scoped, no runId, keyed by the
+      // stage's content hash. Upsert the global overview_* tables and ack.
+      const r = parsed as Partial<ReportEnvelope>
+      if (typeof r.stage !== 'string' || typeof r.inputHash !== 'string') {
+        ws.send(JSON.stringify({ kind: 'error', message: 'bad report envelope' }))
+        return
+      }
+      const count = await ingestReports(this.env, r.stage, r.inputHash, r.reports ?? [])
+      ws.send(JSON.stringify({ kind: 'report-ack', stage: r.stage, count }))
       return
     }
     const envelope = parsed as Partial<EventsEnvelope>

@@ -24,7 +24,7 @@ import {
   listUsers,
 } from './routes/admin.ts'
 import { withSession } from './auth/session.ts'
-import { getOverview, getRepoPrs } from './routes/cloud.ts'
+import { getOverview, getRepoPrs, getPrReports } from './routes/cloud.ts'
 
 // Auth is declared per route: withSession() for cookie-authed routes (json
 // 401 or login redirect on failure); everything else is either public by
@@ -47,6 +47,10 @@ const router = new Router()
   // Cloud dashboard data
   .get('/api/cloud/overview', withSession(getOverview))
   .get('/api/cloud/repos/:owner/:name', withSession(getRepoPrs))
+  // Static-analysis reports for a PR: base-vs-head comparison, keyed by stage
+  // input hash (#25). Registered before the :number/ws and command routes; all
+  // are distinct paths so order is cosmetic.
+  .get('/api/cloud/repos/:owner/:name/pr/:number/reports', withSession(getPrReports))
   // PR-anchored viewer stream: the whole PR's events over one WebSocket — the
   // only viewer. The PR is the unit; there is no run-scoped page or stream.
   .get('/api/cloud/repos/:owner/:name/pr/:number/ws', prDashboardWs)

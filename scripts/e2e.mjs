@@ -457,6 +457,62 @@ async function main() {
   check('PR stream sinceId resumes past the cursor',
     prResume.ids.every((v) => v > lastId), JSON.stringify(prResume.ids))
 
+  // --- reports-as-stages: stage report → overview tables → PR comparison ----
+  // #25: a build stage emits static-analysis reports tagged with its input
+  // hash; the agent relays them up the box channel as {kind:'report'}; the
+  // coordinator upserts the global overview_* tables, keyed by (stage,hash) —
+  // independent of run, so we can drive them over this already-open channel.
+  // The PR comparison resolves "report at base hash vs head hash" from the
+  // run's stored vectors. Seed a PR + run whose head/base vectors name the two
+  // hashes we report at.
+  console.log('· reports-as-stages (overview comparison)')
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 14, 'rephead', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO runs (id, repo, pr_number, head_sha, base_sha, trigger, status, head_vector_json, base_vector_json)
+     VALUES ('e2e-rep-run', 'demo/watched', 14, 'rephead', 'repbase', 'manual', 'passed',
+             '{"build":"rephead"}', '{"build":"repbase"}')`)
+
+  const report = (inputHash, reports) =>
+    box.send(JSON.stringify({ kind: 'report', stage: 'build', inputHash, reports }))
+  // head: bundle grew, no-console fixed, no-debugger introduced.
+  report('rephead', [
+    { type: 'metric', name: 'bundle.raw', value: 1200, unit: 'bytes' },
+    { type: 'summary', kind: 'lint', summary: { errors: 0, warnings: 2 } },
+    { type: 'issues', kind: 'lint', issues: [
+      { file: 'c.ts', line: 9, message: 'no-debugger' },
+      { file: 'a.ts', line: 1, message: 'no-unused' },
+    ] },
+  ])
+  // base: smaller bundle, had no-console, shared no-unused.
+  report('repbase', [
+    { type: 'metric', name: 'bundle.raw', value: 1000, unit: 'bytes' },
+    { type: 'summary', kind: 'lint', summary: { errors: 1, warnings: 2 } },
+    { type: 'issues', kind: 'lint', issues: [
+      { file: 'b.ts', line: 5, message: 'no-console' },
+      { file: 'a.ts', line: 1, message: 'no-unused' },
+    ] },
+  ])
+  check('coordinator acked the report batches',
+    (await waitInbox((m) => m.kind === 'report-ack' && m.stage === 'build')) !== null, JSON.stringify(inbox))
+  check('reports upserted into overview_metrics keyed by stage hash', await waitFor(() => {
+    const r = d1Query(persistDir,
+      "SELECT COUNT(*) AS n FROM overview_metrics WHERE stage = 'build' AND name = 'bundle.raw'")
+    return r[0].n === 2
+  }), 'overview_metrics never written')
+
+  const reportsResp = await j(await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/14/reports`, { headers: { cookie } }))
+  const bundle = reportsResp.comparison?.metrics?.find((m) => m.name === 'bundle.raw')
+  check('PR comparison pairs base vs head bundle size with a delta',
+    reportsResp.available === true && bundle?.base === 1000 && bundle?.head === 1200 && bundle?.delta === 200,
+    JSON.stringify(reportsResp.comparison?.metrics))
+  const lint = reportsResp.comparison?.issues?.find((i) => i.stage === 'build' && i.kind === 'lint')
+  check('PR comparison diffs issues into added / resolved / unchanged',
+    lint?.added?.some((i) => i.message === 'no-debugger') &&
+      lint?.resolved?.some((i) => i.message === 'no-console') &&
+      lint?.unchanged === 1,
+    JSON.stringify(lint))
+
   box.close()
 
   // --- the real box agent, spawned in test mode -----------------------------

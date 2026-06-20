@@ -5,6 +5,7 @@ import '@scenetest/dashboard/style.css'
 import { useRepo } from '../hooks/useRepo.ts'
 import { paths } from '../lib/paths.ts'
 import { createCloudPrTransport } from '../lib/cloudTransport.ts'
+import { PrReports } from './PrReports.tsx'
 
 interface Props {
   owner: string
@@ -43,6 +44,9 @@ export function PrDetail({ owner, name, number }: Props) {
       <p class='font-serif text-lg text-muted mt-0 mb-8'>
         #{prNumber}{pr ? ` · ${pr.base_ref}` : ''}
       </p>
+      {/* Static-analysis comparison (#25), painted by cloud code in the docs
+          aesthetic — above the embedded terminal run pane. */}
+      <PrReports owner={owner} name={name} prNumber={prNumber} />
       <div class='card overflow-hidden'>
         {/* basePath is the router mount the tab anchors point under (deep-linkable
             tabs); apiBase bases the Runner's server fetches on cloud's API, which

@@ -1,4 +1,11 @@
 import type { AuthedHandler } from '../auth/session.ts'
+import {
+  buildReportComparison,
+  reportHashes,
+  type MetricRow,
+  type SummaryRow,
+  type IssueRow,
+} from '../reports.ts'
 
 export const getOverview: AuthedHandler = async (_req, env) => {
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
@@ -143,4 +150,80 @@ export const getRepoPrs: AuthedHandler = async (_req, env, _ctx, params) => {
     open_prs: openPrsResult.results ?? [],
     recent_runs: recentRunsResult.results ?? [],
   })
+}
+
+// GET /api/cloud/repos/:owner/:name/pr/:number/reports — the PR's
+// static-analysis comparison (#25): "report at base hash vs report at head
+// hash", per stage. The PR's most recent run carries the head/base stage
+// vectors (computeStagePlan output, stored at run creation); the overview_*
+// tables hold one report per (stage, input_hash), shared across runs and PRs.
+// We resolve the run's vectors, fetch every overview row at the hashes they
+// name, and pair them in buildReportComparison. `available:false` when the PR
+// has no run with a vector yet.
+export const getPrReports: AuthedHandler = async (_req, env, _ctx, params) => {
+  const repo = `${params.owner}/${params.name}`
+  const prNumber = Number(params.number)
+  if (!Number.isFinite(prNumber)) return Response.json({ error: 'bad pr number' }, { status: 400 })
+
+  const run = await env.DB.prepare(
+    `SELECT id, head_sha, base_sha, head_vector_json, base_vector_json
+       FROM runs
+      WHERE repo = ?1 AND pr_number = ?2 AND head_vector_json IS NOT NULL
+      ORDER BY rowid DESC LIMIT 1`,
+  )
+    .bind(repo, prNumber)
+    .first<{ id: string; head_sha: string; base_sha: string | null; head_vector_json: string; base_vector_json: string | null }>()
+
+  if (!run) {
+    return Response.json({
+      available: false,
+      comparison: { metrics: [], summaries: [], issues: [], baseMissing: true },
+    })
+  }
+
+  let headVector: Record<string, string>
+  let baseVector: Record<string, string> | null
+  try {
+    headVector = JSON.parse(run.head_vector_json) as Record<string, string>
+    baseVector = run.base_vector_json ? (JSON.parse(run.base_vector_json) as Record<string, string>) : null
+  } catch {
+    return Response.json({
+      available: false,
+      comparison: { metrics: [], summaries: [], issues: [], baseMissing: true },
+    })
+  }
+
+  const hashes = [...new Set(reportHashes(headVector, baseVector).map((h) => h.hash))]
+  if (hashes.length === 0) {
+    return Response.json({
+      available: true,
+      head_sha: run.head_sha,
+      base_sha: run.base_sha,
+      comparison: buildReportComparison(headVector, baseVector, { metrics: [], summaries: [], issues: [] }),
+    })
+  }
+
+  // Fetch every overview row at the referenced hashes; the builder keys by
+  // (stage, hash), so an input_hash IN (…) filter is enough.
+  const placeholders = hashes.map((_, i) => `?${i + 1}`).join(', ')
+  const [metrics, summaries, issues] = await Promise.all([
+    env.DB.prepare(
+      `SELECT stage, input_hash, name, value, unit FROM overview_metrics WHERE input_hash IN (${placeholders})`,
+    ).bind(...hashes).all<MetricRow>(),
+    env.DB.prepare(
+      `SELECT stage, input_hash, kind, summary_json FROM overview_summaries WHERE input_hash IN (${placeholders})`,
+    ).bind(...hashes).all<SummaryRow>(),
+    env.DB.prepare(
+      `SELECT stage, input_hash, kind, fingerprint, file, line, col, severity, message, raw
+         FROM overview_issues WHERE input_hash IN (${placeholders})`,
+    ).bind(...hashes).all<IssueRow>(),
+  ])
+
+  const comparison = buildReportComparison(headVector, baseVector, {
+    metrics: metrics.results ?? [],
+    summaries: summaries.results ?? [],
+    issues: issues.results ?? [],
+  })
+
+  return Response.json({ available: true, head_sha: run.head_sha, base_sha: run.base_sha, comparison })
 }

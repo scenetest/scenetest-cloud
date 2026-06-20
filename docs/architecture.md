@@ -381,9 +381,29 @@ the cancellation.
 
 Static-analysis reports — lint and typecheck deltas, bundle sizes,
 dependency changes — are stage outputs keyed the same way, stored in the
-overview tables. The PR comparison view is "report at base hash vs report
-at head hash," and identical inputs share one report across runs and across
-PRs.
+overview tables. As of migration 0008 those tables (`overview_metrics`,
+`overview_summaries`, `overview_issues`) are keyed by `(stage, input_hash)`,
+not by run: a report is content-addressed exactly like the artifact it ships
+beside. The PR comparison view is "report at base hash vs report at head
+hash," and identical inputs share one report across runs and across PRs — a
+cache-hit (skipped) stage's report already exists for that hash, so dedupe
+falls out for free.
+
+Transport (#25) is our own orchestrator end to end, no protocol-package
+involvement: a static-analysis stage's command emits report items to
+`SCENETEST_REPORT_URL` (the box agent's local `/reports/:stage` ingest); the
+agent tags them with the ambient stage's input hash — which it owns, from the
+update vector it is executing, so a stage can't spoof a hash — and relays them
+up its existing box channel as `{kind:'report', stage, inputHash, reports}`.
+The PR coordinator upserts the overview tables from that envelope: a global,
+content-addressed projection, like `stage_cache.report_json` — not a per-run
+log event, carrying no `run_id`. The base-side hashes the comparison needs
+come from `computeStagePlan` run against the PR's base sha at run creation;
+both the head and base stage vectors are stored on the `runs` row
+(`head_vector_json` / `base_vector_json`) so the read path resolves the two
+hashes without re-hitting GitHub. A PR-comment bot, like the original
+motivation screenshots, can come later as a second consumer of the same
+tables.
 
 The pipeline definition (stage commands and watch globs) lives in the
 user's repo, in their scenetest folder, because it must change atomically

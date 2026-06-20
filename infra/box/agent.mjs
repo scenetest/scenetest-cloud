@@ -56,6 +56,7 @@ const log = (...args) => console.log(new Date().toISOString(), ...args)
 
 let ws = null
 let currentScenes = null // from the latest pipeline update
+let currentVector = {} // stage -> input_hash, from the latest pipeline update (#25)
 const seqByRun = new Map()
 const runEndByRun = new Map() // runId -> run:end payload (settles the verdict)
 
@@ -94,6 +95,7 @@ function checkoutSha(repoDir, sha) {
 async function applyUpdate(update, repoDir) {
   const { headSha, vector, stages, scenes } = update ?? {}
   if (typeof scenes === 'string') currentScenes = scenes
+  if (vector && typeof vector === 'object') currentVector = vector
   if (!Array.isArray(stages)) return
   log(`update: ${stages.length} stage(s) at ${headSha}`)
   let current = 'checkout'
@@ -105,7 +107,20 @@ async function applyUpdate(update, repoDir) {
       current = stage.name
       if (!stage.run) continue
       log(`stage ${stage.name}: ${stage.run}`)
-      execFileSync('bash', ['-c', stage.run], { cwd: repoDir ?? WORK_DIR, stdio: 'inherit' })
+      // The stage owns whether it emits reports (#25): static-analysis stages
+      // (lint/typecheck/bundle) POST report items to SCENETEST_REPORT_URL, the
+      // agent's local /reports ingest, which tags them with the ambient stage
+      // and its input hash (currentVector) and relays them upstream.
+      execFileSync('bash', ['-c', stage.run], {
+        cwd: repoDir ?? WORK_DIR,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          SCENETEST_STAGE: stage.name,
+          SCENETEST_STAGE_HASH: (vector ?? {})[stage.name] ?? '',
+          SCENETEST_REPORT_URL: `http://127.0.0.1:${LOCAL_PORT}/reports/${encodeURIComponent(stage.name)}`,
+        },
+      })
     }
     await fetch(`${INGEST_URL}/api/boxes/${BOX_ID}/ready`, {
       method: 'POST',
@@ -152,27 +167,58 @@ function relayEvents(runId, events) {
   return false
 }
 
+// Relay a stage's report batch upstream (#25). Stage-scoped, not run-scoped:
+// keyed by the stage's input hash (the agent owns the vector, so the stage
+// can't spoof a hash). The coordinator upserts the overview_* tables. Falls
+// back to the env hash if the stage isn't in the latest update's vector.
+function relayReport(stage, reports, hashHint) {
+  const inputHash = currentVector[stage] ?? hashHint ?? ''
+  appendFileSync(join(WORK_DIR, `reports.jsonl`), JSON.stringify({ stage, inputHash, reports }) + '\n')
+  if (ws?.readyState === WebSocket.OPEN && inputHash) {
+    ws.send(JSON.stringify({ kind: 'report', stage, inputHash, reports }))
+    return true
+  }
+  return false
+}
+
 // Local ingest: same body shape as the cloud's POST /api/events/:runId, so
 // the scenes CLI on this box reports as if to the dev middleware. Events the
 // caller didn't number get box-assigned sequence numbers.
 function startLocalIngest() {
   const server = createServer((req, res) => {
-    const m = /^\/events\/([^/]+)$/.exec(req.url ?? '')
-    if (req.method !== 'POST' || !m) {
+    const eventsMatch = /^\/events\/([^/]+)$/.exec(req.url ?? '')
+    const reportsMatch = /^\/reports\/([^/]+)$/.exec(req.url ?? '')
+    if (req.method !== 'POST' || (!eventsMatch && !reportsMatch)) {
       res.writeHead(404).end()
       return
     }
-    const runId = decodeURIComponent(m[1])
     let body = ''
     req.on('data', (c) => { body += c })
     req.on('end', () => {
-      let events
+      let parsed
       try {
-        events = JSON.parse(body).events
+        parsed = JSON.parse(body)
       } catch {
         res.writeHead(400).end('bad json')
         return
       }
+      // Static-analysis report batch from a build stage (#25): POST /reports/:stage
+      // with { reports: ReportItem[] }. The agent tags it with the stage's input
+      // hash from the latest update vector and relays it upstream.
+      if (reportsMatch) {
+        const stage = decodeURIComponent(reportsMatch[1])
+        const reports = parsed.reports
+        if (!Array.isArray(reports) || reports.length === 0) {
+          res.writeHead(400).end('no reports')
+          return
+        }
+        const sent = relayReport(stage, reports, parsed.inputHash)
+        res.writeHead(202, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, relayed: sent, count: reports.length }))
+        return
+      }
+      const runId = decodeURIComponent(eventsMatch[1])
+      const events = parsed.events
       if (!Array.isArray(events) || events.length === 0) {
         res.writeHead(400).end('no events')
         return

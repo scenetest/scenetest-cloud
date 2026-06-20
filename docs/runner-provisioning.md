@@ -99,6 +99,16 @@ vector through `/api/boxes/:boxId/ready` (a failed stage retires the box).
 Repos without a pipeline file get the coarse default, which runs
 `scenetest/box-setup.sh` if present — the legacy hook keeps working.
 
+Each stage runs with `SCENETEST_STAGE`, `SCENETEST_STAGE_HASH` (its input
+hash, from the update vector), and `SCENETEST_REPORT_URL` pointing at the
+agent's local `/reports/:stage` ingest. A static-analysis stage (lint,
+typecheck, bundle metrics) POSTs `{reports:[…]}` there; the agent tags the
+batch with the stage's input hash — which it owns, so a stage can't forge a
+hash — and relays it upstream as `{kind:'report', stage, inputHash, reports}`.
+The coordinator upserts the `overview_*` tables, keyed by `(stage, input_hash)`
+so identical inputs share one report across runs and PRs (#25). See
+architecture.md, "The build pipeline".
+
 Scene batches run the pipeline file's top-level `scenes` command (default:
 the legacy `bash scenetest/box-run.sh` hook), delivered to the agent with
 every update. It receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET` (advisory;
