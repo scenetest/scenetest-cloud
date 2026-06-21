@@ -58,6 +58,42 @@ describe('lint adapter (eslint -f json shape)', () => {
     })
   })
 
+  it('parses real oxlint --format=json output (miette diagnostics)', () => {
+    // Captured verbatim from `oxlint --format=json` (v1.x): a top-level object
+    // with a `diagnostics` array; line/column live in labels[].span, the rule
+    // in `code`, severity as a string.
+    const oxlint = JSON.stringify({
+      diagnostics: [
+        {
+          message: '`debugger` statement is not allowed',
+          code: 'eslint(no-debugger)',
+          severity: 'warning',
+          filename: '/box/repo/bad.ts',
+          labels: [{ span: { offset: 26, length: 8, line: 2, column: 3 } }],
+        },
+        {
+          message: "Variable 'y' is declared but never used.",
+          code: 'eslint(no-unused-vars)',
+          severity: 'error',
+          filename: '/box/repo/bad.ts',
+          labels: [{ label: "'y' is declared here", span: { offset: 61, length: 1, line: 4, column: 7 } }],
+        },
+      ],
+      number_of_files: 1,
+      number_of_rules: 95,
+    })
+    const items = parseReport('lint', oxlint, { root: '/box/repo' })
+    const issues = items.find((i) => i.type === 'issues')!
+    expect(issues).toMatchObject({
+      kind: 'lint',
+      issues: [
+        { file: 'bad.ts', line: 2, col: 3, severity: 'warning', message: '`debugger` statement is not allowed', raw: 'eslint(no-debugger)' },
+        { file: 'bad.ts', line: 4, col: 7, severity: 'error', message: "Variable 'y' is declared but never used.", raw: 'eslint(no-unused-vars)' },
+      ],
+    })
+    expect(items).toContainEqual({ type: 'summary', kind: 'lint', summary: { errors: 1, warnings: 1 } })
+  })
+
   it('records an error summary on unparseable output rather than throwing', () => {
     const items = parseReport('lint', 'not json at all', {})
     expect(items).toEqual([{ type: 'summary', kind: 'lint', summary: { error: 'unparseable report output' } }])

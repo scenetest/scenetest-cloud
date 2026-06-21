@@ -102,7 +102,7 @@ an unrelated PR never recomputes it.
 | `name` | yes | `[a-z0-9_-]`, max 32, unique among reports |
 | `type` | yes | `loc` or `lint` (the worker-side parser to apply) |
 | `watch` | yes | globs whose content keys the report (same glob rules as stages) |
-| `run` | for `lint` | command emitting machine-readable output (ESLint `-f json`, or any oxlint-compatible flat-JSON linter) on stdout |
+| `run` | for `lint` | command emitting JSON on stdout — ESLint `-f json` or oxlint `--format=json` (auto-detected) |
 | `exclude` | no | (`loc`) paths matched by `watch` but not counted |
 | `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter version in the lockfile) re-runs the report, not just a source change |
 
@@ -110,8 +110,9 @@ How it works: the box runs/collects each report after the build is ready and
 ships the raw output up; scenetest-cloud owns the parser for each `type`, so
 you don't normalize anything yourself. A malformed report entry is dropped and
 ignored — it never disables stage caching or blocks a run. Today's types are
-`loc` (built in — no tool needed) and `lint` (ESLint-format JSON); more
-(formatter, unit tests, bundle size) are landing behind the same shape.
+`loc` (built in — no tool needed) and `lint` (ESLint `-f json` or oxlint
+`--format=json`, auto-detected); more (formatter, unit tests, bundle size) are
+landing behind the same shape.
 
 Glob rules (deliberately minimal): `**` crosses directories, `*` stays
 within one path segment, everything else is literal. `supabase/**` matches
