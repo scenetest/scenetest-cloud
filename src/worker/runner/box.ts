@@ -101,9 +101,30 @@ async function queueUpdate(env: Env, pr: PrRef, plan: StagePlan, fromStage: numb
       headSha: pr.headSha,
       vector: plan.vector,
       stages: plan.stages.slice(fromStage),
+      // Only reports whose content hash isn't already in the overview tables —
+      // an unchanged (or cross-PR-shared) report is a cache hit, so the box
+      // skips it and the existing row stands (#25).
+      reports: await uncachedReports(env, plan.reportItems),
       scenes: plan.scenes,
     }),
   })
+}
+
+// Filter a plan's reports to the cache misses. A report's presence marker is any
+// overview_summaries row at its (name, input_hash) — every adapter writes one,
+// even for an empty/clean report — so a hit means the report already ran for
+// this content, here or on another PR.
+async function uncachedReports(env: Env, items: StagePlan['reportItems']): Promise<StagePlan['reportItems']> {
+  if (items.length === 0) return []
+  const hashes = [...new Set(items.map((i) => i.inputHash))]
+  const placeholders = hashes.map((_, i) => `?${i + 1}`).join(', ')
+  const rows = await env.DB.prepare(
+    `SELECT stage, input_hash FROM overview_summaries WHERE input_hash IN (${placeholders})`,
+  )
+    .bind(...hashes)
+    .all<{ stage: string; input_hash: string }>()
+  const present = new Set((rows.results ?? []).map((r) => `${r.stage} ${r.input_hash}`))
+  return items.filter((i) => !present.has(`${i.name} ${i.inputHash}`))
 }
 
 async function provisionBox(env: Env, ctx: ExecutionContext, pr: PrRef): Promise<BoxRow> {

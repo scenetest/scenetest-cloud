@@ -59,10 +59,12 @@ CREATE TABLE overview_issues (
 );
 CREATE INDEX overview_issues_hash_idx ON overview_issues(stage, input_hash);
 
--- The desired stage vectors (stage → input_hash) for this run's head and base
--- shas, computed at run creation by computeStagePlan. The head vector is what
--- the box realizes and tags its reports with; the base vector resolves the
--- "report at base hash" side of the comparison without re-hitting GitHub on
--- every page load. NULL on the coarse-fallback path or when base is unknown.
+-- The desired report vectors (report name → input_hash) for this run's head and
+-- base shas, computed at run creation by computeStagePlan. The head vector names
+-- the hashes the box tags its reports with; the base vector resolves the "report
+-- at base hash" side of the comparison without re-hitting GitHub on every page
+-- load. NULL/empty on the coarse-fallback path or when base is unknown. (Named
+-- *_vector_json rather than *_reports_json so the column survives if the keyed
+-- thing is ever generalized.)
 ALTER TABLE runs ADD COLUMN head_vector_json TEXT;
 ALTER TABLE runs ADD COLUMN base_vector_json TEXT;

@@ -30,9 +30,9 @@
 // SCENETEST_NO_POWEROFF=1 logs instead of powering off.
 
 import { spawn, execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 const env = (k, fallback) => {
   const v = process.env[k] ?? fallback
@@ -128,6 +128,12 @@ async function applyUpdate(update, repoDir) {
       body: JSON.stringify({ ok: true, realized: vector ?? null, head_sha: headSha ?? null }),
     })
     log('update complete; reported ready')
+    // Static-analysis reports (#25) run after the box is ready — best-effort, so
+    // a report failure never blocks runs. Each ships its raw output up; the
+    // worker parses it. Only cache-miss reports are sent (the worker filtered).
+    if (Array.isArray(update?.reports)) {
+      for (const r of update.reports) await runReport(r, repoDir ?? WORK_DIR)
+    }
   } catch (err) {
     log(`update failed at stage '${current}': ${err.message}`)
     await fetch(`${INGEST_URL}/api/boxes/${BOX_ID}/ready`, {
@@ -179,6 +185,100 @@ function relayReport(stage, reports, hashHint) {
     return true
   }
   return false
+}
+
+// Ship a report's raw output up the channel (#25). The worker parses it with
+// the type's adapter — the box stays format-agnostic. `root` lets the worker
+// relativize file paths so an issue's identity is stable across base/head.
+function relayReportRaw(name, type, inputHash, raw, root, tool, exitCode) {
+  appendFileSync(join(WORK_DIR, `reports.jsonl`), JSON.stringify({ name, type, inputHash, exitCode }) + '\n')
+  if (ws?.readyState === WebSocket.OPEN && inputHash) {
+    ws.send(JSON.stringify({ kind: 'report-raw', name, type, inputHash, raw, root, tool, exitCode }))
+    return true
+  }
+  return false
+}
+
+// Run one report from the update's plan. Builtin `loc` is pure IO (walk +
+// count); tool reports run their command and capture stdout. Either way the
+// agent only collects raw output and relays it — the worker owns parsing.
+function runReport(item, cwd) {
+  if (!item || typeof item.name !== 'string' || typeof item.inputHash !== 'string') return
+  try {
+    if (item.type === 'loc') {
+      const raw = JSON.stringify(collectLoc(cwd, item.watch ?? [], item.exclude ?? []))
+      relayReportRaw(item.name, 'loc', item.inputHash, raw, cwd, undefined, 0)
+      return
+    }
+    if (typeof item.run !== 'string') return
+    let raw = ''
+    let exitCode = 0
+    try {
+      raw = execFileSync('bash', ['-c', item.run], { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    } catch (err) {
+      // Linters exit non-zero when they find problems — that's not a failure,
+      // the findings are on stdout. Capture them and pass the code along.
+      raw = err.stdout ? err.stdout.toString() : ''
+      exitCode = typeof err.status === 'number' ? err.status : 1
+    }
+    relayReportRaw(item.name, item.type, item.inputHash, raw, cwd, item.tool, exitCode)
+  } catch (err) {
+    log(`report ${item.name} failed: ${err.message}`)
+  }
+}
+
+// Minimal glob match, mirroring the worker's globToRegExp: '**' crosses
+// directories, '*' stays in a segment. Kept tiny and dependency-free.
+function globToRe(glob) {
+  let out = '^'
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        out += '.*'
+        i++
+        if (glob[i + 1] === '/') i++
+        if (glob[i] === '/') out += '/?'
+      } else out += '[^/]*'
+    } else if ('\\^$.|?+()[]{}'.includes(c)) out += '\\' + c
+    else out += c
+  }
+  return new RegExp(out + '$')
+}
+
+// Walk `cwd`, count lines of every file matching a `watch` glob and no `exclude`
+// glob. Skips the usual heavy dirs so a repo's node_modules never gets counted.
+function collectLoc(cwd, watch, exclude) {
+  const inc = watch.map(globToRe)
+  const exc = exclude.map(globToRe)
+  const files = []
+  const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage'])
+  const walk = (dir) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (e.name.startsWith('.') && e.name !== '.') {
+        if (skip.has(e.name)) continue
+      }
+      const abs = join(dir, e.name)
+      if (e.isDirectory()) {
+        if (skip.has(e.name)) continue
+        walk(abs)
+        continue
+      }
+      if (!e.isFile()) continue
+      const rel = relative(cwd, abs)
+      if (!inc.some((g) => g.test(rel))) continue
+      if (exc.some((g) => g.test(rel))) continue
+      try {
+        const text = readFileSync(abs, 'utf8')
+        const lines = text.length === 0 ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
+        files.push({ path: rel, lines })
+      } catch { /* unreadable/binary — skip */ }
+    }
+  }
+  walk(cwd)
+  return { files }
 }
 
 // Local ingest: same body shape as the cloud's POST /api/events/:runId, so

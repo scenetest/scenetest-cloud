@@ -29,6 +29,12 @@ export interface PipelineStage {
 export interface PipelineConfig {
   version: 1
   stages: PipelineStage[]
+  // Static-analysis reports (#25): each is a content-addressed stage output —
+  // LOC, lint findings, … — keyed by the hash of its declared inputs, so
+  // identical inputs share one report across runs and PRs. The box runs/collects
+  // them, the worker parses (report-adapters.ts), the overview_* tables store
+  // them. Optional and additive: a malformed entry is dropped, not fatal.
+  reports: ReportSpec[]
   // How one batch of scenes executes. NOT a stage: stages are
   // content-addressed and skipped when nothing changed; the scenes command
   // is dispatch-triggered and parameterized per run. It still rides the
@@ -37,12 +43,48 @@ export interface PipelineConfig {
   scenes: string
 }
 
+// A report's declared inputs and how to produce it. `watch` globs are the
+// content inputs (their tree hashes go into the report's key); `after` names
+// the build stage whose hash to fold in as a parent, so a toolchain change
+// (e.g. a new linter version in the lockfile) invalidates the report too.
+// `type` selects the worker-side adapter that parses the box's output.
+export interface ReportSpec {
+  name: string
+  type: 'loc' | 'lint'
+  watch: string[]
+  // LOC: paths matched by `watch` but also matching `exclude` are not counted
+  // (they still hash into the key, so adding an exclude busts the report).
+  exclude?: string[]
+  // Tool reports (lint): the command the box runs; its stdout is machine-
+  // readable output the worker adapter parses. Ignored for builtin types (loc).
+  run?: string
+  // Adapter sub-format hint, e.g. lint tool 'eslint'. Defaults per type.
+  tool?: string
+  // Build stage this report depends on (toolchain parent). Absent → root only.
+  after?: string
+}
+
+// A report resolved to its input hash, as sent to the box for execution.
+export interface ReportPlanItem {
+  name: string
+  type: 'loc' | 'lint'
+  inputHash: string
+  watch: string[]
+  exclude?: string[]
+  run?: string
+  tool?: string
+}
+
 export interface StagePlan {
   // Stage name → input hash, in stage order. Coarse plans have one
   // pseudo-stage '*coarse*' keyed by the commit sha.
   vector: Record<string, string>
   // What the box must execute on divergence, in order.
   stages: Array<{ name: string; run?: string }>
+  // Report name → input hash (the "report vector"), and the full specs the box
+  // runs. Empty on the coarse-fallback path.
+  reports: Record<string, string>
+  reportItems: ReportPlanItem[]
   scenes: string
   coarse: boolean
 }
@@ -66,6 +108,7 @@ export function defaultPipeline(): PipelineConfig {
         run: 'if [ -f scenetest/box-setup.sh ]; then bash scenetest/box-setup.sh; fi',
       },
     ],
+    reports: [],
     scenes: DEFAULT_SCENES_COMMAND,
   }
 }
@@ -80,9 +123,10 @@ export function parsePipeline(raw: string): PipelineConfig | null {
   } catch {
     return null
   }
-  const cfg = data as { version?: unknown; stages?: unknown; scenes?: unknown }
+  const cfg = data as { version?: unknown; stages?: unknown; scenes?: unknown; reports?: unknown }
   if (cfg.version !== 1 || !Array.isArray(cfg.stages) || cfg.stages.length === 0) return null
   if (cfg.scenes !== undefined && typeof cfg.scenes !== 'string') return null
+  if (cfg.reports !== undefined && !Array.isArray(cfg.reports)) return null
 
   const seen = new Set<string>()
   const stages: PipelineStage[] = []
@@ -95,7 +139,45 @@ export function parsePipeline(raw: string): PipelineConfig | null {
     if (!Array.isArray(watch) || !watch.every((g) => typeof g === 'string' && g.length > 0)) return null
     stages.push({ name: s.name, watch: watch as string[], ...(s.run !== undefined ? { run: s.run as string } : {}) })
   }
-  return { version: 1, stages, scenes: typeof cfg.scenes === 'string' ? cfg.scenes : DEFAULT_SCENES_COMMAND }
+  return {
+    version: 1,
+    stages,
+    reports: parseReports(cfg.reports),
+    scenes: typeof cfg.scenes === 'string' ? cfg.scenes : DEFAULT_SCENES_COMMAND,
+  }
+}
+
+const REPORT_TYPES = new Set(['loc', 'lint'])
+
+// Reports are additive outputs, not pipeline structure: a malformed entry is
+// dropped (and ignored), never fatal — one typo'd report must not disable the
+// stage cache. Returns the valid subset (possibly empty).
+export function parseReports(raw: unknown): ReportSpec[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const out: ReportSpec[] = []
+  for (const r of raw as Array<Record<string, unknown>>) {
+    if (typeof r?.name !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(r.name) || seen.has(r.name)) continue
+    if (r.type !== 'loc' && r.type !== 'lint') continue
+    if (!Array.isArray(r.watch) || r.watch.length === 0 || !r.watch.every((g) => typeof g === 'string' && g.length > 0)) continue
+    if (r.exclude !== undefined && (!Array.isArray(r.exclude) || !r.exclude.every((g) => typeof g === 'string'))) continue
+    if (r.run !== undefined && typeof r.run !== 'string') continue
+    if (r.tool !== undefined && typeof r.tool !== 'string') continue
+    if (r.after !== undefined && typeof r.after !== 'string') continue
+    // Tool reports need a command to run; builtin loc must not carry one.
+    if (r.type === 'lint' && typeof r.run !== 'string') continue
+    seen.add(r.name)
+    out.push({
+      name: r.name,
+      type: r.type,
+      watch: r.watch as string[],
+      ...(r.exclude !== undefined ? { exclude: r.exclude as string[] } : {}),
+      ...(r.run !== undefined ? { run: r.run as string } : {}),
+      ...(r.tool !== undefined ? { tool: r.tool as string } : {}),
+      ...(r.after !== undefined ? { after: r.after as string } : {}),
+    })
+  }
+  return out
 }
 
 // Minimal glob-to-regex: '**' crosses directories, '*' stays within one path
@@ -162,11 +244,59 @@ export async function computeVector(
   }
 }
 
+// Resolve each configured report to its input hash (#25). A report's key is
+// hash(report config, parent stage hash, pipeline file, watched tree hashes):
+// the watched globs give content invalidation, and `after` folds in the build
+// stage's hash so a toolchain change busts the report. Pure; computeStagePlan
+// feeds it the vector computeVector just produced. Returns the report vector
+// (name → hash) and the full specs the box runs.
+export async function computeReportPlan(
+  reports: ReportSpec[],
+  tree: TreeEntry[],
+  vector: Record<string, string>,
+  rootHash: string,
+  pipelineFileSha: string,
+): Promise<{ reports: Record<string, string>; items: ReportPlanItem[] }> {
+  const out: Record<string, string> = {}
+  const items: ReportPlanItem[] = []
+  for (const r of reports) {
+    const globs = r.watch.map(globToRegExp)
+    const matched = tree
+      .filter((e) => globs.some((g) => g.test(e.path)))
+      .map((e) => `${e.path}:${e.sha}`)
+      .sort()
+    const parent = r.after && vector[r.after] ? vector[r.after] : rootHash
+    const config = JSON.stringify({
+      name: r.name,
+      type: r.type,
+      watch: r.watch,
+      exclude: r.exclude ?? null,
+      run: r.run ?? null,
+      tool: r.tool ?? null,
+      after: r.after ?? null,
+    })
+    const hash = (await sha256Hex([config, parent, pipelineFileSha, ...matched].join('\n'))).slice(0, 16)
+    out[r.name] = hash
+    items.push({
+      name: r.name,
+      type: r.type,
+      inputHash: hash,
+      watch: r.watch,
+      ...(r.exclude !== undefined ? { exclude: r.exclude } : {}),
+      ...(r.run !== undefined ? { run: r.run } : {}),
+      ...(r.tool !== undefined ? { tool: r.tool } : {}),
+    })
+  }
+  return { reports: out, items }
+}
+
 function coarsePlan(headSha: string): StagePlan {
   const fallback = defaultPipeline()
   return {
     vector: { '*coarse*': headSha },
     stages: fallback.stages.map((s) => ({ name: s.name, run: s.run })),
+    reports: {},
+    reportItems: [],
     scenes: fallback.scenes,
     coarse: true,
   }
@@ -211,8 +341,10 @@ export async function computeStagePlan(env: Env, repo: string, headSha: string):
       }
     }
 
-    const { vector, stages } = await computeVector(config, tree, await imageStageHash(), pipelineFileSha)
-    return { vector, stages, scenes: config.scenes, coarse: false }
+    const rootHash = await imageStageHash()
+    const { vector, stages } = await computeVector(config, tree, rootHash, pipelineFileSha)
+    const { reports, items } = await computeReportPlan(config.reports, tree, vector, rootHash, pipelineFileSha)
+    return { vector, stages, reports, reportItems: items, scenes: config.scenes, coarse: false }
   } catch (err) {
     console.warn(`pipeline: coarse fallback for ${repo}@${headSha}: ${err instanceof Error ? err.message : err}`)
     return coarsePlan(headSha)

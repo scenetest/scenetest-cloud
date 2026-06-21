@@ -76,6 +76,43 @@ Reserved for future versions, accepted and ignored today: `save`, `restore`
 (per-stage artifact caching), `toolchain` (per-project machine image).
 Writing them now is harmless.
 
+## Reports (optional)
+
+A top-level `reports` array adds **static-analysis reports** to a PR — lines
+of code, lint findings, and (more types coming) — shown as a base-vs-head
+comparison on the PR page. Each report is content-addressed like a stage: it
+declares the files it `watch`es, and scenetest only re-runs it when those
+change. Identical inputs share one report across runs and PRs, so a rebase or
+an unrelated PR never recomputes it.
+
+```json
+{
+  "version": 1,
+  "stages": [ /* … */ ],
+  "reports": [
+    { "name": "loc",  "type": "loc",  "watch": ["src/**"], "exclude": ["**/*.test.ts"] },
+    { "name": "lint", "type": "lint", "watch": ["src/**"], "run": "pnpm exec eslint -f json src", "after": "build" }
+  ],
+  "scenes": "pnpm exec scenetest"
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | `[a-z0-9_-]`, max 32, unique among reports |
+| `type` | yes | `loc` or `lint` (the worker-side parser to apply) |
+| `watch` | yes | globs whose content keys the report (same glob rules as stages) |
+| `run` | for `lint` | command emitting machine-readable output (ESLint `-f json`, or any oxlint-compatible flat-JSON linter) on stdout |
+| `exclude` | no | (`loc`) paths matched by `watch` but not counted |
+| `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter version in the lockfile) re-runs the report, not just a source change |
+
+How it works: the box runs/collects each report after the build is ready and
+ships the raw output up; scenetest-cloud owns the parser for each `type`, so
+you don't normalize anything yourself. A malformed report entry is dropped and
+ignored — it never disables stage caching or blocks a run. Today's types are
+`loc` (built in — no tool needed) and `lint` (ESLint-format JSON); more
+(formatter, unit tests, bundle size) are landing behind the same shape.
+
 Glob rules (deliberately minimal): `**` crosses directories, `*` stays
 within one path segment, everything else is literal. `supabase/**` matches
 files under `supabase/`; `*.md` matches `README.md` but **not**
