@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  computeReportPlan,
   computeVector,
   defaultPipeline,
   firstDivergentStage,
   globToRegExp,
   matchesAny,
   parsePipeline,
+  parseReports,
   type StagePlan,
   type TreeEntry,
 } from './pipeline.ts'
@@ -16,6 +18,7 @@ describe('parsePipeline', () => {
     expect(cfg).toEqual({
       version: 1,
       stages: [{ name: 'deps', watch: ['**'], run: 'pnpm i' }],
+      reports: [],
       scenes: 'bash scenetest/box-run.sh',
     })
   })
@@ -122,10 +125,70 @@ describe('computeVector', () => {
   })
 })
 
+describe('parseReports', () => {
+  it('keeps valid entries and drops malformed ones (additive, never fatal)', () => {
+    const reports = parseReports([
+      { name: 'loc', type: 'loc', watch: ['src/**'], exclude: ['**/*.test.ts'] },
+      { name: 'lint', type: 'lint', watch: ['src/**'], run: 'eslint -f json src', after: 'build' },
+      { name: 'bad-no-watch', type: 'loc' },
+      { name: 'bad-type', type: 'nope', watch: ['x'] },
+      { name: 'lint-no-run', type: 'lint', watch: ['x'] },
+      { name: 'loc', type: 'loc', watch: ['dup'] }, // duplicate name
+    ])
+    expect(reports.map((r) => r.name)).toEqual(['loc', 'lint'])
+    expect(reports[1]).toEqual({ name: 'lint', type: 'lint', watch: ['src/**'], run: 'eslint -f json src', after: 'build' })
+  })
+
+  it('is empty for a non-array or absent reports field', () => {
+    expect(parseReports(undefined)).toEqual([])
+    expect(parseReports('nope')).toEqual([])
+  })
+})
+
+describe('computeReportPlan', () => {
+  const reports = parseReports([
+    { name: 'loc', type: 'loc', watch: ['src/**'] },
+    { name: 'lint', type: 'lint', watch: ['src/**'], run: 'eslint -f json', after: 'build' },
+  ])
+
+  it('keys each report by its watched content and is deterministic', async () => {
+    const vector = (await computeVector(CONFIG, TREE, 'root', 'pf1')).vector
+    const a = await computeReportPlan(reports, TREE, vector, 'root', 'pf1')
+    const b = await computeReportPlan(reports, TREE, vector, 'root', 'pf1')
+    expect(a.reports).toEqual(b.reports)
+    expect(Object.keys(a.reports)).toEqual(['loc', 'lint'])
+    expect(a.items.map((i) => i.name)).toEqual(['loc', 'lint'])
+  })
+
+  it('a source change moves both reports (they watch src/**)', async () => {
+    const vector = (await computeVector(CONFIG, TREE, 'root', 'pf1')).vector
+    const srcChanged = TREE.map((e) => (e.path === 'src/app.tsx' ? { ...e, sha: 'app2' } : e))
+    const vector2 = (await computeVector(CONFIG, srcChanged, 'root', 'pf1')).vector
+    const a = await computeReportPlan(reports, TREE, vector, 'root', 'pf1')
+    const b = await computeReportPlan(reports, srcChanged, vector2, 'root', 'pf1')
+    expect(b.reports.loc).not.toBe(a.reports.loc)
+    expect(b.reports.lint).not.toBe(a.reports.lint)
+  })
+
+  it("a toolchain change (parent stage hash) moves the report that declares `after`", async () => {
+    // 'lint' is after 'build'; a deps change cascades into build's hash, so
+    // lint's hash moves while loc (no `after`, source unchanged) stays put.
+    const vector = (await computeVector(CONFIG, TREE, 'root', 'pf1')).vector
+    const depsChanged = TREE.map((e) => (e.path === 'pnpm-lock.yaml' ? { ...e, sha: 'lock2' } : e))
+    const vector2 = (await computeVector(CONFIG, depsChanged, 'root', 'pf1')).vector
+    const a = await computeReportPlan(reports, TREE, vector, 'root', 'pf1')
+    const b = await computeReportPlan(reports, depsChanged, vector2, 'root', 'pf1')
+    expect(b.reports.loc).toBe(a.reports.loc)
+    expect(b.reports.lint).not.toBe(a.reports.lint)
+  })
+})
+
 describe('firstDivergentStage', () => {
   const plan = (vector: Record<string, string>): StagePlan => ({
     vector,
     stages: Object.keys(vector).map((name) => ({ name })),
+    reports: {},
+    reportItems: [],
     scenes: 'bash scenetest/box-run.sh',
     coarse: false,
   })

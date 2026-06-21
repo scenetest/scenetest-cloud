@@ -17,6 +17,7 @@ export const debugBoxUpdate: Handler = async (req, env) => {
     headSha?: string
     vector?: Record<string, string>
     stages?: Array<{ name: string; run?: string }>
+    reports?: unknown[]
     scenes?: string
   }>()
   const box = await env.DB.prepare('SELECT repo, pr_number FROM boxes WHERE id = ?1')
@@ -30,6 +31,7 @@ export const debugBoxUpdate: Handler = async (req, env) => {
       headSha: body.headSha,
       vector: body.vector,
       stages: body.stages ?? [],
+      reports: body.reports ?? [],
       scenes: body.scenes,
     }),
   })

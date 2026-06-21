@@ -528,7 +528,19 @@ async function main() {
       boxId: 'e2e-box-2',
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
-      stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
+      // The stage also drops a known source file so the loc report below counts
+      // a deterministic line total.
+      stages: [{ name: 'setup', run: "mkdir -p src && printf 'a\\nb\\nc\\n' > src/x.ts && touch stage-ran.marker" }],
+      // Static-analysis reports (#25) run after /ready. `loc` is builtin (the
+      // agent walks src/** and counts lines → 3); `lint` runs a command whose
+      // stdout is eslint-format JSON the worker adapter parses into one error.
+      reports: [
+        { name: 'loc', type: 'loc', inputHash: 'loc-h1', watch: ['src/**'] },
+        {
+          name: 'lint', type: 'lint', inputHash: 'lint-h1', tool: 'eslint',
+          run: `echo '[{"filePath":"src/x.ts","messages":[{"ruleId":"no-debugger","severity":2,"line":1,"column":1,"message":"Unexpected debugger."}]}]'`,
+        },
+      ],
       // The scenes command from pipeline.json rides the update. This stands
       // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
       // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
@@ -575,6 +587,33 @@ async function main() {
       try { return readFileSync(join(agentWork, 'e2e-agent-run.commands.jsonl'), 'utf8').includes('run:pause') }
       catch { return false }
     }), agentLog)
+
+  // Reports-as-stages, the real agent path (#25): the agent ran the loc + lint
+  // reports after /ready, shipping raw output up; the worker parsed each with
+  // its adapter and upserted the overview_* tables. loc walked src/x.ts (3
+  // lines); lint's echoed eslint-JSON yielded one error.
+  check('agent loc report parsed to a line total (builtin walk + worker adapter)',
+    await waitFor(() => {
+      const r = d1Query(persistDir,
+        "SELECT value FROM overview_metrics WHERE stage = 'loc' AND input_hash = 'loc-h1' AND name = 'loc.total'")
+      return r.length === 1 && r[0].value === 3
+    }), agentLog)
+  check('agent lint report parsed to an issue (command stdout → worker adapter)',
+    await waitFor(() => {
+      const r = d1Query(persistDir,
+        "SELECT message FROM overview_issues WHERE stage = 'lint' AND input_hash = 'lint-h1'")
+      return r.length === 1 && r[0].message === 'Unexpected debugger.'
+    }), agentLog)
+  // Point PR 10's run at these report hashes so the comparison view resolves
+  // them (no base vector → every issue is "added").
+  d1Query(persistDir,
+    `UPDATE runs SET head_vector_json = '{"loc":"loc-h1","lint":"lint-h1"}' WHERE id = 'e2e-agent-run'`)
+  const agentReports = await j(await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/10/reports`, { headers: { cookie } }))
+  check('agent reports surface in the PR comparison view',
+    agentReports.available === true &&
+      agentReports.comparison.metrics.some((m) => m.name === 'loc.total' && m.head === 3) &&
+      agentReports.comparison.issues.some((i) => i.stage === 'lint' && i.added.some((a) => a.message === 'Unexpected debugger.')),
+    JSON.stringify(agentReports.comparison))
 
   // The scenes CLI on a box reports to the agent's local ingest; the agent
   // relays up the channel and the coordinator appends to its SQLite log. seq 0

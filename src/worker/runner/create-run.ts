@@ -23,15 +23,15 @@ export async function createRun(
 ): Promise<{ runId: string; boxId: string }> {
   const box = await ensureBox(env, ctx, opts)
 
-  // The desired stage vectors for head and base (#25). The head vector is the
-  // same computeStagePlan output ensureBox queued to the box, so the hashes the
-  // box tags its reports with line up here; the base vector resolves the
-  // "report at base hash" side of the PR comparison without re-hitting GitHub on
-  // every page load. Both degrade to the coarse pseudo-vector on any failure;
-  // base is skipped entirely when the PR has no base sha (a manual stub run).
-  const headVector = (await computeStagePlan(env, opts.repo, opts.headSha)).vector
+  // The desired report vectors (report name → input hash) for head and base
+  // (#25). The head vector names the same hashes the box tags its reports with
+  // (both come from computeStagePlan), so the comparison view resolves "report
+  // at head hash"; the base vector resolves "report at base hash" without
+  // re-hitting GitHub on every page load. Empty on the coarse-fallback path;
+  // base is null when the PR has no base sha (a manual stub run).
+  const headVector = (await computeStagePlan(env, opts.repo, opts.headSha)).reports
   const baseVector = opts.baseSha
-    ? (await computeStagePlan(env, opts.repo, opts.baseSha)).vector
+    ? (await computeStagePlan(env, opts.repo, opts.baseSha)).reports
     : null
 
   const runId = crypto.randomUUID()

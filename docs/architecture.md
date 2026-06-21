@@ -379,31 +379,45 @@ immediately — latest wins. The only state worth a verdict is the one that
 might merge, and a late completion report from the old box cannot overwrite
 the cancellation.
 
-Static-analysis reports — lint and typecheck deltas, bundle sizes,
-dependency changes — are stage outputs keyed the same way, stored in the
-overview tables. As of migration 0008 those tables (`overview_metrics`,
-`overview_summaries`, `overview_issues`) are keyed by `(stage, input_hash)`,
-not by run: a report is content-addressed exactly like the artifact it ships
-beside. The PR comparison view is "report at base hash vs report at head
-hash," and identical inputs share one report across runs and across PRs — a
-cache-hit (skipped) stage's report already exists for that hash, so dedupe
-falls out for free.
+Static-analysis reports — lines of code, lint findings, and (landing behind
+the same shape) formatter findings, unit-test pass/fail, bundle sizes — are
+stage outputs keyed the same way, stored in the overview tables. As of
+migration 0008 those tables (`overview_metrics`, `overview_summaries`,
+`overview_issues`) are keyed by `(stage, input_hash)`, not by run: a report is
+content-addressed exactly like the artifact it ships beside. The PR comparison
+view is "report at base hash vs report at head hash," and identical inputs
+share one report across runs and across PRs — a cache-hit (skipped) report
+already exists for that hash, so dedupe falls out for free.
 
-Transport (#25) is our own orchestrator end to end, no protocol-package
-involvement: a static-analysis stage's command emits report items to
-`SCENETEST_REPORT_URL` (the box agent's local `/reports/:stage` ingest); the
-agent tags them with the ambient stage's input hash — which it owns, from the
-update vector it is executing, so a stage can't spoof a hash — and relays them
-up its existing box channel as `{kind:'report', stage, inputHash, reports}`.
-The PR coordinator upserts the overview tables from that envelope: a global,
-content-addressed projection, like `stage_cache.report_json` — not a per-run
-log event, carrying no `run_id`. The base-side hashes the comparison needs
-come from `computeStagePlan` run against the PR's base sha at run creation;
-both the head and base stage vectors are stored on the `runs` row
+Reports are a **curated, scenetest-owned catalog of types**, not free-form
+user output (#25). The user's `pipeline.json` gains a `reports` array — each
+entry names a `type` (the adapter), the globs it `watch`es, and for tool
+reports how to `run` the tool (docs/pipeline.md). That config hashes into the
+report's key the same way a stage's does, with an optional `after` folding in a
+build stage's hash so a toolchain change invalidates the report too. The split
+of labor: **the box runs the tool (or, for built-in types like LOC, does the
+raw IO), and the worker owns the parser.** The box ships raw machine-readable
+output up its existing channel (`{kind:'report-raw', name, type, inputHash,
+raw, root}`); the PR coordinator hands `raw` to the type's adapter
+(`report-adapters.ts`) and upserts the overview tables — a global,
+content-addressed projection, like `stage_cache.report_json`, not a per-run log
+event (no `run_id`). Keeping the parsers in `src/` (one place, TypeScript,
+unit-tested) means a parser fix never re-bakes the runner image, and adding a
+tool is a new adapter, not a schema or agent change. The first two adapters are
+`loc` (built in) and `lint` (ESLint-format JSON). Only cache-miss reports are
+even sent to the box: `ensureBox` filters the plan against an
+`overview_summaries` presence check, so an unchanged or already-built report is
+skipped.
+
+The base-side hashes the comparison needs come from `computeStagePlan` run
+against the PR's base sha at run creation; both the head and base **report
+vectors** (report name → input hash) are stored on the `runs` row
 (`head_vector_json` / `base_vector_json`) so the read path resolves the two
-hashes without re-hitting GitHub. A PR-comment bot, like the original
-motivation screenshots, can come later as a second consumer of the same
-tables.
+hashes without re-hitting GitHub. Scene/assertion pass-fail counts are *not*
+reports — they are runtime results already in the event log and the
+`scene_executions` projection, surfaced from there rather than re-derived. A
+PR-comment bot, like the original motivation screenshots, can come later as a
+second consumer of the overview tables.
 
 The pipeline definition (stage commands and watch globs) lives in the
 user's repo, in their scenetest folder, because it must change atomically
