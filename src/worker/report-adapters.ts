@@ -48,11 +48,14 @@ function locAdapter(raw: string): ReportItem[] {
   ]
 }
 
-// Lint: the box ships the tool's JSON stdout. The default (and only confirmed)
-// shape is ESLint's `-f json` — an array of file results, each with a messages
-// array. oxlint can emit a compatible flat array of diagnostics; we accept that
-// too. File paths are relativized against the checkout root so an issue's
-// fingerprint is stable across the base and head builds.
+// Lint: the box ships the tool's JSON stdout. Two real shapes are handled,
+// auto-detected so `tool` is only a hint:
+//   * ESLint `-f json`: an array of file results, each with a messages array.
+//   * oxlint `--format=json`: a miette object { diagnostics: [{ message, code,
+//     severity, filename, labels: [{ span: { line, column } }] }], … }.
+// A flat array of diagnostics is accepted as a fallback. File paths are
+// relativized against the checkout root so an issue's fingerprint is stable
+// across the base and head builds.
 interface EslintMessage {
   ruleId?: string | null
   severity?: number
@@ -63,6 +66,14 @@ interface EslintMessage {
 interface EslintFileResult {
   filePath?: string
   messages?: EslintMessage[]
+}
+
+interface OxlintDiagnostic {
+  message?: string
+  code?: string
+  severity?: string
+  filename?: string
+  labels?: Array<{ span?: { line?: number; column?: number } }>
 }
 
 function lintAdapter(raw: string, ctx: AdapterCtx): ReportItem[] {
@@ -91,7 +102,20 @@ function lintAdapter(raw: string, ctx: AdapterCtx): ReportItem[] {
     })
   }
 
-  if (Array.isArray(data) && data.every((d) => d && typeof d === 'object' && 'messages' in (d as object))) {
+  if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray((data as { diagnostics?: unknown }).diagnostics)) {
+    // oxlint (miette) shape: line/column live in the first label's span; the
+    // rule rides in `code` (e.g. "eslint(no-debugger)").
+    for (const d of (data as { diagnostics: OxlintDiagnostic[] }).diagnostics) {
+      const span = Array.isArray(d.labels) && d.labels[0]?.span ? d.labels[0]!.span! : undefined
+      push(d.filename, {
+        ruleId: d.code ?? null,
+        severity: d.severity === 'error' ? 2 : 1,
+        line: span?.line,
+        column: span?.column,
+        message: d.message,
+      })
+    }
+  } else if (Array.isArray(data) && data.every((d) => d && typeof d === 'object' && 'messages' in (d as object))) {
     // ESLint shape: [{ filePath, messages: [...] }]
     for (const f of data as EslintFileResult[]) {
       for (const m of f.messages ?? []) push(f.filePath, m)

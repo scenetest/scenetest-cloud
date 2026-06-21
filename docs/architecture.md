@@ -404,7 +404,8 @@ content-addressed projection, like `stage_cache.report_json`, not a per-run log
 event (no `run_id`). Keeping the parsers in `src/` (one place, TypeScript,
 unit-tested) means a parser fix never re-bakes the runner image, and adding a
 tool is a new adapter, not a schema or agent change. The first two adapters are
-`loc` (built in) and `lint` (ESLint-format JSON). Only cache-miss reports are
+`loc` (built in) and `lint` (ESLint `-f json` and oxlint `--format=json`, one
+adapter that auto-detects the shape). Only cache-miss reports are
 even sent to the box: `ensureBox` filters the plan against an
 `overview_summaries` presence check, so an unchanged or already-built report is
 skipped.

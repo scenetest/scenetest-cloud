@@ -533,12 +533,13 @@ async function main() {
       stages: [{ name: 'setup', run: "mkdir -p src && printf 'a\\nb\\nc\\n' > src/x.ts && touch stage-ran.marker" }],
       // Static-analysis reports (#25) run after /ready. `loc` is builtin (the
       // agent walks src/** and counts lines → 3); `lint` runs a command whose
-      // stdout is eslint-format JSON the worker adapter parses into one error.
+      // stdout is real oxlint --format=json output the worker adapter parses
+      // (miette diagnostics: rule in `code`, line/col in labels[].span).
       reports: [
         { name: 'loc', type: 'loc', inputHash: 'loc-h1', watch: ['src/**'] },
         {
-          name: 'lint', type: 'lint', inputHash: 'lint-h1', tool: 'eslint',
-          run: `echo '[{"filePath":"src/x.ts","messages":[{"ruleId":"no-debugger","severity":2,"line":1,"column":1,"message":"Unexpected debugger."}]}]'`,
+          name: 'lint', type: 'lint', inputHash: 'lint-h1', tool: 'oxlint',
+          run: `echo '{"diagnostics":[{"message":"debugger statement is not allowed","code":"eslint(no-debugger)","severity":"warning","filename":"src/x.ts","labels":[{"span":{"offset":0,"length":8,"line":1,"column":1}}]}],"number_of_files":1}'`,
         },
       ],
       // The scenes command from pipeline.json rides the update. This stands
@@ -602,7 +603,7 @@ async function main() {
     await waitFor(() => {
       const r = d1Query(persistDir,
         "SELECT message FROM overview_issues WHERE stage = 'lint' AND input_hash = 'lint-h1'")
-      return r.length === 1 && r[0].message === 'Unexpected debugger.'
+      return r.length === 1 && r[0].message === 'debugger statement is not allowed'
     }), agentLog)
   // Point PR 10's run at these report hashes so the comparison view resolves
   // them (no base vector → every issue is "added").
@@ -612,7 +613,7 @@ async function main() {
   check('agent reports surface in the PR comparison view',
     agentReports.available === true &&
       agentReports.comparison.metrics.some((m) => m.name === 'loc.total' && m.head === 3) &&
-      agentReports.comparison.issues.some((i) => i.stage === 'lint' && i.added.some((a) => a.message === 'Unexpected debugger.')),
+      agentReports.comparison.issues.some((i) => i.stage === 'lint' && i.added.some((a) => a.message === 'debugger statement is not allowed')),
     JSON.stringify(agentReports.comparison))
 
   // The scenes CLI on a box reports to the agent's local ingest; the agent
