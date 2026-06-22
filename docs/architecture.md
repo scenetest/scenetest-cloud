@@ -14,34 +14,36 @@ tool and the cloud service share one architecture.
 
 ![Scenetest Architecture Diagram](./design/scenetest-cloud-architecture-3-layers.png)
 
-GitHub is the one git host we support. It sends webhooks to the **Worker** —
-the main app — which authenticates them, records the PR, and spins up that
-PR's coordinator. Alongside the Worker runs a singleton **Home Coordinator**
-Durable Object: it holds the realtime WebSocket connections to the web
+GitHub is the one git host we support. It sends webhooks to the **App's Main Worker**
+— which authenticates them, records the PR, and spins up the PrCoordinator for that PR.
+Alongside the Worker runs a singleton Durable Object: **The Home Coordinator**
+which holds the realtime WebSocket connections to the web
 interface and pushes live updates about running tests, reading settled state
 from a **D1** database. The Worker, the Home Coordinator, and D1 together are
 the permanent, cross-PR top of the system — the part that outlives any one run.
 
-One level down is everything that happens inside a single PR. The web UI mounts
-the **dashboard widget**, which embeds the entire dev experience in the cloud
-service, and takes realtime updates from that PR's own **PR Coordinator**
-Durable Object. The PR Coordinator owns a **SQLite** log of every event the PR
-has produced — the source of truth — and manages its own **R2** archives at run
-boundaries. It receives those events from below, up the wire from the test
-sandbox.
+One level down is **The PR Coordinator** – everything that happens inside a
+single PR. It's meant to mimic what a developer experiences on their own machine,
+carrying test events up from the test box and out to the realtime dashboard,
+as well as commands back down to trigger test runs via the CLI. It is the
+top-level collator of the entire test log for this PR across all runs, using
+SQLite and auto-increment to set a canonical order for the log across all
+tests/runs/boxes. The PrCoordinator is also responsible for spinning up and
+down the test boxes, and archiving the SQLite log in R2 after each run.
 
-The sandbox is managed entirely by the `scenetest-js` repo, and mirrors almost
-exactly what runs on a developer's own machine. It is a short-lived VPS with a
-**single** outbound WebSocket back to the PR Coordinator — its only connection
-to the outside world. That one socket carries traffic both ways: events travel
-up it, and signals come down it — refresh the checkout and reinstall
-dependencies, start or stop a run, and so on.
+The test suite, along with the user's app and setup script, make up the entirety
+of the third row in the graphic: **The Test Box**. The box is an ephemeral VPS
+which is meant to build the app, run the tests, using the same vite middleware
+you use when running `scenetest-js` during local dev. It uses the same CLI to drive
+tests and publishes the same dashboard. Except no one can view the box to interact
+with that dashboard, so the test box uses a single secure websocket to the
+PrCoordinator to send events up and receive commands down, so that the cloud
+can embed the scenetest-js project's Dashboard directly, and interpret incoming
+events using its Protocol package.
 
-That bridge — the cloud-embedded dashboard talking to the PR Coordinator — is
-conceptually the same as the bridge a developer already has locally: their
-**dev dashboard** talking to the **Vite plugin**, which uses the **CLI** to
-drive the headless Playwright browsers that power the end-to-end tests. The two
-deployments are the same shape; only the middle hop differs.
+The only difference is the transport – SSE or Websockets – which are different
+implementations intended for the different running environments, but which
+implement the same interface with events up, commands down.
 
 Commands from either dashboard — cloud or local — terminate at the CLI, which
 drives the browser. The CLI returns pass/fail and other results onto the event
@@ -51,8 +53,8 @@ directory. Assertion pass/fail signals arrive from the browser through that same
 receiver endpoint, and an injected **listener** watches for console errors and
 the like. Both kinds of information — driver results and in-page assertions —
 join one event stream and flow outward and upward, outward and upward, until
-they settle into aggregates in D1, served either by the Worker at the top or by
-its Durable Object for realtime.
+they settle into Tanstack DB collections on browsers, and aggregates in D1,
+served either by the Worker at the top or by its Durable Object for realtime.
 
 ## Repository layout
 
