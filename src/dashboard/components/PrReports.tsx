@@ -16,7 +16,7 @@ export function PrReports({ owner, name, prNumber }: Props) {
   const q = usePrReports(owner, name, prNumber)
   const c = q.data?.comparison
   if (!c) return null
-  const hasIssues = c.issues.some((i) => i.added.length + i.resolved.length + i.unchanged > 0)
+  const hasIssues = c.issues.some((i) => i.added.length + i.resolved.length + i.unchanged + i.moved > 0)
   if (c.metrics.length === 0 && c.summaries.length === 0 && !hasIssues) return null
 
   return (
@@ -50,7 +50,7 @@ export function PrReports({ owner, name, prNumber }: Props) {
 
       {hasIssues &&
         c.issues
-          .filter((i) => i.added.length + i.resolved.length + i.unchanged > 0)
+          .filter((i) => i.added.length + i.resolved.length + i.unchanged + i.moved > 0)
           .map((i) => <IssuesBlock key={`${i.stage}:${i.kind}`} i={i} />)}
     </section>
   )
@@ -86,8 +86,10 @@ function IssuesBlock({ i }: { i: IssuesComparison }) {
           {i.added.length > 0 && <span class='text-fail'>+{i.added.length} new</span>}
           {i.added.length > 0 && i.resolved.length > 0 && ' · '}
           {i.resolved.length > 0 && <span class='text-pass'>−{i.resolved.length} resolved</span>}
-          {(i.added.length > 0 || i.resolved.length > 0) && i.unchanged > 0 && ' · '}
+          {(i.added.length > 0 || i.resolved.length > 0) && (i.unchanged > 0 || i.moved > 0) && ' · '}
           {i.unchanged > 0 && `${i.unchanged} unchanged`}
+          {i.unchanged > 0 && i.moved > 0 && ' · '}
+          {i.moved > 0 && `${i.moved} shifted`}
         </span>
       </div>
       {i.added.map((issue, n) => (

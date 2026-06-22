@@ -25,6 +25,7 @@ export function parseReport(type: string, raw: string, ctx: AdapterCtx = {}): Re
   try {
     if (type === 'loc') return locAdapter(raw)
     if (type === 'lint') return lintAdapter(raw, ctx)
+    if (type === 'typecheck') return typecheckAdapter(raw, ctx)
   } catch {
     // A tool that emitted unparseable output (crash, wrong format, version skew)
     // records an error summary rather than wrong data — never a bad diff.
@@ -139,5 +140,42 @@ function lintAdapter(raw: string, ctx: AdapterCtx): ReportItem[] {
     { type: 'summary', kind: 'lint', summary: { errors, warnings } },
     { type: 'metric', name: 'lint.errors', value: errors, unit: 'count' },
     { type: 'metric', name: 'lint.warnings', value: warnings, unit: 'count' },
+  ]
+}
+
+// Typecheck: the box ships `tsc`'s default (non-pretty) stdout. Each diagnostic
+// is one line, `file(line,col): error TS####: message` (tsc can also emit
+// `warning`). We parse those lines and ignore the rest (summaries, blank
+// lines). The TS code rides in `raw`; `message` keeps the `TS####: …` text so
+// the cross-hash diff distinguishes two different errors at the same position.
+const TSC_LINE = /^(.+?)\((\d+),(\d+)\):\s*(error|warning)\s+(TS\d+):\s*(.*)$/
+
+function typecheckAdapter(raw: string, ctx: AdapterCtx): ReportItem[] {
+  const issues: ReportIssue[] = []
+  let errors = 0
+  let warnings = 0
+  const rel = (p: string) => (ctx.root && p.startsWith(ctx.root) ? p.slice(ctx.root.length).replace(/^\/+/, '') : p)
+
+  for (const line of raw.split('\n')) {
+    const m = TSC_LINE.exec(line.trim())
+    if (!m) continue
+    const [, file, ln, col, sev, code, text] = m as unknown as [string, string, string, string, string, string, string]
+    if (sev === 'error') errors++
+    else warnings++
+    issues.push({
+      file: rel(file),
+      line: parseInt(ln, 10),
+      col: parseInt(col, 10),
+      severity: sev,
+      message: `${code}: ${text}`,
+      raw: code,
+    })
+  }
+
+  return [
+    { type: 'issues', kind: 'typecheck', issues },
+    { type: 'summary', kind: 'typecheck', summary: { errors, warnings } },
+    { type: 'metric', name: 'typecheck.errors', value: errors, unit: 'count' },
+    { type: 'metric', name: 'typecheck.warnings', value: warnings, unit: 'count' },
   ]
 }
