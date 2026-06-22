@@ -99,3 +99,37 @@ describe('lint adapter (eslint -f json shape)', () => {
     expect(items).toEqual([{ type: 'summary', kind: 'lint', summary: { error: 'unparseable report output' } }])
   })
 })
+
+describe('typecheck adapter (tsc default output)', () => {
+  it('parses file(line,col): error TS####: message lines and ignores the rest', () => {
+    const tsc = [
+      'src/a.ts(12,5): error TS2304: Cannot find name \'foo\'.',
+      'src/b.ts(3,10): error TS2532: Object is possibly \'undefined\'.',
+      '',
+      'Found 2 errors in 2 files.',
+      '',
+      'Errors  Files',
+    ].join('\n')
+    const items = parseReport('typecheck', tsc)
+    const issues = items.find((i) => i.type === 'issues')!
+    expect(issues).toMatchObject({
+      kind: 'typecheck',
+      issues: [
+        { file: 'src/a.ts', line: 12, col: 5, severity: 'error', message: "TS2304: Cannot find name 'foo'.", raw: 'TS2304' },
+        { file: 'src/b.ts', line: 3, col: 10, severity: 'error', message: "TS2532: Object is possibly 'undefined'.", raw: 'TS2532' },
+      ],
+    })
+    expect(items).toContainEqual({ type: 'summary', kind: 'typecheck', summary: { errors: 2, warnings: 0 } })
+    expect(items).toContainEqual({ type: 'metric', name: 'typecheck.errors', value: 2, unit: 'count' })
+  })
+
+  it('relativizes absolute paths against root', () => {
+    const items = parseReport('typecheck', '/box/repo/src/x.ts(1,1): error TS1005: \';\' expected.', { root: '/box/repo' })
+    expect(items.find((i) => i.type === 'issues')).toMatchObject({ issues: [{ file: 'src/x.ts' }] })
+  })
+
+  it('a clean run (no diagnostic lines) is zero errors', () => {
+    const items = parseReport('typecheck', '\n')
+    expect(items).toContainEqual({ type: 'summary', kind: 'typecheck', summary: { errors: 0, warnings: 0 } })
+  })
+})

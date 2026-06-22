@@ -90,8 +90,9 @@ an unrelated PR never recomputes it.
   "version": 1,
   "stages": [ /* … */ ],
   "reports": [
-    { "name": "loc",  "type": "loc",  "watch": ["src/**"], "exclude": ["**/*.test.ts"] },
-    { "name": "lint", "type": "lint", "watch": ["src/**"], "run": "pnpm exec eslint -f json src", "after": "build" }
+    { "name": "loc",       "type": "loc",       "watch": ["src/**"], "exclude": ["**/*.test.ts"] },
+    { "name": "lint",      "type": "lint",      "watch": ["src/**"], "run": "pnpm exec oxlint --format=json src", "after": "build" },
+    { "name": "typecheck", "type": "typecheck", "watch": ["src/**", "tsconfig*.json"], "run": "pnpm exec tsc --noEmit", "after": "build" }
   ],
   "scenes": "pnpm exec scenetest"
 }
@@ -100,19 +101,32 @@ an unrelated PR never recomputes it.
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | `[a-z0-9_-]`, max 32, unique among reports |
-| `type` | yes | `loc` or `lint` (the worker-side parser to apply) |
+| `type` | yes | `loc`, `lint`, or `typecheck` (the worker-side parser to apply) |
 | `watch` | yes | globs whose content keys the report (same glob rules as stages) |
-| `run` | for `lint` | command emitting JSON on stdout — ESLint `-f json` or oxlint `--format=json` (auto-detected) |
+| `run` | for `lint`/`typecheck` | command emitting the tool's output on stdout (see types below) |
 | `exclude` | no | (`loc`) paths matched by `watch` but not counted |
-| `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter version in the lockfile) re-runs the report, not just a source change |
+| `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter/tsc version in the lockfile) re-runs the report, not just a source change |
+
+Types today:
+
+- **`loc`** — built in, no tool. Counts lines of the files matched by `watch`
+  minus `exclude`.
+- **`lint`** — `run` emits JSON: ESLint `-f json` or oxlint `--format=json`
+  (auto-detected). Reports findings with severities.
+- **`typecheck`** — `run` emits `tsc`'s default (non-pretty) output, i.e. plain
+  `pnpm exec tsc --noEmit`. Reports `TS####` diagnostics.
 
 How it works: the box runs/collects each report after the build is ready and
 ships the raw output up; scenetest-cloud owns the parser for each `type`, so
 you don't normalize anything yourself. A malformed report entry is dropped and
-ignored — it never disables stage caching or blocks a run. Today's types are
-`loc` (built in — no tool needed) and `lint` (ESLint `-f json` or oxlint
-`--format=json`, auto-detected); more (formatter, unit tests, bundle size) are
-landing behind the same shape.
+ignored — it never disables stage caching or blocks a run. More types
+(formatter, unit tests, bundle size) are landing behind the same shape.
+
+The PR comparison is base-vs-head per report. For issue lists (lint,
+typecheck) it distinguishes genuinely **new** and **resolved** findings from
+ones that merely **shifted** line because an unrelated edit moved them — a
+finding with the same file, column, and message within ±10 lines is the same
+finding, not a regression.
 
 Glob rules (deliberately minimal): `**` crosses directories, `*` stays
 within one path segment, everything else is literal. `supabase/**` matches

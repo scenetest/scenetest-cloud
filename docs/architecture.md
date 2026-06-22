@@ -403,12 +403,19 @@ raw, root}`); the PR coordinator hands `raw` to the type's adapter
 content-addressed projection, like `stage_cache.report_json`, not a per-run log
 event (no `run_id`). Keeping the parsers in `src/` (one place, TypeScript,
 unit-tested) means a parser fix never re-bakes the runner image, and adding a
-tool is a new adapter, not a schema or agent change. The first two adapters are
-`loc` (built in) and `lint` (ESLint `-f json` and oxlint `--format=json`, one
-adapter that auto-detects the shape). Only cache-miss reports are
+tool is a new adapter, not a schema or agent change. Adapters today are `loc`
+(built in), `lint` (ESLint `-f json` and oxlint `--format=json`, one adapter
+that auto-detects the shape), and `typecheck` (`tsc` default output). Only
+cache-miss reports are
 even sent to the box: `ensureBox` filters the plan against an
 `overview_summaries` presence check, so an unchanged or already-built report is
 skipped.
+
+The comparison's issue diff is two-pass, matching the reference CI it replaces:
+an exact set-diff by fingerprint (file + line + col + message), then a second
+pass that pairs a leftover "new" with a leftover "resolved" when it is the same
+finding (file + col + message) shifted ≤10 lines — an unrelated edit bumped its
+line number — and counts that as *moved*, neither a regression nor a fix.
 
 The base-side hashes the comparison needs come from `computeStagePlan` run
 against the PR's base sha at run creation; both the head and base **report

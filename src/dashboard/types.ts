@@ -99,6 +99,8 @@ export interface IssuesComparison {
   added: ReportIssue[]
   resolved: ReportIssue[]
   unchanged: number
+  // Same issue shifted line (an unrelated edit moved it) — not a regression.
+  moved: number
 }
 
 export interface ReportComparison {

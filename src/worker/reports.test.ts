@@ -97,8 +97,54 @@ describe('buildReportComparison — issues', () => {
     const c = buildReportComparison(head, base, rows)
     const block = c.issues.find((i) => i.stage === 'build' && i.kind === 'lint')!
     expect(block.unchanged).toBe(1)
+    expect(block.moved).toBe(0)
     expect(block.added.map((i) => i.message)).toEqual(['no-debugger'])
     expect(block.resolved.map((i) => i.message)).toEqual(['no-console'])
+  })
+
+  it('treats a line-shifted issue (same file/col/message, ±10) as moved, not new/resolved', () => {
+    const c = buildReportComparison({ build: 'h1' }, { build: 'b1' }, {
+      metrics: [],
+      summaries: [],
+      issues: [
+        issueRow('b1', 'build', 'lint', { file: 'a.ts', col: 3, line: 5, message: 'no-console' }),
+        issueRow('h1', 'build', 'lint', { file: 'a.ts', col: 3, line: 12, message: 'no-console' }), // +7 lines
+      ],
+    })
+    const block = c.issues[0]!
+    expect(block.moved).toBe(1)
+    expect(block.added).toHaveLength(0)
+    expect(block.resolved).toHaveLength(0)
+  })
+
+  it('a shift beyond proximity is a genuine new + resolved pair', () => {
+    const c = buildReportComparison({ build: 'h1' }, { build: 'b1' }, {
+      metrics: [],
+      summaries: [],
+      issues: [
+        issueRow('b1', 'build', 'lint', { file: 'a.ts', col: 3, line: 5, message: 'no-console' }),
+        issueRow('h1', 'build', 'lint', { file: 'a.ts', col: 3, line: 40, message: 'no-console' }), // +35 lines
+      ],
+    })
+    const block = c.issues[0]!
+    expect(block.moved).toBe(0)
+    expect(block.added).toHaveLength(1)
+    expect(block.resolved).toHaveLength(1)
+  })
+
+  it('a changed column is fair game — not treated as a shift', () => {
+    const c = buildReportComparison({ build: 'h1' }, { build: 'b1' }, {
+      metrics: [],
+      summaries: [],
+      issues: [
+        issueRow('b1', 'build', 'lint', { file: 'a.ts', col: 3, line: 5, message: 'no-console' }),
+        issueRow('h1', 'build', 'lint', { file: 'a.ts', col: 9, line: 6, message: 'no-console' }), // col moved
+      ],
+    })
+    const block = c.issues[0]!
+    expect(block.moved).toBe(0)
+    expect(block.added).toHaveLength(1)
+    expect(block.resolved).toHaveLength(1)
   })
 
   it('with no base vector, every issue is added and baseMissing is true', () => {
