@@ -12,7 +12,7 @@ tool and the cloud service share one architecture.
 
 ## The system, top to bottom
 
-![Scenetest Architecture Diagram](./scenetest-cloud-architecture-3-layers.png)
+![Scenetest Architecture Diagram](./design/scenetest-cloud-architecture-3-layers.png)
 
 GitHub is the one git host we support. It sends webhooks to the **Worker** —
 the main app — which authenticates them, records the PR, and spins up that
