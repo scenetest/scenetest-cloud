@@ -50,7 +50,7 @@ export interface PipelineConfig {
 // `type` selects the worker-side adapter that parses the box's output.
 export interface ReportSpec {
   name: string
-  type: 'loc' | 'lint' | 'typecheck'
+  type: 'loc' | 'lint' | 'typecheck' | 'bundle'
   watch: string[]
   // LOC: paths matched by `watch` but also matching `exclude` are not counted
   // (they still hash into the key, so adding an exclude busts the report).
@@ -62,17 +62,20 @@ export interface ReportSpec {
   tool?: string
   // Build stage this report depends on (toolchain parent). Absent → root only.
   after?: string
+  // Bundle: the built output dir to measure (default 'dist').
+  dist?: string
 }
 
 // A report resolved to its input hash, as sent to the box for execution.
 export interface ReportPlanItem {
   name: string
-  type: 'loc' | 'lint' | 'typecheck'
+  type: 'loc' | 'lint' | 'typecheck' | 'bundle'
   inputHash: string
   watch: string[]
   exclude?: string[]
   run?: string
   tool?: string
+  dist?: string
 }
 
 export interface StagePlan {
@@ -147,7 +150,7 @@ export function parsePipeline(raw: string): PipelineConfig | null {
   }
 }
 
-const REPORT_TYPES = new Set(['loc', 'lint', 'typecheck'])
+const REPORT_TYPES = new Set(['loc', 'lint', 'typecheck', 'bundle'])
 
 // Reports are additive outputs, not pipeline structure: a malformed entry is
 // dropped (and ignored), never fatal — one typo'd report must not disable the
@@ -164,7 +167,8 @@ export function parseReports(raw: unknown): ReportSpec[] {
     if (r.run !== undefined && typeof r.run !== 'string') continue
     if (r.tool !== undefined && typeof r.tool !== 'string') continue
     if (r.after !== undefined && typeof r.after !== 'string') continue
-    // Tool reports need a command to run; builtin loc must not carry one.
+    if (r.dist !== undefined && typeof r.dist !== 'string') continue
+    // Tool reports need a command to run; builtin loc/bundle must not carry one.
     if ((r.type === 'lint' || r.type === 'typecheck') && typeof r.run !== 'string') continue
     seen.add(r.name)
     out.push({
@@ -175,6 +179,7 @@ export function parseReports(raw: unknown): ReportSpec[] {
       ...(r.run !== undefined ? { run: r.run as string } : {}),
       ...(r.tool !== undefined ? { tool: r.tool as string } : {}),
       ...(r.after !== undefined ? { after: r.after as string } : {}),
+      ...(r.dist !== undefined ? { dist: r.dist as string } : {}),
     })
   }
   return out
@@ -274,6 +279,7 @@ export async function computeReportPlan(
       run: r.run ?? null,
       tool: r.tool ?? null,
       after: r.after ?? null,
+      dist: r.dist ?? null,
     })
     const hash = (await sha256Hex([config, parent, pipelineFileSha, ...matched].join('\n'))).slice(0, 16)
     out[r.name] = hash
@@ -285,6 +291,7 @@ export async function computeReportPlan(
       ...(r.exclude !== undefined ? { exclude: r.exclude } : {}),
       ...(r.run !== undefined ? { run: r.run } : {}),
       ...(r.tool !== undefined ? { tool: r.tool } : {}),
+      ...(r.dist !== undefined ? { dist: r.dist } : {}),
     })
   }
   return { reports: out, items }

@@ -33,6 +33,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join, relative } from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 const env = (k, fallback) => {
   const v = process.env[k] ?? fallback
@@ -210,6 +211,11 @@ function runReport(item, cwd) {
       relayReportRaw(item.name, 'loc', item.inputHash, raw, cwd, undefined, 0)
       return
     }
+    if (item.type === 'bundle') {
+      const raw = JSON.stringify(collectBundle(cwd, item.dist || 'dist'))
+      relayReportRaw(item.name, 'bundle', item.inputHash, raw, cwd, undefined, 0)
+      return
+    }
     if (typeof item.run !== 'string') return
     let raw = ''
     let exitCode = 0
@@ -279,6 +285,38 @@ function collectLoc(cwd, watch, exclude) {
   }
   walk(cwd)
   return { files }
+}
+
+// Measure the eager-load JS of a built dist dir: the entry chunk plus every
+// modulepreload chunk listed in index.html (what a first paint downloads), each
+// with raw + gzipped size. Classify index vs vendor chunks and strip Vite's
+// 8-char content hash for a stable logical name. Mirrors the reference CI's
+// measure(); the worker's bundle adapter turns this into metrics.
+function collectBundle(cwd, dist) {
+  const dir = join(cwd, dist)
+  let html
+  try { html = readFileSync(join(dir, 'index.html'), 'utf8') } catch { return { eagerRaw: 0, eagerGz: 0, chunks: [] } }
+  const refs = [...new Set([...html.matchAll(/assets\/[A-Za-z0-9._-]+\.js/g)].map((m) => m[0]))]
+  let eagerRaw = 0
+  let eagerGz = 0
+  const chunks = []
+  for (const rel of refs) {
+    let buf
+    try { buf = readFileSync(join(dir, rel)) } catch { continue }
+    const raw = buf.length
+    const gz = gzipSync(buf).length
+    eagerRaw += raw
+    eagerGz += gz
+    const name = rel.slice('assets/'.length)
+    if (name.includes('-vendor-')) {
+      chunks.push({ logical: name.replace(/-[A-Za-z0-9_-]{8}\.js$/, ''), kind: 'vendor', raw, gz })
+    } else if (name.startsWith('index-')) {
+      chunks.push({ logical: 'index', kind: 'index', raw, gz })
+    } else {
+      chunks.push({ logical: name.replace(/-[A-Za-z0-9_-]{8}\.js$/, ''), kind: 'other', raw, gz })
+    }
+  }
+  return { eagerRaw, eagerGz, chunks }
 }
 
 // Local ingest: same body shape as the cloud's POST /api/events/:runId, so
