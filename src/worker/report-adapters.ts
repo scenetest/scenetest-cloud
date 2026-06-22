@@ -26,6 +26,7 @@ export function parseReport(type: string, raw: string, ctx: AdapterCtx = {}): Re
     if (type === 'loc') return locAdapter(raw)
     if (type === 'lint') return lintAdapter(raw, ctx)
     if (type === 'typecheck') return typecheckAdapter(raw, ctx)
+    if (type === 'bundle') return bundleAdapter(raw)
   } catch {
     // A tool that emitted unparseable output (crash, wrong format, version skew)
     // records an error summary rather than wrong data — never a bad diff.
@@ -177,5 +178,55 @@ function typecheckAdapter(raw: string, ctx: AdapterCtx): ReportItem[] {
     { type: 'summary', kind: 'typecheck', summary: { errors, warnings } },
     { type: 'metric', name: 'typecheck.errors', value: errors, unit: 'count' },
     { type: 'metric', name: 'typecheck.warnings', value: warnings, unit: 'count' },
+  ]
+}
+
+// Bundle: the box measures the built output dir (the eager-load JS — the entry
+// chunk plus every modulepreload chunk in index.html — with raw and gzipped
+// sizes) and ships this structured shape. The adapter turns it into metrics so
+// the comparison shows the deltas a first paint actually downloads. Vendor
+// chunks become per-chunk metrics keyed by their logical name (the content hash
+// stripped), so an unchanged vendor reads as a zero delta and a grown one
+// stands out. Built on the reference CI's measure(): see the original-motivation
+// workflow.
+interface BundleChunk {
+  logical?: string // hash-stripped name, e.g. 'react-vendor'
+  kind?: 'index' | 'vendor' | 'other'
+  raw?: number
+  gz?: number
+}
+interface BundleData {
+  eagerRaw?: number
+  eagerGz?: number
+  chunks?: BundleChunk[]
+}
+
+function bundleAdapter(raw: string): ReportItem[] {
+  const data = JSON.parse(raw) as BundleData
+  const chunks = Array.isArray(data.chunks) ? data.chunks : []
+  const metrics: ReportItem[] = [
+    { type: 'metric', name: 'bundle.eager.raw', value: data.eagerRaw ?? 0, unit: 'bytes' },
+    { type: 'metric', name: 'bundle.eager.gzip', value: data.eagerGz ?? 0, unit: 'bytes' },
+  ]
+  const index = chunks.find((c) => c.kind === 'index')
+  if (index) {
+    metrics.push({ type: 'metric', name: 'bundle.index.raw', value: index.raw ?? 0, unit: 'bytes' })
+    metrics.push({ type: 'metric', name: 'bundle.index.gzip', value: index.gz ?? 0, unit: 'bytes' })
+  }
+  for (const c of chunks) {
+    if (c.kind !== 'vendor' || !c.logical) continue
+    metrics.push({ type: 'metric', name: `bundle.vendor.${c.logical}.raw`, value: c.raw ?? 0, unit: 'bytes' })
+    metrics.push({ type: 'metric', name: `bundle.vendor.${c.logical}.gzip`, value: c.gz ?? 0, unit: 'bytes' })
+  }
+  return [
+    ...metrics,
+    {
+      type: 'summary',
+      kind: 'bundle',
+      summary: {
+        eager: { raw: data.eagerRaw ?? 0, gz: data.eagerGz ?? 0 },
+        chunks: chunks.length,
+      },
+    },
   ]
 }

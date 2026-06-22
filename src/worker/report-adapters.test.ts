@@ -133,3 +133,37 @@ describe('typecheck adapter (tsc default output)', () => {
     expect(items).toContainEqual({ type: 'summary', kind: 'typecheck', summary: { errors: 0, warnings: 0 } })
   })
 })
+
+describe('bundle adapter', () => {
+  const raw = JSON.stringify({
+    eagerRaw: 300_000,
+    eagerGz: 100_000,
+    chunks: [
+      { logical: 'index', kind: 'index', raw: 50_000, gz: 18_000 },
+      { logical: 'react-vendor', kind: 'vendor', raw: 150_000, gz: 50_000 },
+      { logical: 'chart-vendor', kind: 'vendor', raw: 100_000, gz: 32_000 },
+    ],
+  })
+
+  it('emits eager total, index, and per-vendor metrics keyed by logical name', () => {
+    const items = parseReport('bundle', raw)
+    expect(items).toContainEqual({ type: 'metric', name: 'bundle.eager.raw', value: 300_000, unit: 'bytes' })
+    expect(items).toContainEqual({ type: 'metric', name: 'bundle.eager.gzip', value: 100_000, unit: 'bytes' })
+    expect(items).toContainEqual({ type: 'metric', name: 'bundle.index.raw', value: 50_000, unit: 'bytes' })
+    expect(items).toContainEqual({ type: 'metric', name: 'bundle.vendor.react-vendor.gzip', value: 50_000, unit: 'bytes' })
+    expect(items).toContainEqual({ type: 'metric', name: 'bundle.vendor.chart-vendor.raw', value: 100_000, unit: 'bytes' })
+  })
+
+  it('an unchanged vendor reads as a zero delta in the comparison', () => {
+    // Same logical name + same size on both hashes → metric pairs to delta 0.
+    const items = parseReport('bundle', raw)
+    const m = items.find((i) => i.type === 'metric' && i.name === 'bundle.vendor.react-vendor.raw')
+    expect(m).toMatchObject({ value: 150_000 })
+  })
+
+  it('survives an empty/missing dist gracefully', () => {
+    const items = parseReport('bundle', JSON.stringify({ eagerRaw: 0, eagerGz: 0, chunks: [] }))
+    expect(items).toContainEqual({ type: 'metric', name: 'bundle.eager.raw', value: 0, unit: 'bytes' })
+    expect(items).toContainEqual({ type: 'summary', kind: 'bundle', summary: { eager: { raw: 0, gz: 0 }, chunks: 0 } })
+  })
+})

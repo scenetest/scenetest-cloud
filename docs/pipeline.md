@@ -92,7 +92,8 @@ an unrelated PR never recomputes it.
   "reports": [
     { "name": "loc",       "type": "loc",       "watch": ["src/**"], "exclude": ["**/*.test.ts"] },
     { "name": "lint",      "type": "lint",      "watch": ["src/**"], "run": "pnpm exec oxlint --format=json src", "after": "build" },
-    { "name": "typecheck", "type": "typecheck", "watch": ["src/**", "tsconfig*.json"], "run": "pnpm exec tsc --noEmit", "after": "build" }
+    { "name": "typecheck", "type": "typecheck", "watch": ["src/**", "tsconfig*.json"], "run": "pnpm exec tsc --noEmit", "after": "build" },
+    { "name": "bundle",    "type": "bundle",    "watch": ["src/**"], "after": "build", "dist": "dist" }
   ],
   "scenes": "pnpm exec scenetest"
 }
@@ -101,11 +102,12 @@ an unrelated PR never recomputes it.
 | Field | Required | Meaning |
 |---|---|---|
 | `name` | yes | `[a-z0-9_-]`, max 32, unique among reports |
-| `type` | yes | `loc`, `lint`, or `typecheck` (the worker-side parser to apply) |
+| `type` | yes | `loc`, `lint`, `typecheck`, or `bundle` (the worker-side parser to apply) |
 | `watch` | yes | globs whose content keys the report (same glob rules as stages) |
 | `run` | for `lint`/`typecheck` | command emitting the tool's output on stdout (see types below) |
 | `exclude` | no | (`loc`) paths matched by `watch` but not counted |
-| `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter/tsc version in the lockfile) re-runs the report, not just a source change |
+| `dist` | no | (`bundle`) the built output dir to measure, default `dist` |
+| `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter/tsc version in the lockfile, or just a rebuild) re-runs the report, not just a source change |
 
 Types today:
 
@@ -115,6 +117,10 @@ Types today:
   (auto-detected). Reports findings with severities.
 - **`typecheck`** — `run` emits `tsc`'s default (non-pretty) output, i.e. plain
   `pnpm exec tsc --noEmit`. Reports `TS####` diagnostics.
+- **`bundle`** — built in, no tool (point `after` at the build stage). Measures
+  the eager-load JS of the `dist` dir — the entry chunk plus every
+  `modulepreload` chunk in `index.html`, raw and gzipped — and the per-vendor
+  chunk sizes, so the comparison shows what a first paint downloads.
 
 How it works: the box runs/collects each report after the build is ready and
 ships the raw output up; scenetest-cloud owns the parser for each `type`, so

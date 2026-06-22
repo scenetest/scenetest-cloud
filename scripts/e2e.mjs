@@ -528,19 +528,29 @@ async function main() {
       boxId: 'e2e-box-2',
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
-      // The stage also drops a known source file so the loc report below counts
-      // a deterministic line total.
-      stages: [{ name: 'setup', run: "mkdir -p src && printf 'a\\nb\\nc\\n' > src/x.ts && touch stage-ran.marker" }],
+      // The stage drops a known source file (loc counts 3 lines) and a tiny
+      // built dist/ (the bundle report measures it: a 120-byte index chunk + a
+      // 200-byte vendor chunk, both referenced from index.html → 320 eager raw).
+      stages: [{
+        name: 'setup',
+        run: "mkdir -p src dist/assets && printf 'a\\nb\\nc\\n' > src/x.ts" +
+          " && head -c 120 /dev/zero | tr '\\0' a > dist/assets/index-abcd1234.js" +
+          " && head -c 200 /dev/zero | tr '\\0' b > dist/assets/react-vendor-deadbeef.js" +
+          " && printf '<script src=assets/index-abcd1234.js></script><link rel=modulepreload href=assets/react-vendor-deadbeef.js>' > dist/index.html" +
+          " && touch stage-ran.marker",
+      }],
       // Static-analysis reports (#25) run after /ready. `loc` is builtin (the
       // agent walks src/** and counts lines → 3); `lint` runs a command whose
       // stdout is real oxlint --format=json output the worker adapter parses
-      // (miette diagnostics: rule in `code`, line/col in labels[].span).
+      // (miette diagnostics: rule in `code`, line/col in labels[].span);
+      // `bundle` is builtin (the agent measures dist/ → 320 eager raw bytes).
       reports: [
         { name: 'loc', type: 'loc', inputHash: 'loc-h1', watch: ['src/**'] },
         {
           name: 'lint', type: 'lint', inputHash: 'lint-h1', tool: 'oxlint',
           run: `echo '{"diagnostics":[{"message":"debugger statement is not allowed","code":"eslint(no-debugger)","severity":"warning","filename":"src/x.ts","labels":[{"span":{"offset":0,"length":8,"line":1,"column":1}}]}],"number_of_files":1}'`,
         },
+        { name: 'bundle', type: 'bundle', inputHash: 'bundle-h1', watch: ['src/**'], dist: 'dist' },
       ],
       // The scenes command from pipeline.json rides the update. This stands
       // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
@@ -605,14 +615,30 @@ async function main() {
         "SELECT message FROM overview_issues WHERE stage = 'lint' AND input_hash = 'lint-h1'")
       return r.length === 1 && r[0].message === 'debugger statement is not allowed'
     }), agentLog)
+  check('agent bundle report measured dist/ (builtin gzip + worker adapter)',
+    await waitFor(() => {
+      const r = d1Query(persistDir,
+        "SELECT value FROM overview_metrics WHERE stage = 'bundle' AND input_hash = 'bundle-h1' AND name = 'bundle.eager.raw'")
+      return r.length === 1 && r[0].value === 320
+    }), agentLog)
   // Point PR 10's run at these report hashes so the comparison view resolves
   // them (no base vector → every issue is "added").
   d1Query(persistDir,
-    `UPDATE runs SET head_vector_json = '{"loc":"loc-h1","lint":"lint-h1"}' WHERE id = 'e2e-agent-run'`)
-  const agentReports = await j(await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/10/reports`, { headers: { cookie } }))
+    `UPDATE runs SET head_vector_json = '{"loc":"loc-h1","lint":"lint-h1","bundle":"bundle-h1"}' WHERE id = 'e2e-agent-run'`)
+  // The d1 subprocesses above leave undici's keep-alive socket idle long enough
+  // for wrangler to close it; a reused socket then reads "other side closed".
+  // Retry on a fresh connection — a harness artifact, not a worker error.
+  const fetchJson = async (url, init) => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await j(await fetch(url, init)) }
+      catch (err) { if (attempt >= 3) throw err; await new Promise((r) => setTimeout(r, 200)) }
+    }
+  }
+  const agentReports = await fetchJson(`${BASE}/api/cloud/repos/demo/watched/pr/10/reports`, { headers: { cookie } })
   check('agent reports surface in the PR comparison view',
     agentReports.available === true &&
       agentReports.comparison.metrics.some((m) => m.name === 'loc.total' && m.head === 3) &&
+      agentReports.comparison.metrics.some((m) => m.name === 'bundle.eager.raw' && m.head === 320) &&
       agentReports.comparison.issues.some((i) => i.stage === 'lint' && i.added.some((a) => a.message === 'debugger statement is not allowed')),
     JSON.stringify(agentReports.comparison))
 

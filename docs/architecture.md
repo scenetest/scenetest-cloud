@@ -379,53 +379,38 @@ immediately — latest wins. The only state worth a verdict is the one that
 might merge, and a late completion report from the old box cannot overwrite
 the cancellation.
 
-Static-analysis reports — lines of code, lint findings, and (landing behind
-the same shape) formatter findings, unit-test pass/fail, bundle sizes — are
-stage outputs keyed the same way, stored in the overview tables. As of
-migration 0008 those tables (`overview_metrics`, `overview_summaries`,
-`overview_issues`) are keyed by `(stage, input_hash)`, not by run: a report is
-content-addressed exactly like the artifact it ships beside. The PR comparison
-view is "report at base hash vs report at head hash," and identical inputs
-share one report across runs and across PRs — a cache-hit (skipped) report
-already exists for that hash, so dedupe falls out for free.
+Static-analysis reports are stage outputs keyed the same way and stored in the
+overview tables (`overview_metrics`, `overview_summaries`, `overview_issues`),
+keyed by `(stage, input_hash)` — content-addressed exactly like the artifact
+they ship beside. The PR comparison view is "report at base hash vs report at
+head hash," and identical inputs share one report across runs and across PRs —
+a cache-hit (skipped) report already exists for that hash, so dedupe falls out
+for free.
 
-Reports are a **curated, scenetest-owned catalog of types**, not free-form
-user output (#25). The user's `pipeline.json` gains a `reports` array — each
-entry names a `type` (the adapter), the globs it `watch`es, and for tool
-reports how to `run` the tool (docs/pipeline.md). That config hashes into the
-report's key the same way a stage's does, with an optional `after` folding in a
-build stage's hash so a toolchain change invalidates the report too. The split
-of labor: **the box runs the tool (or, for built-in types like LOC, does the
-raw IO), and the worker owns the parser.** The box ships raw machine-readable
-output up its existing channel (`{kind:'report-raw', name, type, inputHash,
-raw, root}`); the PR coordinator hands `raw` to the type's adapter
-(`report-adapters.ts`) and upserts the overview tables — a global,
-content-addressed projection, like `stage_cache.report_json`, not a per-run log
-event (no `run_id`). Keeping the parsers in `src/` (one place, TypeScript,
-unit-tested) means a parser fix never re-bakes the runner image, and adding a
-tool is a new adapter, not a schema or agent change. Adapters today are `loc`
-(built in), `lint` (ESLint `-f json` and oxlint `--format=json`, one adapter
-that auto-detects the shape), and `typecheck` (`tsc` default output). Only
-cache-miss reports are
-even sent to the box: `ensureBox` filters the plan against an
-`overview_summaries` presence check, so an unchanged or already-built report is
-skipped.
-
-The comparison's issue diff is two-pass, matching the reference CI it replaces:
-an exact set-diff by fingerprint (file + line + col + message), then a second
-pass that pairs a leftover "new" with a leftover "resolved" when it is the same
-finding (file + col + message) shifted ≤10 lines — an unrelated edit bumped its
-line number — and counts that as *moved*, neither a regression nor a fix.
+The design point is a **pluggable registry of report types**, so new steps in
+the analysis are cheap to add: each type is one adapter, and adding one is not a
+schema, agent, or wire-protocol change. The user's `pipeline.json` enables and
+parameterizes types (which globs a report watches, how to run its tool); that
+config hashes into the report's key like any other input. The split that keeps
+the registry cheap: **the box runs or collects the step, and the worker owns
+the parser** (`report-adapters.ts`, in `src/` — one place, unit-tested, so a
+parser fix never re-bakes the runner image). Built-in steps (lines of code,
+bundle size) do their IO on the box and ship structured data; tool steps (lint
+via oxlint/eslint, unit tests via vitest, …) run a command and ship its output;
+either way the worker normalizes to the metric/summary/issues shape and upserts
+the overview tables — a global, content-addressed projection, like
+`stage_cache.report_json`, not a per-run log event. Scenetest's own
+scene/assertion results are the same kind of per-PR signal, surfaced from the
+event log and `scene_executions` projection rather than re-derived. Only
+cache-miss reports are sent to the box at all (`ensureBox` filters the plan
+against an `overview_summaries` presence check).
 
 The base-side hashes the comparison needs come from `computeStagePlan` run
-against the PR's base sha at run creation; both the head and base **report
-vectors** (report name → input hash) are stored on the `runs` row
-(`head_vector_json` / `base_vector_json`) so the read path resolves the two
-hashes without re-hitting GitHub. Scene/assertion pass-fail counts are *not*
-reports — they are runtime results already in the event log and the
-`scene_executions` projection, surfaced from there rather than re-derived. A
-PR-comment bot, like the original motivation screenshots, can come later as a
-second consumer of the overview tables.
+against the PR's base sha at run creation; the head and base report vectors
+(report name → input hash) are stored on the `runs` row so the read path
+resolves both hashes without re-hitting GitHub. A PR-comment bot, like the
+original motivation screenshots, can come later as a second consumer of the
+overview tables.
 
 The pipeline definition (stage commands and watch globs) lives in the
 user's repo, in their scenetest folder, because it must change atomically
