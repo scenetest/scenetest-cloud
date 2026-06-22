@@ -5,6 +5,50 @@ a listener into the app under test, a CLI drives Playwright sessions, and a
 dashboard shows assertion results live. This document describes how the dev
 tool and the cloud service share one architecture.
 
+## The system, top to bottom
+
+![Scenetest Architecture Diagram](./scenetest-cloud-architecture-3-layers.png)
+
+GitHub is the one git host we support. It sends webhooks to the **Worker** —
+the main app — which authenticates them, records the PR, and spins up that
+PR's coordinator. Alongside the Worker runs a singleton **Home Coordinator**
+Durable Object: it holds the realtime WebSocket connections to the web
+interface and pushes live updates about running tests, reading settled state
+from a **D1** database. The Worker, the Home Coordinator, and D1 together are
+the permanent, cross-PR top of the system — the part that outlives any one run.
+
+One level down is everything that happens inside a single PR. The web UI mounts
+the **dashboard widget**, which embeds the entire dev experience in the cloud
+service, and takes realtime updates from that PR's own **PR Coordinator**
+Durable Object. The PR Coordinator owns a **SQLite** log of every event the PR
+has produced — the source of truth — and manages its own **R2** archives at run
+boundaries. It receives those events from below, up the wire from the test
+sandbox.
+
+The sandbox is managed entirely by the `scenetest-js` repo, and mirrors almost
+exactly what runs on a developer's own machine. It is a short-lived VPS with a
+**single** outbound WebSocket back to the PR Coordinator — its only connection
+to the outside world. That one socket carries traffic both ways: events travel
+up it, and signals come down it — refresh the checkout and reinstall
+dependencies, start or stop a run, and so on.
+
+That bridge — the cloud-embedded dashboard talking to the PR Coordinator — is
+conceptually the same as the bridge a developer already has locally: their
+**dev dashboard** talking to the **Vite plugin**, which uses the **CLI** to
+drive the headless Playwright browsers that power the end-to-end tests. The two
+deployments are the same shape; only the middle hop differs.
+
+Commands from either dashboard — cloud or local — terminate at the CLI, which
+drives the browser. The CLI returns pass/fail and other results onto the event
+log, back to the Vite middleware (the **receiver**), and from there either up to
+the cloud or simply into the local logs that accrete in your `scenetest/.reports`
+directory. Assertion pass/fail signals arrive from the browser through that same
+receiver endpoint, and an injected **listener** watches for console errors and
+the like. Both kinds of information — driver results and in-page assertions —
+join one event stream and flow outward and upward, outward and upward, until
+they settle into aggregates in D1, served either by the Worker at the top or by
+its Durable Object for realtime.
+
 ## Repository layout
 
 Code is grouped by release channel and deploy cadence rather than by topic.
