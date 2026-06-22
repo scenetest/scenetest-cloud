@@ -75,14 +75,18 @@ consumes this vocabulary — the injected listener and the CLI produce events, t
 human produces commands, the dashboard and the log consume them — and everything
 below is an implementation behind it, swappable without changing it.
 
-It is its own package, and the only thing the cloud Worker depends on from the
-monorepo, because:
+It is its own package because:
 
 1. Most of its consumers (CLI, plugin, dashboard) live in the monorepo.
 2. The open-source tool has to work without the cloud existing, so the
    dependency arrow points from cloud to toolkit and never the reverse.
 3. Users run last month's CLI against today's worker. Routing wire-format
    changes through a published release keeps version skew visible.
+
+The cloud depends on two monorepo packages — the `dashboard` widget it serves to
+the browser, and this protocol. Only the protocol enters the worker's *server*
+runtime; the dashboard ships in the browser bundle. Keeping them separate is what
+lets the server route events without carrying a Preact renderer.
 
 ## The receiver and the transport
 
