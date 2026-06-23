@@ -143,8 +143,10 @@ Two storage categories, and nothing is allowed to blur them.
 
 **The log** is every event, append-only, ordered. It is the one source of
 truth — the protocol message stream itself. Assertion results, Playwright
-actions, driver failures, the human's commands: all of it is one ordered stream
-of opaque messages.
+actions, driver failures: all of it is one ordered stream of opaque messages.
+Commands are *not* in this stream: a command is a transient instruction, not a
+fact, so only its *effect* is logged — a `stop` becomes a `run:end cancelled`,
+and starting a run becomes that run's first events.
 
 **Projections** are everything derived from the log: a scene's current status, a
 run's score, the home view's toplines, the overview comparison deltas. A
@@ -200,10 +202,14 @@ the cloud persists them, because its projections answer cross-PR queries and mus
 outlive the PR object that computed them. That persistence is the performance
 move; it adds no truth the log does not already hold.
 
-The one thing in neither category is **command delivery state**. A command is in
-the log like any other message, but its delivery (pending → sent to the box) is
-control-plane state that mutates and is not derivable from observations. It rides
-alongside the append-only log; it is not part of the pure-function story.
+**Commands are neither log nor projection.** A command is a transient
+control-plane instruction, not a fact — so it is never logged as such; only the
+effect of acting on it enters the stream (above). Its in-flight state (queued
+while the box is offline, pending → sent) is control-plane storage — the
+coordinator's command queue — that mutates and is not derivable from
+observations; it rides alongside the append-only log, not in it. The box's
+`.commands.jsonl` drop was only ever an IPC for the delivery hop, never a record
+we need; it retires with the box's move to the receiver.
 
 ## Dev mode
 
