@@ -5,10 +5,10 @@ a listener into the app under test, a CLI drives Playwright sessions, and a
 dashboard shows assertion results live. This document describes how the dev
 tool and the cloud service share one architecture.
 
-> **Status.** This describes the *intended* architecture. Where the running
-> code differs from the target — chiefly the box's hand-rolled agent converging
-> on the shared **receiver**, and the cloud reusing that same relay element —
-> the text marks it **(transitional)**.
+> **Status.** This describes the *intended* architecture. The one place the
+> running code meaningfully differs from the target is the test box: it
+> hand-rolls its relay in a small agent today, and is converging on the shared
+> **receiver** package. The text marks that **(transitional)**.
 
 ## The system, top to bottom
 
@@ -90,30 +90,44 @@ the browser, and this protocol. Only the protocol enters the worker's *server*
 runtime; the dashboard ships in the browser bundle. Keeping them separate is what
 lets the server route events without carrying a Preact renderer.
 
-## The receiver and the transport
+## The relay, the command path, and the transport client
 
-The two ends of the wire. The **protocol** is the contract both speak; the
-**receiver** (server) and the **transport** (client) are duals that move it.
+The protocol is the contract; three pieces move it. The **sequenced events
+relay** carries events *up*: receive → assign order → log → fan out → pass up.
+The **command path** carries commands *down*: authenticate at the boundary, then
+forward to the CLI — thin and transient, the relay's mirror, not part of it. The
+**transport client** is the relay's client-side dual: it subscribes-and-reduces
+where the relay orders-and-emits.
 
-### The receiver (the relay)
+### The sequenced events relay
 
-`@scenetest/receiver` is the server-side half of the pipeline: it accepts
-protocol events, assigns the layer's order, and emits to sinks (a durable log, a
-live stream, the next relay up). It is the **relay**, and the same element
-appears at every layer that carries events upward. Dev runs it as Vite
-middleware (`/__scenetest`).
+The relay is the substantial, *stackable* element: receive → assign order → log →
+fan out → pass up. The same shape appears at every layer that carries events
+upward — the box and the PR Durable Object both — which is what makes the
+`id`/`seq` duality and "the ordering log is the first sink" coherent: appending to
+the ordering log is what *assigns* the order the other sinks and the up-relay
+carry, so it runs first. `@scenetest/receiver` is the relay's implementation;
+"receiver" names its ingest face. Dev runs it as Vite middleware (`/__scenetest`).
 
-**(Transitional — target state.)** The cloud's earlier plan was that it would
-*not* run the receiver: the box hand-rolled the relay in a small agent, and the
-PR object hand-rolled its own. The direction now is the opposite — one relay
-element, reused. The box runs the receiver package (retiring the agent), and the
-PR Durable Object is the same relay one layer up, differing only in its ordering
-log (SQLite vs the box's `.jsonl`) and its counter (`id` vs `seq`). The ordering
-log is special: it is the first sink, because appending to it is what *assigns*
-the order the other sinks and the up-relay carry. What every layer shares is the
-**wire contract** (the protocol and its envelope-grade relay rule); version
-normalization, when it's needed, belongs at the relay — with the Durable Object
-the most-deployable place to keep it current.
+The relay is a useful **concept** at every layer, but useful **code reuse** at
+only one:
+
+- **The box and dev share the code.** The dev receiver and the box relay do
+  nearly the same things — same HTTP ingest, same `.jsonl` sink, same protocol —
+  so the box runs `@scenetest/receiver` directly. **(Transitional:** today the
+  box hand-rolls this in a small agent; converging on the package retires the
+  agent, its `commands.jsonl` hand-off, and its bespoke wire framing.**)**
+- **The PR Durable Object shares the *shape*, not the code.** It is the relay one
+  layer up, but with a different substrate at every step (WebSocket ingest, a
+  SQLite ordering log minting `id`, hibernation-WS fan-out) and a pile of work the
+  relay concept doesn't cover (box lifecycle, D1 projections, R2 archiving, home
+  rollups, the command queue). The shared skeleton is a few lines; a receiver
+  flexible enough to run inside the DO would cost more than it saves. So the DO
+  stays its own thing and mirrors the concept, not the implementation.
+
+What every layer genuinely shares is the **wire contract** — the protocol and its
+envelope-grade relay rule. Version normalization, when needed, belongs at a relay;
+the Durable Object is the most-deployable place to keep it current.
 
 ### The dashboard widget
 
@@ -121,15 +135,13 @@ The Preact dashboard is a component the host mounts into its light DOM,
 parameterized by a transport adapter. It renders the same UI in dev and cloud;
 only the adapter differs.
 
-### The transport adapter
+### The transport client
 
-The injection point where dev and cloud differ, and the **client dual of the
-receiver**: where the receiver orders-and-emits on the server, the transport
-subscribes-and-reduces on the client. The widget calls it to subscribe to the
-ordered stream and to send commands; it speaks to whatever backend is present —
-Vite middleware (SSE) in dev, the worker API (WebSocket) in cloud. Because the
-dev/cloud difference is confined to this object, the dashboard behaves the same
-in both by construction. The subscription replays the ordered stream from a
+The injection point where dev and cloud differ — the relay's client-side dual.
+The widget calls the transport client to subscribe to the ordered stream and to
+send commands; it speaks to whatever backend is present — Vite middleware (SSE)
+in dev, the worker API (WebSocket) in cloud. Because the dev/cloud difference is
+confined to this object, the dashboard behaves the same in both by construction. The subscription replays the ordered stream from a
 cursor on connect, then delivers live deltas through the same channel — history
 and live fold the same way, with no separate snapshot fetch.
 
@@ -335,7 +347,7 @@ The cloud path, end to end. Steps 1–3 are identical on a laptop in dev mode.
 │ Playwright-driven browser   │      │                  │      │ dashboard  │
 │   └─ injected listener ──┐  │      │  Worker (Hono)   │      │ widget     │
 │ CLI / Playwright events ─┤  │  WS  │    └─ PR DO ─────┼──WS──┼─ transport │
-│   receiver (relay)* ◄────┘  ├──────┼──►  • SQLite log │      │  adapter   │
+│   sequenced events relay◄┘  ├──────┼──►  • SQLite log │      │  client    │
 │     ├─ .jsonl sink          │      │     • fan-out    │      └────────────┘
 │     └─ upstream sink ───────┘      │     • cmd queue  │
 │                                    │  projections→D1  │
