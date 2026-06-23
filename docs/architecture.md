@@ -71,79 +71,71 @@ the protocol versioning has failed.
 
 ## The protocol package
 
-`@scenetest/protocol` is a small versioned package defining the typed event and
-command vocabulary plus serialization. Every part of the system produces or
-consumes this vocabulary — the injected listener and the CLI produce events, the
-human produces commands, the dashboard and the log consume them — and everything
-below is an implementation behind it, swappable without changing it.
+`@scenetest/protocol` is a small versioned package defining the events traveling up
+the wire, and the commands traveling down. Sometimes the transport happens via POST,
+sometimes over a websocket or SSE, sometimes by tailing a log – the protocol package
+doesn't know about any of these details, it only provides types and validations
+(identifier functions like `isRunSummary`) so that any part of the system that emits
+or consumes events can do so in a uniform way.
 
-It is its own package because:
+The [protocol package is owned by the scenetest-js
+repository](https://github.com/scenetest/scenetest-js/tree/main/packages/protocol),
+because that is a stand-alone tool without the cloud service; so the dependency graph
+always points from this repo to that one.
 
-1. Most of its consumers (CLI, plugin, dashboard) live in the monorepo.
-2. The open-source tool has to work without the cloud existing, so the
-   dependency arrow points from cloud to toolkit and never the reverse.
-3. Users run last month's CLI against today's worker. Routing wire-format
-   changes through a published release keeps version skew visible.
+## Sequenced Events Relay, Command Path, Transport Client
 
-The cloud depends on two monorepo packages — the `dashboard` widget it serves to
-the browser, and this protocol. Only the protocol enters the worker's *server*
-runtime; the dashboard ships in the browser bundle. Keeping them separate is what
-lets the server route events without carrying a Preact renderer.
+**Events Relay:** This is the "events up" path; a machine is an events relay if
+it accepts events, assigns a stable order, logs them and fans them out to consumers
+and other relays, always in the same order. We
+currently have two relays:
 
-## The relay, the command path, and the transport client
+1. The Vite middleware's package `@scenetest/receiver`
+receives events from the running test, and from the CLI, logs them in an assigned
+order (`seq`), fans them out to the local dashboard via SSE, and (if running in
+cloud mode) passes them up to the PrCoordinator via WSS.
+2. The PrCoordinator is also a relay, receiving events from the test box via WSS,
+ordering them via SQLite auto-increment (`id`), and fanning out to the dashboards
+embedded in the cloud app, as well as to an "aggregates" handler that periodically
+reports progress to the HomeCoordinator and stores those meta-items in D1 for long
+term storage.
 
-The protocol is the contract; three pieces move it. The **sequenced events
-relay** carries events *up*: receive → assign order → log → fan out → pass up.
-The **command path** carries commands *down*: authenticate at the boundary, then
-forward to the CLI — thin and transient, the relay's mirror, not part of it. The
-**transport client** is the relay's client-side dual: it subscribes-and-reduces
-where the relay orders-and-emits.
+The PrCoordinator implements the same "Relay" shape, but intentionally does not
+use the same code, because the implementation differs at nearly every level, with
+only the vague shape and the protocol being shared between the two sites.
 
-### The sequenced events relay
+Note: SSE is the _preferred_ approach for a relay, but between a Durable Object and a
+browser, impractical, so we use Websockets/PartySocket.
 
-The relay is the substantial, *stackable* element: receive → assign order → log →
-fan out → pass up. The same shape appears at every layer that carries events
-upward — the box and the PR Durable Object both — which is what makes the
-`id`/`seq` duality and "the ordering log is the first sink" coherent: appending to
-the ordering log is what *assigns* the order the other sinks and the up-relay
-carry, so it runs first. `@scenetest/receiver` is the relay's implementation;
-"receiver" names its ingest face. Dev runs it as Vite middleware (`/__scenetest`).
+Note: When version normalisation is needed, the most natural and deployable place
+to implement it may be the PrCoordinator, but for now, YAGNI.
 
-The relay is a useful **concept** at every layer, but useful **code reuse** at
-only one:
+**Command Path:** The command path is required to validate commands and pass them
+along; it is a UI concern, a controller, but it doesn't have to log itself or
+assign a stable order or fan out to other things. It goes straight down till it
+reaches the Vite server which uses the CLI to start/stop/pause/retry tests. Once
+the command is acted on it goes from being a command to a fact, and only then is
+it recorded and broadcast on the sequenced events stream and passed back up to
+relays and user interfaces.
 
-- **The box and dev share the code.** The dev receiver and the box relay do
-  nearly the same things — same HTTP ingest, same `.jsonl` sink, same protocol —
-  so the box runs `@scenetest/receiver` directly. **(Transitional:** today the
-  box hand-rolls this in a small agent; converging on the package retires the
-  agent, its `commands.jsonl` hand-off, and its bespoke wire framing.**)**
-- **The PR Durable Object shares the *shape*, not the code.** It is the relay one
-  layer up, but with a different substrate at every step (WebSocket ingest, a
-  SQLite ordering log minting `id`, hibernation-WS fan-out) and a pile of work the
-  relay concept doesn't cover (box lifecycle, D1 projections, R2 archiving, home
-  rollups, the command queue). The shared skeleton is a few lines; a receiver
-  flexible enough to run inside the DO would cost more than it saves. So the DO
-  stays its own thing and mirrors the concept, not the implementation.
+**Transport Client:** The relay's client-side dual and the command path's initiator.
+The dashboard widget (used both as a local dev tool and in the cloud app) calls
+the transport client to subscribe to the ordered stream and to
+send commands; it speaks to whatever backend is present — Vite middleware (SSE)
+in dev, the worker API (WebSocket) in cloud. Because the dev/cloud difference is
+confined to this object, the dashboard behaves the same in both by construction.
+The subscription replays the ordered stream from a cursor on connect, then delivers
+live deltas through the same channel — history and live fold the same way, with no
+separate snapshot fetch.
 
-What every layer genuinely shares is the **wire contract** — the protocol and its
-envelope-grade relay rule. Version normalization, when needed, belongs at a relay;
-the Durable Object is the most-deployable place to keep it current.
+Any consumer of any Events Relay can use the Transport Client to produce real-time
+syncing Tanstack DB collections of the stream.
 
 ### The dashboard widget
 
 The Preact dashboard is a component the host mounts into its light DOM,
 parameterized by a transport adapter. It renders the same UI in dev and cloud;
 only the adapter differs.
-
-### The transport client
-
-The injection point where dev and cloud differ — the relay's client-side dual.
-The widget calls the transport client to subscribe to the ordered stream and to
-send commands; it speaks to whatever backend is present — Vite middleware (SSE)
-in dev, the worker API (WebSocket) in cloud. Because the dev/cloud difference is
-confined to this object, the dashboard behaves the same in both by construction. The subscription replays the ordered stream from a
-cursor on connect, then delivers live deltas through the same channel — history
-and live fold the same way, with no separate snapshot fetch.
 
 ## The log and its projections
 
@@ -177,27 +169,22 @@ archived-PR read all go through this one door. Whether the bytes come from a liv
 store or a durable archive is hidden behind it; the consumer sees one ordered
 stream.
 
-**The DO owns the log.** In the cloud, the box asserts a *fact* — `(seq,
-payload)`, its per-run sequence — and the PR object records it, minting a
-PR-global `id` in the order it received the fact. `seq` is the fact's; `id` is
-the *log's*: the canonical record of receive-order, not of when things happened.
-So a PR subscriber tails the log, not the fact-stream — it sees events in the
-order the DO logged them (frozen once minted), which need not be the order they
-occurred (a slow box, a reconnect resend, overlapping runs). That is the point:
-one authoritative receive-order, owned by one object, deterministic and
-replayable, so distributed real-time ordering across boxes never has to be
-reasoned about. The PR-anchored stream orders and resumes on `id`; the per-run
-view still orders on `seq`, which doubles as the resend-idempotency key
-(`UNIQUE(run_id, seq)`) — so a single `seq` authority per run is required, which
-is why the box's emitters funnel through one relay. Because the cross-run
-interleaving the `id` captures cannot be reconstructed from per-run facts and
-timestamps, the R2 archive carries `id` (and `ts`) per line. On revival, an
-archived run is folded back under its *original* `id`, so the stream replays
-identically no matter what order runs are restored in.
+**The DO is the final authority on the log.**
+Whatever box is running tests creates a log of *facts* — `(seq,
+payload)` with its own per-run ordering, and then passes it up to the PrCoordinator,
+which currently takes in only one fact stream but in theory could take in many. So
+it applies its own order, the `id` of inserting into its SQLite log table, minting
+the final ID order that will be stable across runs and replays, even if the entire
+DO spins down, archives to R2, and gets restored a year later.
 
-Where the two categories live, across both environments. The first row is not
-just dev: it is also the per-PR runner box — the production machine a user's app
-is spun up and tested on, running the same code path as a laptop.
+These two IDs represent the stable orders for a 2-tiered collation, but in theory
+we can add a third or even a fourth collation layer using the same pattern
+(`seq`, `seq2`, `seq3`, `id` (final)). For now, YAGNI.
+
+But from this final ID we can recreate every other thing about the PR, including all
+its aggregate reporting – so even the aggregates streamed through the HomeCoordinator
+are just caches; even if the D1 tables holding these aggregates were destroyed, the
+logs held in R2 could regreate them byte for byte.
 
 | | the log | projections |
 |---|---|---|
