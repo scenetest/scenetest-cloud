@@ -25,7 +25,7 @@ the permanent, cross-PR top of the system — the part that outlives any one run
 One level down is **The PR Coordinator** – everything that happens inside a
 single PR. It's meant to mimic what a developer experiences on their own machine,
 carrying test events up from the test box and out to the realtime dashboard,
-as well as commands back down to trigger test runs via the CLI. It is the
+as well as directions back down to trigger test runs via the CLI. It is the
 top-level collator of the entire test log for this PR across all runs, using
 SQLite and auto-increment to set a canonical order for the log across all
 tests/runs/boxes. The PrCoordinator is also responsible for spinning up and
@@ -37,15 +37,15 @@ which is meant to build the app, run the tests, using the same vite middleware
 you use when running `scenetest-js` during local dev. It uses the same CLI to drive
 tests and publishes the same dashboard. Except no one can view the box to interact
 with that dashboard, so the test box uses a single secure websocket to the
-PrCoordinator to send events up and receive commands down, so that the cloud
+PrCoordinator to send events up and receive directions down, so that the cloud
 can embed the scenetest-js project's Dashboard directly, and interpret incoming
 events using its Protocol package.
 
 The only difference is the transport – SSE or Websockets – which are different
 implementations intended for the different running environments, but which
-implement the same interface with events up, commands down.
+implement the same interface with events up, directions down.
 
-Commands from either dashboard — cloud or local — terminate at the CLI, which
+Directions from either dashboard — cloud or local — terminate at the CLI, which
 drives the browser. The CLI returns pass/fail and other results onto the event
 log, back to the Vite middleware (the **receiver**), and from there either up to
 the cloud or simply into the local logs that accrete in your `scenetest/.reports`
@@ -72,7 +72,7 @@ the protocol versioning has failed.
 ## The protocol package
 
 `@scenetest/protocol` is a small versioned package defining the events traveling up
-the wire, and the commands traveling down. Sometimes the transport happens via POST,
+the wire, and the directions traveling down. Sometimes the transport happens via POST,
 sometimes over a websocket or SSE, sometimes by tailing a log – the protocol package
 doesn't know about any of these details, it only provides types and validations
 (identifier functions like `isRunSummary`) so that any part of the system that emits
@@ -83,7 +83,7 @@ repository](https://github.com/scenetest/scenetest-js/tree/main/packages/protoco
 because that is a stand-alone tool without the cloud service; so the dependency graph
 always points from this repo to that one.
 
-## Sequenced Events Relay, Command Path, Transport Client
+## Sequenced Events Relay, Directions Path, Transport Client
 
 **Events Relay:** This is the "events up" path; a machine is an events relay if
 it accepts events, assigns a stable order, logs them and fans them out to consumers
@@ -110,18 +110,18 @@ browser, impractical, so we use Websockets/PartySocket.
 Note: When version normalisation is needed, the most natural and deployable place
 to implement it may be the PrCoordinator, but for now, YAGNI.
 
-**Command Path:** The command path is required to validate commands and pass them
+**Directions Path:** The directions path is required to validate directions and pass them
 along; it is a UI concern, a controller, but it doesn't have to log itself or
 assign a stable order or fan out to other things. It goes straight down till it
 reaches the Vite server which uses the CLI to start/stop/pause/retry tests. Once
-the command is acted on it goes from being a command to a fact, and only then is
+the direction is acted on it goes from being a direction to a fact, and only then is
 it recorded and broadcast on the sequenced events stream and passed back up to
 relays and user interfaces.
 
-**Transport Client:** The relay's client-side dual and the command path's initiator.
+**Transport Client:** The relay's client-side dual and the directions path's initiator.
 The dashboard widget (used both as a local dev tool and in the cloud app) calls
 the transport client to subscribe to the ordered stream and to
-send commands; it speaks to whatever backend is present — Vite middleware (SSE)
+send directions; it speaks to whatever backend is present — Vite middleware (SSE)
 in dev, the worker API (WebSocket) in cloud. Because the dev/cloud difference is
 confined to this object, the dashboard behaves the same in both by construction.
 The subscription replays the ordered stream from a cursor on connect, then delivers
@@ -143,8 +143,10 @@ Two storage categories, and nothing is allowed to blur them.
 
 **The log** is every event, append-only, ordered. It is the one source of
 truth — the protocol message stream itself. Assertion results, Playwright
-actions, driver failures, the human's commands: all of it is one ordered stream
-of opaque messages.
+actions, driver failures: all of it is one ordered stream of opaque messages.
+Directions are *not* in this stream: a direction is a transient instruction, not a
+fact, so only its *effect* is logged — a `stop` becomes a `run:end cancelled`,
+and starting a run becomes that run's first events.
 
 **Projections** are everything derived from the log: a scene's current status, a
 run's score, the home view's toplines, the overview comparison deltas. A
@@ -200,10 +202,14 @@ the cloud persists them, because its projections answer cross-PR queries and mus
 outlive the PR object that computed them. That persistence is the performance
 move; it adds no truth the log does not already hold.
 
-The one thing in neither category is **command delivery state**. A command is in
-the log like any other message, but its delivery (pending → sent to the box) is
-control-plane state that mutates and is not derivable from observations. It rides
-alongside the append-only log; it is not part of the pure-function story.
+**Directions are neither log nor projection.** A direction is a transient
+control-plane instruction, not a fact — so it is never logged as such; only the
+effect of acting on it enters the stream (above). Its in-flight state (queued
+while the box is offline, pending → sent) is control-plane storage — the
+coordinator's direction queue — that mutates and is not derivable from
+observations; it rides alongside the append-only log, not in it. The box's
+`.commands.jsonl` drop was only ever an IPC for the delivery hop, never a record
+we need; it retires with the box's move to the receiver.
 
 ## Dev mode
 
@@ -229,7 +235,7 @@ Each Cloudflare primitive has one job:
 - **One Durable Object per PR** is the coordination point. It owns the box's
   lifecycle (when to provision, what a push requires, when to tear down),
   terminates the box's outbound WebSocket on one side, fans out to dashboard
-  viewers on the other (hibernation API), and holds the pending command queue. It
+  viewers on the other (hibernation API), and holds the pending direction queue. It
   also **owns the PR's event log** in its own SQLite; the live fan-out and
   replay-on-connect read from there, and a derived live aggregate may sit beside
   it, droppable and rebuildable from the log.
@@ -255,7 +261,7 @@ against a warm box costs seconds, not a provisioning cycle.
 
 Configuration is the only difference from dev mode: the box's sink writes the
 local `.jsonl` and also streams events up the box's single outbound WebSocket to
-the PR's Durable Object. Outbound-only means no inbound firewall holes; commands
+the PR's Durable Object. Outbound-only means no inbound firewall holes; directions
 ride the same socket back down.
 
 Teardown is idle-based and owned by the PR object: a Durable Object alarm is
@@ -305,7 +311,7 @@ is the one that might merge.
 The pipeline definition (stage commands and watch globs) lives in the user's repo,
 because it must change atomically with the code it builds, and is hashed like any
 other input. The cloud UI gets only operational verbs (full reset, re-seed,
-force-rebuild from stage N), which travel the command path and are never
+force-rebuild from stage N), which travel the directions path and are never
 configuration. The split rule: anything that affects artifact content lives in the
 repo; anything operational lives in the UI — otherwise the same tree would build
 differently on different days and the content-addressing would rot.
@@ -362,10 +368,10 @@ In dev mode the trace collapses: listener → same-origin middleware → receive
 `.jsonl` sink + in-process broadcast (SSE) → the dashboard. Same events, same
 widget, same receiver, minus the Cloudflare hops.
 
-Commands flow the reverse path: viewer → transport adapter → worker → PR object's
-command queue → down the box's WebSocket → the receiver forwards to the CLI →
-resulting events flow back up. *(Transitional: the box acting on commands — the
-inbound command channel that drives the CLI — is the open piece converging with
+Directions flow the reverse path: viewer → transport adapter → worker → PR object's
+direction queue → down the box's WebSocket → the receiver forwards to the CLI →
+resulting events flow back up. *(Transitional: the box acting on directions — the
+inbound direction channel that drives the CLI — is the open piece converging with
 the receiver-on-box work.)*
 
 ## The home view
