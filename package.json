@@ -18,8 +18,8 @@
     "e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
-    "@scenetest/dashboard": "^0.13.0",
-    "@scenetest/protocol": "^0.11.0",
+    "@scenetest/dashboard": "^0.14.0",
+    "@scenetest/protocol": "^0.12.0",
     "@tailwindcss/vite": "^4.3.0",
     "@tanstack/react-query": "^5.101.0",
     "partyserver": "^0.5.8",
