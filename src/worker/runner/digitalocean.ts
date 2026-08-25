@@ -46,6 +46,21 @@ function userData(env: Env, box: BoxSpec, bearerToken: string): string {
   ].join('\n')
 }
 
+// DigitalOcean droplet names are hostnames: letters, digits, and dashes.
+// 'owner/name' becomes 'owner-name'; anything else illegal becomes a dash
+// too. The repo part is truncated so the whole name stays inside a 63-char
+// hostname label with '-pr-<number>' intact.
+export function dropletName(box: BoxSpec): string {
+  const suffix = `-pr-${box.prNumber}`
+  const repo = box.repo
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .slice(0, 63 - suffix.length)
+    .replace(/-+$/, '')
+  return `${repo || 'st-box'}${suffix}`
+}
+
 // DigitalOcean tags allow letters, numbers, colons, dashes, and underscores.
 // Colon is the separator since it can't appear in GitHub owner/repo names;
 // anything else illegal (the '/' in 'owner/name') becomes a dash.
@@ -71,7 +86,7 @@ export async function provisionDroplet(
   imageId: string,
 ): Promise<string> {
   const { droplet } = await doApi<{ droplet: { id: number } }>(env, 'POST', '/droplets', {
-    name: `st-box-${box.boxId.slice(0, 8)}`,
+    name: dropletName(box),
     region: env.RUNNER_REGION,
     size: env.RUNNER_SIZE,
     image: Number.isInteger(Number(imageId)) ? Number(imageId) : imageId,

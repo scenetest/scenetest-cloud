@@ -23,7 +23,9 @@ Background in [architecture.md](./architecture.md); setup steps in
    hash).
 3. The DigitalOcean provider (`src/worker/runner/digitalocean.ts`) creates
    one droplet from the `RUNNER_IMAGE` snapshot, passing box-level
-   parameters via `user_data`, and records it in `runner_instances`. The run
+   parameters via `user_data`, and records it in `runner_instances`. The
+   droplet is named `owner-name-pr-<number>`; its `st-box-<boxId>` tag
+   carries the identity the name drops. The run
    itself is dispatched through the PR's Durable Object
    (`src/worker/do/pr-coordinator.ts`) — queued until the box connects.
 4. On the box, the image's `scenetest-runner` service runs the agent
