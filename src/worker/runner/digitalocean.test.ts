@@ -32,21 +32,21 @@ describe('boxTags', () => {
 
 describe('dropletName', () => {
   it('names the droplet for its repo and PR', () => {
-    expect(dropletName(box)).toBe('mhsnook-sunlo-pr-42')
+    expect(dropletName(box)).toBe('pr-42-mhsnook-sunlo')
   })
 
   it('replaces characters a hostname forbids', () => {
-    expect(dropletName({ ...box, repo: 'We.ird/Na me_x' })).toBe('we-ird-na-me-x-pr-42')
+    expect(dropletName({ ...box, repo: 'We.ird/Na me_x' })).toBe('pr-42-we-ird-na-me-x')
   })
 
   it('truncates the repo part to keep the name a valid hostname label', () => {
     const long = dropletName({ ...box, repo: `${'a'.repeat(40)}/${'b'.repeat(40)}` })
     expect(long.length).toBeLessThanOrEqual(63)
-    expect(long.endsWith('-pr-42')).toBe(true)
+    expect(long.startsWith('pr-42-')).toBe(true)
     expect(long).toMatch(/^[a-z0-9][a-z0-9-]*[a-z0-9]$/)
   })
 
   it('falls back when the repo sanitizes to nothing', () => {
-    expect(dropletName({ ...box, repo: '///' })).toBe('st-box-pr-42')
+    expect(dropletName({ ...box, repo: '///' })).toBe('pr-42-box')
   })
 })

@@ -49,16 +49,16 @@ function userData(env: Env, box: BoxSpec, bearerToken: string): string {
 // DigitalOcean droplet names are hostnames: letters, digits, and dashes.
 // 'owner/name' becomes 'owner-name'; anything else illegal becomes a dash
 // too. The repo part is truncated so the whole name stays inside a 63-char
-// hostname label with '-pr-<number>' intact.
+// hostname label with the 'pr-<number>-' prefix intact.
 export function dropletName(box: BoxSpec): string {
-  const suffix = `-pr-${box.prNumber}`
+  const prefix = `pr-${box.prNumber}-`
   const repo = box.repo
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+/, '')
-    .slice(0, 63 - suffix.length)
+    .slice(0, 63 - prefix.length)
     .replace(/-+$/, '')
-  return `${repo || 'st-box'}${suffix}`
+  return `${prefix}${repo || 'box'}`
 }
 
 // DigitalOcean tags allow letters, numbers, colons, dashes, and underscores.
