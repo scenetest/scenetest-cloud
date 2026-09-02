@@ -1,6 +1,13 @@
 import type { Env } from './env.ts'
 import { Router } from './router.ts'
-import { prDashboardWs, postPrCommand, getRunLog, homeDashboardWs } from './scenetest-bridge/routes.ts'
+import {
+  prDashboardWs,
+  postPrCommand,
+  getRunLog,
+  homeDashboardWs,
+  listPrRuns,
+  getPrRunReport,
+} from './scenetest-bridge/routes.ts'
 import { postEvents, postRunComplete } from './routes/runner-ingest.ts'
 import { debugStubRun, debugBoxUpdate, debugBoxDispatch, debugResetPrLog, debugIdleCheck } from './routes/debug.ts'
 import { postGithubWebhook } from './routes/webhook-github.ts'
@@ -53,6 +60,11 @@ const router = new Router()
   // Home view live layer: one cross-PR WebSocket served by the HomeCoordinator
   // (owns its auth, like the PR viewer — cookie always; ?session= dev-gated).
   .get('/api/cloud/home/ws', homeDashboardWs)
+  // The PR's runs, and one run's folded report. The widget's run picker lists
+  // the first and renders the second — it is how a finished run is read back
+  // once its events have gone by (the `?run=<id>` deep link).
+  .get('/api/cloud/repos/:owner/:name/pr/:number/runs', withSession(listPrRuns))
+  .get('/api/cloud/repos/:owner/:name/pr/:number/runs/:runId', withSession(getPrRunReport))
   // Commands are PR-scoped: the PR names the coordinator, the run (if any) is a
   // field in the body, not the address.
   .post('/api/cloud/repos/:owner/:name/pr/:number/commands', withSession(postPrCommand))
