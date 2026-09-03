@@ -35,10 +35,12 @@ export const getOverview: AuthedHandler = async (_req, env) => {
           FROM scene_executions se
           JOIN runs r2 ON r2.id = se.run_id
           WHERE r2.started_at > ?1
-            AND se.scene_id IN (
-              SELECT scene_id FROM scene_executions
+            AND (se.scene_id, se.team_index) IN (
+              -- Per team: a scene that passes for one team and fails for
+              -- another is not flaky, it is two different results.
+              SELECT scene_id, team_index FROM scene_executions
               WHERE started_at > ?1
-              GROUP BY scene_id
+              GROUP BY scene_id, team_index
               HAVING SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) > 0
                 AND SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) > 0
             )

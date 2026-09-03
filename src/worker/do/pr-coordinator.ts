@@ -106,10 +106,18 @@ interface BoundaryPayload {
   timestamp?: number
   name?: string
   file?: string
+  teamIndex?: number
   status?: string
   error?: unknown
   sceneCount?: number
   summary?: { failed?: number } & Record<string, unknown>
+}
+
+// A scene execution's row id: the run, the team, and the scene's name — every
+// part of it carried by both scene:start and scene:end, so the settle is a
+// primary-key write. The widget keys a scene the same way.
+function sceneRowId(runId: string, teamIndex: number, name: string): string {
+  return `${runId}:${teamIndex}:${name}`
 }
 
 // Parse a batch's boundary events out of the just-inserted log rows. The shared
@@ -431,37 +439,41 @@ export class PrCoordinator implements DurableObject {
           break
         case 'scene:start': {
           if (!meta || typeof p.file !== 'string' || typeof p.name !== 'string') break
+          if (typeof p.teamIndex !== 'number') break
+          // scene_id stays file+name: it is the cross-run key the flaky check
+          // groups on, and the same scene run by two teams is one scene. The
+          // row id is (run, team, name) — what scene:end can name, since it
+          // carries no file. Two same-named scenes in different files are one
+          // row; the protocol gives a consumer no way to tell them apart when
+          // one ends.
           const sceneId = `${p.file}:${p.name}`
-          // Deterministic id (`runId:sceneId`) so scene:start and the later
-          // scene:end settle the same row — and re-delivery is a no-op upsert.
           stmts.push(
             this.env.DB.prepare(
               `INSERT INTO scene_executions
-                 (id, run_id, repo, pr_number, scene_id, scene_file, scene_name, head_sha, status, started_at)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
+                 (id, run_id, repo, pr_number, scene_id, scene_file, scene_name, team_index, head_sha, status, started_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10)
                ON CONFLICT(id) DO UPDATE SET
                  status = 'running',
                  started_at = COALESCE(excluded.started_at, scene_executions.started_at)`,
-            ).bind(`${runId}:${sceneId}`, runId, meta.repo, meta.prNumber, sceneId, p.file, p.name, meta.headSha, ts),
+            ).bind(
+              sceneRowId(runId, p.teamIndex, p.name), runId, meta.repo, meta.prNumber, sceneId,
+              p.file, p.name, p.teamIndex, meta.headSha, ts,
+            ),
           )
           break
         }
         case 'scene:end': {
-          // scene:end carries no scene id, so settle the run's currently-open
-          // scene. Scenes run sequentially in a box (one browser), so at most
-          // one row is 'running'; pick the most-recently-started to be safe.
+          // scene:end names its scene (name + teamIndex), which is the row id.
+          // An event missing either names no scene; skip it rather than guess.
+          if (typeof p.name !== 'string' || typeof p.teamIndex !== 'number') break
           const verdict = p.status === 'failed' ? 'failed' : p.status === 'skipped' ? 'skipped' : 'passed'
           const summary =
             p.summary != null ? JSON.stringify(p.summary) : p.error != null ? JSON.stringify({ error: p.error }) : null
           stmts.push(
             this.env.DB.prepare(
               `UPDATE scene_executions SET status = ?1, ended_at = ?2, summary_json = COALESCE(?3, summary_json)
-                 WHERE id = (
-                   SELECT id FROM scene_executions
-                   WHERE run_id = ?4 AND status = 'running'
-                   ORDER BY started_at DESC LIMIT 1
-                 )`,
-            ).bind(verdict, ts, summary, runId),
+                 WHERE id = ?4`,
+            ).bind(verdict, ts, summary, sceneRowId(runId, p.teamIndex, p.name)),
           )
           break
         }
