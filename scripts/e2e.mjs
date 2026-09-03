@@ -237,6 +237,8 @@ async function main() {
     `INSERT INTO boxes (id, repo, pr_number, head_sha, status, bearer_token_hash, created_at) VALUES ('e2e-box-1', 'demo/watched', 9, 'wsbox1', 'ready', '${boxTokenHash}', 0)`)
   d1Query(persistDir,
     "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-ws-run', 'demo/watched', 9, 'wsbox1', 'manual', 'queued', 'e2e-box-1')")
+  d1Query(persistDir,
+    "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-team-run', 'demo/watched', 9, 'wsbox1', 'manual', 'queued', 'e2e-box-1')")
 
   // A second PR + box for the real box agent (infra/box/agent.mjs), spawned
   // below in test mode — separate so its channel doesn't fight the inline
@@ -435,7 +437,7 @@ async function main() {
     kind: 'events', runId: 'e2e-ws-run',
     events: [
       { seq: 1, payload: { type: 'run:start', timestamp: Date.now(), runId: 'e2e-ws-run', sceneCount: 1 } },
-      { seq: 2, payload: { type: 'scene:start', timestamp: Date.now(), runId: 'e2e-ws-run', name: 'ws scene', file: 'x.scene.ts', actors: ['A'] } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: Date.now(), runId: 'e2e-ws-run', name: 'ws scene', file: 'x.scene.ts', actors: ['A'], teamIndex: 0, team: { name: 'default' } } },
     ],
   }))
   check('coordinator acked the events batch',
@@ -454,6 +456,28 @@ async function main() {
     return r.length === 1 && r[0].scene_name === 'ws scene' &&
       r[0].scene_file === 'x.scene.ts' && r[0].status === 'running'
   }), 'scene_executions not derived from the event stream')
+
+  // Two teams run the same scene in one run: same name, different teamIndex.
+  // They are two executions, and scene:end names which one ended.
+  box.send(JSON.stringify({
+    kind: 'events', runId: 'e2e-team-run',
+    events: [
+      { seq: 1, payload: { type: 'run:start', timestamp: 1, runId: 'e2e-team-run', sceneCount: 2 } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: 2, runId: 'e2e-team-run', name: 'shared scene', file: 's.scene.ts', actors: ['A'], teamIndex: 0, team: { name: 'alpha' } } },
+      { seq: 3, payload: { type: 'scene:start', timestamp: 3, runId: 'e2e-team-run', name: 'shared scene', file: 's.scene.ts', actors: ['B'], teamIndex: 1, team: { name: 'beta' } } },
+      // Settles team 0 — the scene that started FIRST, so a positional
+      // most-recently-started guess would settle team 1 instead.
+      { seq: 4, payload: { type: 'scene:end', timestamp: 4, runId: 'e2e-team-run', name: 'shared scene', status: 'completed', duration: 2, teamIndex: 0, team: { name: 'alpha' } } },
+    ],
+  }))
+  await waitInbox((m) => m.kind === 'ack' && m.runId === 'e2e-team-run' && m.count === 4)
+
+  const teamRows = () => d1Query(persistDir,
+    "SELECT team_index, status FROM scene_executions WHERE run_id = 'e2e-team-run' ORDER BY team_index")
+  check('scene:end settles the team it names, leaving the other running', await waitFor(() => {
+    const r = teamRows()
+    return r.length === 2 && r[0].status === 'passed' && r[1].status === 'running'
+  }), JSON.stringify(teamRows()))
 
   // PR viewer: replay the whole PR's log from the object, then live events.
   const wsReplay = await collectWs('/api/cloud/repos/demo/watched/pr/9/ws', cookie, 2500)
@@ -486,8 +510,10 @@ async function main() {
   check('PR stream preserves the per-run seq', prStream.seqs.includes(1) && prStream.seqs.includes(3))
   // Every frame names its run — the widget partitions the PR's stream by it.
   check('PR stream frames name their run',
-    prStream.runIds.length > 0 && prStream.runIds.every((r) => r === 'e2e-ws-run'),
+    prStream.runIds.length > 0 && prStream.runIds.every((r) => typeof r === 'string' && r !== ''),
     JSON.stringify(prStream.runIds))
+  check('PR stream frames tell the PR\'s runs apart',
+    new Set(prStream.runIds).size === 2, JSON.stringify([...new Set(prStream.runIds)]))
   const lastId = Math.max(...prStream.ids)
   const prResume = await collectWs(`/api/cloud/repos/demo/watched/pr/9/ws?sinceId=${lastId}`, cookie, 1500)
   check('PR stream sinceId resumes past the cursor',
