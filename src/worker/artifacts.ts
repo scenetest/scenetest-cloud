@@ -62,3 +62,22 @@ export async function readArtifactBoxJsonl(env: Env, key: string): Promise<strin
   if (rows.length === 0) return null
   return rows.map((r) => `{"seq":${r.seq},"payload":${r.payload}}`).join('\n') + '\n'
 }
+
+// The archive's payloads, parsed once. Null when the object is absent or empty
+// so the caller falls back to the live log. The download route wants bytes and
+// uses readArtifactBoxJsonl instead; this one skips the re-serialize.
+export async function readArtifactEvents(env: Env, key: string): Promise<unknown[] | null> {
+  if (!env.ARTIFACTS) return null
+  const obj = await env.ARTIFACTS.get(key)
+  if (!obj) return null
+  const out: unknown[] = []
+  for (const line of (await obj.text()).split('\n')) {
+    if (!line) continue
+    try {
+      out.push((JSON.parse(line) as { payload?: unknown }).payload)
+    } catch {
+      continue
+    }
+  }
+  return out.length > 0 ? out : null
+}

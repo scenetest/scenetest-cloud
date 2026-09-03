@@ -207,9 +207,10 @@ from `GET /api/cloud/repos/:owner/:name/pr/:number/runs/:runId` — the run's
 messages folded into scenes, each carrying its own assertions and timeline. None
 of that report is stored: it is folded per request from the log, through the one
 read door (the R2 archive once the run is archived, the PR object's SQLite before
-that), so a report reads the same however old the run is. It is the same
-projection the live view folds client-side, over the same messages — which is why
-the widget can render a run it never watched. The run list beside it (`GET
+that), so a report reads the same however old the run is. The fold is the live
+view's own — the widget package exports its projections as pure functions, so the
+worker runs over a stored log the same code the browser runs over a live one. One
+fold, not two that have to agree. The run list beside it (`GET
 .../pr/:number/runs`) is the D1 settled projection instead: naming a PR's runs is
 the cross-PR query D1 exists to answer.
 

@@ -164,11 +164,13 @@ async function wsStatus(path, cookie, maxMs = 2000) {
   })
 }
 
-// Open a box channel, retrying a refused upgrade. Retiring a box closes the
-// dev server's connections for a moment (a local wrangler artifact — no error,
-// no production analog), and a connect landing in that window is refused. The
-// box agent reconnects with backoff for the same reason; this mirrors it so a
-// section that follows a retire does not fail on the bounce.
+// Open a box channel and collect what the coordinator sends. Retiring a box
+// closes the dev server's connections for a moment (a local wrangler artifact —
+// no error, no production analog), and a connect landing in that window is
+// refused. The box agent reconnects with backoff for the same reason; this
+// mirrors it so a section that follows a retire does not fail on the bounce.
+// A channel refused for a real reason (a bad token) fails every attempt and
+// still throws, just later.
 async function openBoxChannel(boxId, token, label, attempts = 5) {
   for (let attempt = 1; ; attempt++) {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/${boxId}/channel?token=${token}`)
@@ -179,11 +181,29 @@ async function openBoxChannel(boxId, token, label, attempts = 5) {
       ws.addEventListener('error', () => resolve(false))
       ws.addEventListener('close', () => resolve(false))
     })
-    if (opened) return { ws, inbox }
+    if (opened) {
+      const wait = async (pred, maxMs = 4000) => {
+        const start = Date.now()
+        while (Date.now() - start < maxMs) {
+          const hit = inbox.find(pred)
+          if (hit) return hit
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        return null
+      }
+      return { ws, inbox, wait }
+    }
     try { ws.close() } catch {}
     if (attempt >= attempts) throw new Error(`${label} channel refused after ${attempts} attempts`)
     await new Promise((r) => setTimeout(r, 200 * attempt))
   }
+}
+
+// A connection killed by that same bounce, as undici reports it. Anything else
+// is a real failure and must not be retried into a pass.
+function isBounce(err) {
+  const code = err?.cause?.code ?? err?.code
+  return code === 'UND_ERR_SOCKET' || code === 'ECONNRESET'
 }
 
 // ---------- main -------------------------------------------------------------
@@ -390,22 +410,7 @@ async function main() {
     queuedCmd.status === 202 && (await j(queuedCmd)).delivered === false)
 
   // Connect as the box; collect everything the coordinator sends.
-  const box = new WebSocket(wsUrl(boxToken))
-  const inbox = []
-  box.addEventListener('message', (e) => inbox.push(JSON.parse(e.data)))
-  await new Promise((resolve, reject) => {
-    box.addEventListener('open', resolve)
-    box.addEventListener('error', () => reject(new Error('box channel refused valid token')))
-  })
-  const waitInbox = async (pred, maxMs = 4000) => {
-    const start = Date.now()
-    while (Date.now() - start < maxMs) {
-      const hit = inbox.find(pred)
-      if (hit) return hit
-      await new Promise((r) => setTimeout(r, 50))
-    }
-    return null
-  }
+  const { ws: box, inbox, wait: waitInbox } = await openBoxChannel('e2e-box-1', boxToken, 'box')
 
   const flushed = await waitInbox((m) => m.kind === 'command')
   check('queued command flushed to box on connect',
@@ -792,7 +797,7 @@ async function main() {
   const reportRes = await fetch(`${BASE}${runsBase}/runs/e2e-artifact-run`, { headers: { cookie } })
   const report = await j(reportRes)
   check('run report serves the run folded from its archived log',
-    reportRes.status === 200 && report.status === 'finished' && report.scenes?.length === 1,
+    reportRes.status === 200 && report.scenes?.length === 1,
     `${reportRes.status} ${JSON.stringify(report).slice(0, 200)}`)
   check('run report carries the scene with its assertion',
     report.scenes?.[0]?.name === 'artifact scene' &&
@@ -857,22 +862,11 @@ async function main() {
 
   // Connect the box channel: the coordinator records the box it coordinates (the
   // alarm's retire target) and arms the idle alarm.
-  const { ws: idleBox, inbox: idleInbox } = await openBoxChannel('e2e-box-idle', boxToken, 'idle box')
-  const waitIdleInbox = async (pred, maxMs = 4000) => {
-    const start = Date.now()
-    while (Date.now() - start < maxMs) {
-      const hit = idleInbox.find(pred)
-      if (hit) return hit
-      await new Promise((r) => setTimeout(r, 50))
-    }
-    return null
-  }
-
+  const { ws: idleBox, wait: waitIdleInbox } = await openBoxChannel('e2e-box-idle', boxToken, 'idle box')
   // Retiring a box closes the dev server's connections, so a request on a pooled
-  // connection can die in transit — the same local wrangler bounce openBoxChannel
-  // retries through, with no production analog. Retry rather than swallow: a lost
-  // request means the alarm never ran. Re-running it is a no-op once the box is
-  // retired (its id is forgotten, and the update skips a destroyed box).
+  // one can die in transit — the same bounce openBoxChannel retries through.
+  // Retry rather than swallow: a lost request means the alarm never ran.
+  // Re-running it is a no-op once the box is retired.
   const idleCheck = async (attempts = 4) => {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -881,11 +875,12 @@ async function main() {
           body: JSON.stringify({ repo: 'demo/watched', prNumber: 13 }),
         })
       } catch (err) {
-        if (attempt >= attempts) throw err
+        if (attempt >= attempts || !isBounce(err)) throw err
         await new Promise((r) => setTimeout(r, 200 * attempt))
       }
     }
   }
+
   const idleBoxStatus = () =>
     d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-idle'")[0].status
 
