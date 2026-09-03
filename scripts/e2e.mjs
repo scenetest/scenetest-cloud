@@ -117,7 +117,7 @@ function viewerWsUrl(path, cookie) {
   return `ws://127.0.0.1:${PORT}${path}${sep}session=${sessionToken(cookie)}`
 }
 
-// Connect a viewer WebSocket, collect { events, seqs, ids } until `run:end`
+// Connect a viewer WebSocket, collect { events, seqs, ids, runIds } until `run:end`
 // arrives or maxMs elapses. `ids` is populated only by the PR stream (frames
 // carry the PR-global id); per-run frames have no id, so it stays empty there.
 async function collectWs(path, cookie, maxMs = 8000) {
@@ -125,6 +125,7 @@ async function collectWs(path, cookie, maxMs = 8000) {
     const events = []
     const seqs = []
     const ids = []
+    const runIds = []
     let resolved = false
     let opened = false
     const finish = (status) => {
@@ -132,7 +133,7 @@ async function collectWs(path, cookie, maxMs = 8000) {
       resolved = true
       clearTimeout(timer)
       try { ws.close() } catch {}
-      resolve({ status, events, seqs, ids })
+      resolve({ status, events, seqs, ids, runIds })
     }
     const timer = setTimeout(() => finish(0), maxMs)
     const ws = new WebSocket(viewerWsUrl(path, cookie))
@@ -145,6 +146,7 @@ async function collectWs(path, cookie, maxMs = 8000) {
       if (frame.kind !== 'event') return
       seqs.push(frame.seq)
       if (typeof frame.id === 'number') ids.push(frame.id)
+      runIds.push(frame.runId)
       let payload
       try { payload = JSON.parse(frame.payload) } catch { return }
       events.push(payload)
@@ -482,6 +484,10 @@ async function main() {
       prStream.ids.every((v, i) => i === 0 || v > prStream.ids[i - 1]),
     JSON.stringify(prStream.ids))
   check('PR stream preserves the per-run seq', prStream.seqs.includes(1) && prStream.seqs.includes(3))
+  // Every frame names its run — the widget partitions the PR's stream by it.
+  check('PR stream frames name their run',
+    prStream.runIds.length > 0 && prStream.runIds.every((r) => r === 'e2e-ws-run'),
+    JSON.stringify(prStream.runIds))
   const lastId = Math.max(...prStream.ids)
   const prResume = await collectWs(`/api/cloud/repos/demo/watched/pr/9/ws?sinceId=${lastId}`, cookie, 1500)
   check('PR stream sinceId resumes past the cursor',

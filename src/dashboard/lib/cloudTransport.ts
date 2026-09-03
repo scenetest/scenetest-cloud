@@ -1,4 +1,5 @@
 import type { ConnectionStatus, Transport } from '@scenetest/dashboard'
+import type { RunEvent } from '@scenetest/protocol'
 import { isEventShaped } from '@scenetest/protocol'
 import { WebSocket as ReconnectingWebSocket } from 'partysocket'
 
@@ -16,9 +17,12 @@ import { WebSocket as ReconnectingWebSocket } from 'partysocket'
 // and re-invokes the url provider on every attempt, so a reconnect resumes from
 // the current cursor — same as Last-Event-ID on SSE.
 //
-// (Surfacing runId/seq to the widget — so it can key its own collection and
-// group by run — rides the scenetest-js Transport update; today's onEvent only
-// carries the protocol event, so we forward payload and track id for resume.)
+// The frame's runId is stamped onto the event before the widget sees it. The
+// widget partitions by `event.runId`, and a payload from a CLI older than
+// protocol 0.12 names no run — so without this, every run of the PR folds into
+// one row. The frame's runId wins over the producer's: it is the run id the
+// `?run=` deep link, the run picker and the D1 row all mean. The report fold
+// stamps the same id on its own read path (scenetest-bridge/routes.ts).
 export function createCloudPrTransport(owner: string, name: string, prNumber: number): Transport {
   const base = `/api/cloud/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pr/${prNumber}`
   const proto = () => (location.protocol === 'https:' ? 'wss' : 'ws')
@@ -37,17 +41,10 @@ export function createCloudPrTransport(owner: string, name: string, prNumber: nu
       ws.onopen = () => onStatus?.('connected')
 
       ws.onmessage = (e) => {
-        let raw: unknown
-        try { raw = JSON.parse(e.data as string) } catch { return }
-        if (!raw || typeof raw !== 'object') return
-        const frame = raw as Record<string, unknown>
-        if (frame.kind !== 'event' || typeof frame.id !== 'number') return
-        const id = frame.id as number
-        if (id <= cursor) return  // dedupe replay/live overlap
-        cursor = id
-        let payload: unknown
-        try { payload = JSON.parse(frame.payload as string) } catch { return }
-        if (isEventShaped(payload)) onEvent(payload as Parameters<typeof onEvent>[0])
+        const decoded = decodeFrame(e.data as string, cursor)
+        if (!decoded) return
+        cursor = decoded.id
+        onEvent(decoded.event)
       }
 
       ws.onclose = () => {
@@ -70,3 +67,32 @@ export function createCloudPrTransport(owner: string, name: string, prNumber: nu
   }
 }
 
+// One viewer frame decoded into the event the widget folds. Null when the frame
+// is not an event, is malformed, or is at or below the cursor.
+export function decodeFrame(data: string, cursor: number): { id: number; event: RunEvent } | null {
+  let raw: unknown
+  try {
+    raw = JSON.parse(data)
+  } catch {
+    return null
+  }
+  if (!raw || typeof raw !== 'object') return null
+  const frame = raw as Record<string, unknown>
+  if (frame.kind !== 'event' || typeof frame.id !== 'number') return null
+  if (frame.id <= cursor) return null
+
+  let payload: unknown
+  try {
+    payload = JSON.parse(frame.payload as string)
+  } catch {
+    return null
+  }
+  if (!isEventShaped(payload)) return null
+
+  // The lenient check passes anything event-shaped, including event types this
+  // build predates — so the cast is the leniency, made once, here. Mutating is
+  // safe: the parse above minted this object and nothing else holds it.
+  const event = payload as Record<string, unknown>
+  if (typeof frame.runId === 'string') event.runId = frame.runId
+  return { id: frame.id, event: event as unknown as RunEvent }
+}
