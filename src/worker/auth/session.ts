@@ -1,4 +1,4 @@
-import type { AuthedUser, Env } from '../env.ts'
+import { devRoutesEnabled, type AuthedUser, type Env } from '../env.ts'
 import type { Handler } from '../router.ts'
 import { parseCookies, serializeCookie, signPayload, verifyPayload } from './cookies.ts'
 
@@ -45,7 +45,7 @@ export async function verifySessionToken(token: string, env: Env): Promise<Authe
 export async function getWsSessionUser(req: Request, env: Env): Promise<AuthedUser | null> {
   const cookies = parseCookies(req.headers.get('cookie'))
   let token = cookies[SESSION_COOKIE]
-  if (!token && env.ENABLE_DEBUG_ROUTES === '1') {
+  if (!token && devRoutesEnabled(env)) {
     token = new URL(req.url).searchParams.get('session') ?? undefined
   }
   return token ? verifySessionToken(token, env) : null

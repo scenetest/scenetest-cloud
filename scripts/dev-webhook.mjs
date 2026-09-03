@@ -4,10 +4,12 @@
 //   pnpm dev:webhook                                    # push to the seeded PR
 //   pnpm dev:webhook --repo owner/name --pr 7 --action opened --title 'Try it'
 //
-// Actions: opened (default), synchronize, reopened, closed.
-import { apiJson, devSignIn, pullRequestPayload, randomSha, sendWebhook, waitForServer, BASE } from './lib/dev.mjs'
+// Actions: synchronize (default), opened, reopened, closed. --sha pins the head
+// commit; without it every delivery invents a new one.
+import { apiJson, devSignIn, pullRequestPayload, randomSha, requireServer, sendWebhook, BASE } from './lib/dev.mjs'
 
-const DEFAULTS = { repo: 'scenetest-demo/storefront', pr: 42, action: 'synchronize', title: undefined }
+// Also the option list: parseArgs rejects any flag without a key here.
+const DEFAULTS = { repo: 'scenetest-demo/storefront', pr: 42, action: 'synchronize', title: null, sha: null }
 
 function parseArgs(argv) {
   const args = { ...DEFAULTS }
@@ -24,10 +26,7 @@ function parseArgs(argv) {
 }
 
 const args = parseArgs(process.argv.slice(2))
-if (!(await waitForServer(5_000))) {
-  console.error(`No worker on ${BASE}. Start one with \`pnpm dev\` first.`)
-  process.exit(1)
-}
+await requireServer()
 
 const headSha = args.sha ?? randomSha()
 const result = await sendWebhook(pullRequestPayload({
@@ -43,7 +42,7 @@ const result = await sendWebhook(pullRequestPayload({
 // record instead of clearing it.
 async function currentTitle(repo, prNumber) {
   try {
-    const cookie = await devSignIn('dev')
+    const cookie = await devSignIn()
     const { open_prs } = await apiJson(`/api/cloud/repos/${repo}`, { cookie })
     const pr = open_prs.find((p) => p.pr_number === prNumber)
     if (pr?.title) return pr.title

@@ -2,16 +2,15 @@ import type { Handler } from '../router.ts'
 import { createRun } from '../runner/create-run.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
 
+// Every handler here is registered through devOnly() in index.ts, so none of
+// them exists unless ENABLE_DEBUG_ROUTES is on.
+
 // POST /api/debug/box-update
 // Body: { boxId, headSha?, vector?, stages? } — enqueue a pipeline update on
 // the box's coordinator, exactly as ensureBox would. Exists so the e2e
 // script can exercise the agent's update path (checkout → stages → ready
-// with realized vector) without a real GitHub tree. DEV-ONLY, same gate as
-// stub-run.
+// with realized vector) without a real GitHub tree.
 export const debugBoxUpdate: Handler = async (req, env) => {
-  if (env.ENABLE_DEBUG_ROUTES !== '1') {
-    return new Response('Not Found', { status: 404 })
-  }
   const body = await req.json<{
     boxId: string
     headSha?: string
@@ -39,11 +38,8 @@ export const debugBoxUpdate: Handler = async (req, env) => {
 // POST /api/debug/box-dispatch
 // Body: { boxId, run: RunSpec-ish } — enqueue a scene batch on the box's
 // coordinator, as createRun's dispatch would, so e2e can exercise the
-// agent's batch path (scenes command, events-file relay, verdict). DEV-ONLY.
+// agent's batch path (scenes command, events-file relay, verdict).
 export const debugBoxDispatch: Handler = async (req, env) => {
-  if (env.ENABLE_DEBUG_ROUTES !== '1') {
-    return new Response('Not Found', { status: 404 })
-  }
   const body = await req.json<{ boxId: string; run: unknown }>()
   const box = await env.DB.prepare('SELECT repo, pr_number FROM boxes WHERE id = ?1')
     .bind(body.boxId)
@@ -60,11 +56,8 @@ export const debugBoxDispatch: Handler = async (req, env) => {
 // POST /api/debug/reset-pr-log
 // Body: { repo, prNumber } — drop a PR object's live log rows, modelling PR
 // teardown so the e2e can prove an archived run re-folds back into the PR
-// stream from R2. DEV-ONLY, same gate as the rest.
+// stream from R2.
 export const debugResetPrLog: Handler = async (req, env) => {
-  if (env.ENABLE_DEBUG_ROUTES !== '1') {
-    return new Response('Not Found', { status: 404 })
-  }
   const { repo, prNumber } = await req.json<{ repo: string; prNumber: number }>()
   if (!repo || !Number.isFinite(prNumber)) {
     return Response.json({ error: 'repo and prNumber required' }, { status: 400 })
@@ -77,11 +70,7 @@ export const debugResetPrLog: Handler = async (req, env) => {
 // Body: { repo, prNumber } — run a PR coordinator's idle-alarm logic now,
 // instead of waiting out the real RUNNER_IDLE_TIMEOUT_MINUTES window, so the
 // e2e can prove the box is retired on idle (and kept while a run is in flight).
-// DEV-ONLY, same gate as the rest.
 export const debugIdleCheck: Handler = async (req, env) => {
-  if (env.ENABLE_DEBUG_ROUTES !== '1') {
-    return new Response('Not Found', { status: 404 })
-  }
   const { repo, prNumber } = await req.json<{ repo: string; prNumber: number }>()
   if (!repo || !Number.isFinite(prNumber)) {
     return Response.json({ error: 'repo and prNumber required' }, { status: 400 })
@@ -94,12 +83,9 @@ export const debugIdleCheck: Handler = async (req, env) => {
 // Body: { repo?: string, prNumber?: number, title?: string, subset?: string[] }
 // Upserts a fake PR and creates a run through the normal path (ensure box →
 // insert run → dispatch); with the stub provider this fabricates events
-// straight to D1. DEV-ONLY, gated on ENABLE_DEBUG_ROUTES — a wide-open
-// execution path that must stay off anywhere with real users or runners.
+// straight to D1. A wide-open execution path that must stay off anywhere with
+// real users or runners — hence devOnly() at the route table.
 export const debugStubRun: Handler = async (req, env, ctx) => {
-  if (env.ENABLE_DEBUG_ROUTES !== '1') {
-    return new Response('Not Found', { status: 404 })
-  }
   interface StubRunBody {
     repo?: string
     prNumber?: number

@@ -29,6 +29,10 @@ real GitHub delivery produces:
   new commit on the seeded PR; takes `--repo owner/name --pr 7 --action opened
   --title '...'`.
 
+`/auth/dev-login?login=<name>` signs you in as someone else — a second
+identity for trying the admin routes, which refuse to let a user remove
+themselves.
+
 The dev sign-in, the seeded webhook secret, and `/api/debug/*` all hang off
 one switch, `ENABLE_DEBUG_ROUTES`, which `pnpm dev` sets for the local worker
 only. It is `"0"` in wrangler.toml, so a deployed worker serves 404 on every

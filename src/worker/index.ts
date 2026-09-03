@@ -1,4 +1,4 @@
-import type { Env } from './env.ts'
+import { devRoutesEnabled, type Env } from './env.ts'
 import { Router } from './router.ts'
 import { prDashboardWs, postPrCommand, getRunLog, homeDashboardWs } from './scenetest-bridge/routes.ts'
 import { postEvents, postRunComplete } from './routes/runner-ingest.ts'
@@ -25,20 +25,21 @@ import {
 } from './routes/admin.ts'
 import { withSession } from './auth/session.ts'
 import { getDevLogin } from './auth/dev-login.ts'
+import { devOnly } from './middleware/dev-only.ts'
 import { getConfig } from './routes/config.ts'
 import { getOverview, getRepoPrs } from './routes/cloud.ts'
 
 // Auth is declared per route: withSession() for cookie-authed routes (json
-// 401 or login redirect on failure); everything else is either public by
-// design (/auth/*) or carries its own auth (bearer for runner ingest,
-// env-gating for debug, HMAC for future webhooks).
+// 401 or login redirect on failure), devOnly() for routes that must not exist
+// outside local dev; everything else is either public by design (/auth/*) or
+// carries its own auth (bearer for runner ingest, HMAC for webhooks).
 const router = new Router()
   // Auth
   .get('/auth/github/login', getGithubLogin)
   .get('/auth/github/callback', getGithubCallback)
   .post('/auth/logout', postLogout)
-  // Local dev sign-in, no GitHub round trip (env-gated inside the handler).
-  .get('/auth/dev-login', getDevLogin)
+  // Local dev sign-in, no GitHub round trip.
+  .get('/auth/dev-login', devOnly(getDevLogin))
   .get('/api/config', getConfig)
   .get('/api/me', withSession((_req, _env, _ctx, _params, user) => Response.json(user)))
   // Admin
@@ -74,23 +75,27 @@ const router = new Router()
   // run:end event).
   .post('/api/events/:runId', postEvents)
   .post('/api/runs/:runId/complete', postRunComplete)
-  // Debug (env-gated inside the handler)
-  .post('/api/debug/stub-run', debugStubRun)
-  .post('/api/debug/box-update', debugBoxUpdate)
-  .post('/api/debug/box-dispatch', debugBoxDispatch)
-  .post('/api/debug/reset-pr-log', debugResetPrLog)
-  .post('/api/debug/idle-check', debugIdleCheck)
+  // Debug
+  .post('/api/debug/stub-run', devOnly(debugStubRun))
+  .post('/api/debug/box-update', devOnly(debugBoxUpdate))
+  .post('/api/debug/box-dispatch', devOnly(debugBoxDispatch))
+  .post('/api/debug/reset-pr-log', devOnly(debugResetPrLog))
+  .post('/api/debug/idle-check', devOnly(debugIdleCheck))
 
 const REQUIRED_VARS = ['GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET', 'SESSION_SECRET'] as const
-// With debug routes on, /auth/dev-login replaces the GitHub round trip, so the
-// OAuth credentials are not needed to sign in and only the cookie-signing
-// secret is required. Deployed workers keep the full list.
-const DEV_REQUIRED_VARS = ['SESSION_SECRET'] as const
+
+// One list, minus what the mode makes optional: with debug routes on,
+// /auth/dev-login replaces the GitHub round trip, so the OAuth credentials are
+// not needed to sign in. SESSION_SECRET stays required in both modes by
+// construction — it signs the cookie either way.
+function missingConfig(env: Env): string[] {
+  const optional = devRoutesEnabled(env) ? (k: string) => k.startsWith('GITHUB_OAUTH') : () => false
+  return REQUIRED_VARS.filter((k) => !env[k] && !optional(k))
+}
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const required = env.ENABLE_DEBUG_ROUTES === '1' ? DEV_REQUIRED_VARS : REQUIRED_VARS
-    const missing = required.filter((k) => !env[k])
+    const missing = missingConfig(env)
     if (missing.length > 0) {
       return new Response(
         `Missing config: ${missing.join(', ')}. Set in .dev.vars (local) or via wrangler vars/secrets.`,

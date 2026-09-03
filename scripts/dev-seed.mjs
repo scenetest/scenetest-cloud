@@ -4,7 +4,7 @@
 // deliveries — so the seeded state is the state a real delivery would produce.
 //
 // Run it against an already-running `pnpm dev`:  pnpm dev:seed
-import { apiJson, devSignIn, pullRequestPayload, randomSha, sendWebhook, sleep, waitForServer, BASE } from './lib/dev.mjs'
+import { apiJson, devSignIn, pullRequestPayload, randomSha, requireServer, sendWebhook, sleep, BASE } from './lib/dev.mjs'
 
 const REPOS = [
   { owner: 'scenetest-demo', name: 'storefront' },
@@ -18,13 +18,14 @@ const PULL_REQUESTS = [
   { prNumber: 43, title: 'Fix flaky login scene' },
 ]
 
-export async function seed({ log = console.log } = {}) {
-  const cookie = await devSignIn('dev')
-  log('· signed in as dev')
+// Takes the caller's session when it already has one — `pnpm dev` signs in to
+// check whether the database is empty before it seeds.
+export async function seed(cookie) {
+  cookie ??= await devSignIn()
 
   for (const repo of REPOS) {
     await apiJson('/api/admin/repos', { cookie, method: 'POST', body: repo })
-    log(`· watching ${repo.owner}/${repo.name}`)
+    console.log(`· watching ${repo.owner}/${repo.name}`)
   }
 
   const repo = `${REPOS[0].owner}/${REPOS[0].name}`
@@ -36,7 +37,7 @@ export async function seed({ log = console.log } = {}) {
       headSha: randomSha(),
       title: pr.title,
     }))
-    log(`· opened ${repo}#${pr.prNumber} — ${pr.title}`)
+    console.log(`· opened ${repo}#${pr.prNumber} — ${pr.title}`)
   }
   await waitForRuns(cookie, REPOS[0], 2)
 
@@ -49,7 +50,7 @@ export async function seed({ log = console.log } = {}) {
     headSha: randomSha(),
     title: PULL_REQUESTS[0].title,
   }))
-  log(`· pushed a second commit to ${repo}#${PULL_REQUESTS[0].prNumber}`)
+  console.log(`· pushed a second commit to ${repo}#${PULL_REQUESTS[0].prNumber}`)
   await waitForRuns(cookie, REPOS[0], 3)
 
   // Every full stub run fails, because one of its fabricated scenes always
@@ -70,7 +71,7 @@ export async function seed({ log = console.log } = {}) {
       ],
     },
   })
-  log(`· re-ran the passing scenes on ${repo}#${PULL_REQUESTS[1].prNumber}`)
+  console.log(`· re-ran the passing scenes on ${repo}#${PULL_REQUESTS[1].prNumber}`)
   await waitForRuns(cookie, REPOS[0], 4)
 
   return { repo, prNumber: PULL_REQUESTS[0].prNumber }
@@ -79,9 +80,9 @@ export async function seed({ log = console.log } = {}) {
 // The stub runner emits its events in the background, so a freshly seeded run
 // is 'queued' for a moment. Wait for the runs to settle rather than leaving
 // the dashboard mid-flight on first load.
-async function waitForRuns(cookie, { owner, name }, expected, maxMs = 30_000) {
+async function waitForRuns(cookie, { owner, name }, expected) {
   const start = Date.now()
-  while (Date.now() - start < maxMs) {
+  while (Date.now() - start < 30_000) {
     const data = await apiJson(`/api/cloud/repos/${owner}/${name}`, { cookie })
     const runs = data.recent_runs ?? []
     const settled = runs.filter((r) => ['passed', 'failed', 'cancelled'].includes(r.status))
@@ -91,10 +92,7 @@ async function waitForRuns(cookie, { owner, name }, expected, maxMs = 30_000) {
 }
 
 if (import.meta.filename === process.argv[1]) {
-  if (!(await waitForServer(5_000))) {
-    console.error(`No worker on ${BASE}. Start one with \`pnpm dev\` first.`)
-    process.exit(1)
-  }
+  await requireServer()
   const { repo, prNumber } = await seed()
   console.log(`\nSeeded. Open ${BASE}/repo/${repo}/pr/${prNumber}`)
 }

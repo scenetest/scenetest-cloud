@@ -9,20 +9,23 @@ export const REPO_ROOT = join(import.meta.dirname, '../..')
 export const WRANGLER = join(REPO_ROOT, 'node_modules/.bin/wrangler')
 export const DEV_PORT = Number(process.env.SCENETEST_DEV_PORT ?? 8787)
 export const BASE = `http://127.0.0.1:${DEV_PORT}`
-export const DEV_VARS_PATH = join(REPO_ROOT, '.dev.vars')
+const DEV_VARS_PATH = join(REPO_ROOT, '.dev.vars')
 
 // Fixed, not generated: a stable SESSION_SECRET keeps your dev session cookie
 // valid across restarts, and a stable webhook secret lets `pnpm dev:webhook`
 // sign payloads without reading any state. Both only ever reach a local
 // wrangler dev; anything in .dev.vars wins over them (see devVarArgs).
-export const DEV_VAR_DEFAULTS = {
+const DEV_VAR_DEFAULTS = {
   SESSION_SECRET: 'local-dev-session-secret',
   GITHUB_WEBHOOK_SECRET: 'local-dev-webhook-secret',
   ENABLE_DEBUG_ROUTES: '1',
 }
 
-export function readDevVars() {
-  if (!existsSync(DEV_VARS_PATH)) return {}
+let devVarsCache = null
+
+function readDevVars() {
+  if (devVarsCache) return devVarsCache
+  if (!existsSync(DEV_VARS_PATH)) return (devVarsCache = {})
   const vars = {}
   for (const line of readFileSync(DEV_VARS_PATH, 'utf8').split('\n')) {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line)
@@ -30,7 +33,7 @@ export function readDevVars() {
     const value = m[2].trim().replace(/^["'](.*)["']$/, '$1')
     if (value) vars[m[1]] = value
   }
-  return vars
+  return (devVarsCache = vars)
 }
 
 // `--var` arguments for the dev defaults the developer has not set themselves.
@@ -56,11 +59,6 @@ export function wrangler(args, opts = {}) {
   })
 }
 
-export function d1Query(sql) {
-  const out = wrangler(['d1', 'execute', 'DB', '--local', '--json', '--command', sql])
-  return JSON.parse(out)[0].results
-}
-
 export async function waitForServer(maxMs = 60_000) {
   const start = Date.now()
   while (Date.now() - start < maxMs) {
@@ -75,6 +73,13 @@ export async function waitForServer(maxMs = 60_000) {
 
 export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+// For the scripts that act on a worker somebody else started.
+export async function requireServer() {
+  if (await waitForServer(5_000)) return
+  console.error(`No worker on ${BASE}. Start one with \`pnpm dev\` first.`)
+  process.exit(1)
 }
 
 // ---------- worker calls ------------------------------------------------------
@@ -126,7 +131,7 @@ export function randomSha() {
   return Array.from({ length: 40 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('')
 }
 
-export function pullRequestPayload({ repo, prNumber, action, headSha, title, baseRef = 'main' }) {
+export function pullRequestPayload({ repo, prNumber, action, headSha, title }) {
   return {
     action,
     number: prNumber,
@@ -135,7 +140,7 @@ export function pullRequestPayload({ repo, prNumber, action, headSha, title, bas
       state: action === 'closed' ? 'closed' : 'open',
       title,
       head: { sha: headSha },
-      base: { ref: baseRef, sha: randomSha() },
+      base: { ref: 'main', sha: randomSha() },
     },
   }
 }

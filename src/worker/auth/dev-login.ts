@@ -1,17 +1,16 @@
 import type { Handler } from '../router.ts'
-import { safeNext } from './github-oauth.ts'
+import { isHttps, safeNext } from './github-oauth.ts'
 import { makeSessionCookie } from './session.ts'
 
 // GET /auth/dev-login?login=<name>&next=<path>
 //
 // Mints a session for a fabricated identity and adds it to allowed_user, so
-// local dev needs no GitHub App, no client secret, and no callback URL. Same
-// ENABLE_DEBUG_ROUTES gate as /api/debug/* — off by default in wrangler.toml,
-// so a deployed worker serves 404 here. The signed cookie is the real one from
-// session.ts: everything downstream sees an ordinary signed-in user.
+// local dev needs no GitHub App, no client secret, and no callback URL.
+// Registered through devOnly(), the same gate as /api/debug/* — off by default
+// in wrangler.toml, so a deployed worker serves 404 here. The signed cookie is
+// the real one from session.ts: everything downstream sees an ordinary
+// signed-in user.
 export const getDevLogin: Handler = async (req, env) => {
-  if (env.ENABLE_DEBUG_ROUTES !== '1') return new Response('Not Found', { status: 404 })
-
   const url = new URL(req.url)
   const login = (url.searchParams.get('login') || 'dev').slice(0, 39)
   const next = safeNext(url.searchParams.get('next'))
@@ -25,11 +24,7 @@ export const getDevLogin: Handler = async (req, env) => {
     .bind(githubId, login, Date.now())
     .run()
 
-  const cookie = await makeSessionCookie(
-    { github_id: githubId, github_login: login },
-    env,
-    url.protocol === 'https:',
-  )
+  const cookie = await makeSessionCookie({ github_id: githubId, github_login: login }, env, isHttps(req))
   return new Response(null, { status: 302, headers: { location: next, 'set-cookie': cookie } })
 }
 

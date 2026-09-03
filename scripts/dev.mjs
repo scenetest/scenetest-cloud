@@ -1,7 +1,6 @@
-// `pnpm dev` — the whole local stack in one command: migrate the local D1,
-// start wrangler dev and the dashboard build, then seed demo data on a fresh
-// database. Needs no GitHub App, no webhook secret, and no DigitalOcean token;
-// runs execute on the stub runner (RUNNER_PROVIDER = "stub" in wrangler.toml).
+// `pnpm dev` — migrate the local D1, start wrangler dev and the dashboard
+// build, then seed demo data on a fresh database. docs/setup.md is the
+// reference for what that gets you.
 import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
@@ -28,21 +27,20 @@ const child = spawn(
 child.on('exit', (code) => process.exit(code ?? 0))
 
 if (await waitForServer()) {
-  await seedIfEmpty()
+  if (!noSeed) await seedIfEmpty()
   banner()
 }
 
 async function seedIfEmpty() {
-  if (noSeed) return
   try {
-    const cookie = await devSignIn('dev')
+    const cookie = await devSignIn()
     const { repos } = await apiJson('/api/admin/repos', { cookie })
     if (repos.length > 0) {
       console.log(`\n· ${repos.length} watched repo(s) already in the local D1 — skipping the seed`)
       return
     }
     console.log('\n· seeding demo data')
-    await seed()
+    await seed(cookie)
   } catch (err) {
     console.error(`\n· seeding failed: ${err.message}`)
     console.error('  The worker is still running; retry with `pnpm dev:seed`.')
