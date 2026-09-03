@@ -23,7 +23,9 @@ interface GitHubUser {
   login: string
 }
 
-function isHttps(req: Request): boolean {
+// Whether to mark cookies Secure. Shared with dev-login so both sign-in routes
+// decide it the same way.
+export function isHttps(req: Request): boolean {
   return new URL(req.url).protocol === 'https:'
 }
 

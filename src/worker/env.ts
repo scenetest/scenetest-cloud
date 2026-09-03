@@ -54,6 +54,14 @@ export interface Env {
   RUNNER_IDLE_TIMEOUT_MINUTES?: string
 }
 
+// The one reading of the dev switch. /auth/dev-login, /api/debug/*, the
+// `?session=` WebSocket fallback and /api/config must agree on it exactly: the
+// dashboard offers the dev sign-in button whenever this is true, and a button
+// that 404s is worse than no button.
+export function devRoutesEnabled(env: Env): boolean {
+  return env.ENABLE_DEBUG_ROUTES === '1'
+}
+
 export interface AuthedUser {
   github_id: number
   github_login: string

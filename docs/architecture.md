@@ -336,7 +336,13 @@ Three surfaces:
    `allowed_user` allowlist. The viewer/home WebSocket routes also accept the
    session token via `?session=` for header-less test clients, but a bearer in a
    URL is loggable where a cookie isn't (CWE-598), so that fallback is gated to
-   dev/test and refused in cloud.
+   dev/test and refused in cloud. Local dev signs in through `/auth/dev-login`
+   instead, which fabricates an identity and mints the same signed cookie —
+   otherwise running the app at all needs a GitHub App with a localhost callback.
+   Fabricated ids are negative, so a dev row can never collide with a real
+   GitHub user in `allowed_user`. It is `devOnly()` at the route table, the same
+   switch as `/api/debug/*` and the `?session=` fallback: one switch, so the
+   dashboard can advertise the dev sign-in exactly when it exists.
 2. **Runner box and CLI:** a bearer token minted when the box is provisioned,
    scoped to that box and dead when it is destroyed; the PR's Durable Object
    validates it on the WebSocket handshake.

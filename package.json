@@ -5,10 +5,10 @@
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "dev": "concurrently -k -n worker,dashboard -c blue,magenta \"pnpm dev:worker\" \"pnpm dev:dashboard:watch\"",
-    "dev:worker": "node -e \"fs.mkdirSync('dist/dashboard',{recursive:true})\" && wrangler dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:seed": "node scripts/dev-seed.mjs",
+    "dev:webhook": "node scripts/dev-webhook.mjs",
     "dev:dashboard": "vite",
-    "dev:dashboard:watch": "vite build --watch",
     "build:dashboard": "vite build",
     "deploy": "node scripts/encode-assets.mjs && pnpm build:dashboard && wrangler deploy --env production",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",

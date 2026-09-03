@@ -6,7 +6,12 @@ changes — it is the decision record, kept current.
 
 ## Commands
 
-- `pnpm dev` — wrangler dev (:8787) + dashboard build --watch
+- `pnpm dev` — the whole local stack: migrate local D1, wrangler dev (:8787)
+  + dashboard build --watch, then seed demo repos/PRs/runs on an empty
+  database. Sign in with the "Sign in as dev" button — no GitHub App needed.
+  `--no-seed` skips the fixtures.
+- `pnpm dev:seed` / `pnpm dev:webhook` — re-seed, or fire a signed
+  `pull_request` delivery at the local worker (no tunnel)
 - `pnpm typecheck` / `pnpm test` — fast checks, run on any change
 - `pnpm e2e` — boots the real worker against a throwaway D1 and exercises
   auth, webhooks, the stub runner → SSE path, the dashboard shell/widget,
