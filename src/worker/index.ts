@@ -24,6 +24,8 @@ import {
   listUsers,
 } from './routes/admin.ts'
 import { withSession } from './auth/session.ts'
+import { getDevLogin } from './auth/dev-login.ts'
+import { getConfig } from './routes/config.ts'
 import { getOverview, getRepoPrs } from './routes/cloud.ts'
 
 // Auth is declared per route: withSession() for cookie-authed routes (json
@@ -35,6 +37,9 @@ const router = new Router()
   .get('/auth/github/login', getGithubLogin)
   .get('/auth/github/callback', getGithubCallback)
   .post('/auth/logout', postLogout)
+  // Local dev sign-in, no GitHub round trip (env-gated inside the handler).
+  .get('/auth/dev-login', getDevLogin)
+  .get('/api/config', getConfig)
   .get('/api/me', withSession((_req, _env, _ctx, _params, user) => Response.json(user)))
   // Admin
   .get('/api/admin/users', withSession(listUsers))
@@ -77,10 +82,15 @@ const router = new Router()
   .post('/api/debug/idle-check', debugIdleCheck)
 
 const REQUIRED_VARS = ['GITHUB_OAUTH_CLIENT_ID', 'GITHUB_OAUTH_CLIENT_SECRET', 'SESSION_SECRET'] as const
+// With debug routes on, /auth/dev-login replaces the GitHub round trip, so the
+// OAuth credentials are not needed to sign in and only the cookie-signing
+// secret is required. Deployed workers keep the full list.
+const DEV_REQUIRED_VARS = ['SESSION_SECRET'] as const
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const missing = REQUIRED_VARS.filter((k) => !env[k])
+    const required = env.ENABLE_DEBUG_ROUTES === '1' ? DEV_REQUIRED_VARS : REQUIRED_VARS
+    const missing = required.filter((k) => !env[k])
     if (missing.length > 0) {
       return new Response(
         `Missing config: ${missing.join(', ')}. Set in .dev.vars (local) or via wrangler vars/secrets.`,

@@ -1,5 +1,6 @@
 import { Router, Route, useLocation } from 'preact-iso'
 import { useMe, type Me } from './hooks/useMe.ts'
+import { useConfig } from './hooks/useConfig.ts'
 import { NavBar } from './components/NavBar.tsx'
 import { Overview } from './components/Overview.tsx'
 import { ProjectsView } from './components/ProjectsView.tsx'
@@ -48,6 +49,7 @@ function LoadingScreen() {
 }
 
 function SignedOut() {
+  const { dev_auth } = useConfig()
   return (
     <div class='min-h-screen bg-paper flex items-center justify-center'>
       <div class='text-center'>
@@ -55,7 +57,17 @@ function SignedOut() {
           scenetest <span class='cloud-tag' style={{ verticalAlign: 'middle' }}>cloud</span>
         </div>
         <p class='font-serif text-lg text-muted mb-6'>Sign in to view your CI dashboard.</p>
-        <Button variant='primary' size='lg' href='/auth/github/login'>Sign in with GitHub</Button>
+        <div class='flex flex-col items-center gap-3'>
+          <Button variant='primary' size='lg' href='/auth/github/login'>Sign in with GitHub</Button>
+          {dev_auth && (
+            <>
+              <Button variant='secondary' size='lg' href='/auth/dev-login'>Sign in as dev</Button>
+              <p class='font-serif text-sm text-muted m-0'>
+                Local dev only. Signs you in as a made-up user, with no GitHub account.
+              </p>
+            </>
+          )}
+        </div>
       </div>
     </div>
   )

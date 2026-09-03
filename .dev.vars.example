@@ -1,8 +1,12 @@
-# Copy to .dev.vars (gitignored) for `wrangler dev`. Plain vars live in
-# wrangler.toml [vars]; only secrets and local overrides go here. See
-# docs/setup.md.
+# Optional. `pnpm dev` runs without this file: it supplies its own dev values
+# for SESSION_SECRET, GITHUB_WEBHOOK_SECRET and ENABLE_DEBUG_ROUTES, and you
+# sign in through /auth/dev-login instead of GitHub. Copy this to .dev.vars
+# (gitignored) when you want local dev wired to a real GitHub App — anything
+# set here wins over the dev values. Plain vars live in wrangler.toml [vars];
+# only secrets and local overrides go here. See docs/setup.md.
 
-# Unlocks /api/debug/stub-run, which fabricates runs without bearer auth.
+# Unlocks /auth/dev-login and /api/debug/*, which fabricate sessions and runs
+# without GitHub. `pnpm dev` sets this for its own worker already.
 ENABLE_DEBUG_ROUTES=1
 
 # From the GitHub App / OAuth App that matches GITHUB_OAUTH_CLIENT_ID.

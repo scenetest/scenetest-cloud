@@ -91,7 +91,7 @@ export const debugIdleCheck: Handler = async (req, env) => {
 }
 
 // POST /api/debug/stub-run
-// Body: { prNumber?: number, subset?: string[] }
+// Body: { repo?: string, prNumber?: number, title?: string, subset?: string[] }
 // Upserts a fake PR and creates a run through the normal path (ensure box →
 // insert run → dispatch); with the stub provider this fabricates events
 // straight to D1. DEV-ONLY, gated on ENABLE_DEBUG_ROUTES — a wide-open
@@ -100,20 +100,27 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
   if (env.ENABLE_DEBUG_ROUTES !== '1') {
     return new Response('Not Found', { status: 404 })
   }
-  const body = await req
-    .json<{ prNumber?: number; subset?: string[] }>()
-    .catch(() => ({} as { prNumber?: number; subset?: string[] }))
-  const repo = 'demo/repo'
+  interface StubRunBody {
+    repo?: string
+    prNumber?: number
+    title?: string
+    subset?: string[]
+  }
+  const body = await req.json<StubRunBody>().catch(() => ({} as StubRunBody))
+  const repo = body.repo ?? 'demo/repo'
   const prNumber = body.prNumber ?? 1
   const headSha = `sha-${Math.random().toString(36).slice(2, 10)}`
   const now = Date.now()
 
   await env.DB.prepare(
-    `INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at)
-     VALUES (?1, ?2, ?3, 'main', 'open', ?4, ?4)
-     ON CONFLICT(repo, pr_number) DO UPDATE SET head_sha = excluded.head_sha, updated_at = ?4`,
+    `INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, title, opened_at, updated_at)
+     VALUES (?1, ?2, ?3, 'main', 'open', ?4, ?5, ?5)
+     ON CONFLICT(repo, pr_number) DO UPDATE SET
+       head_sha = excluded.head_sha,
+       title = COALESCE(excluded.title, prs.title),
+       updated_at = ?5`,
   )
-    .bind(repo, prNumber, headSha, now)
+    .bind(repo, prNumber, headSha, body.title ?? null, now)
     .run()
 
   const { runId } = await createRun(env, ctx, {
@@ -126,5 +133,5 @@ export const debugStubRun: Handler = async (req, env, ctx) => {
     subset: body.subset ?? null,
   })
 
-  return Response.json({ runId, prUrl: `/repo/${repo}/pr/${prNumber}` })
+  return Response.json({ runId, headSha, prUrl: `/repo/${repo}/pr/${prNumber}` })
 }

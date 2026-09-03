@@ -8,20 +8,42 @@ From zero to a working deployment. Architecture in
 
 ```sh
 pnpm install
-cp .dev.vars.example .dev.vars   # fill in secrets (see below)
-pnpm db:migrate:local
-pnpm dev                          # wrangler dev (:8787) + dashboard build --watch
+pnpm dev
 ```
 
-The vite dev server (`pnpm dev:dashboard`) proxies `/api`, `/auth`,
-`/webhook`, and `/r` to the worker; for the proxied OAuth flow, add
-`http://localhost:<vite-port>/auth/github/callback` to the GitHub App's
-callback URLs.
+That is the whole setup. `pnpm dev` migrates the local D1, starts the worker
+on :8787 and the dashboard build, then seeds two demo repos with pull
+requests and runs. On the sign-in screen, click **Sign in as dev**: it mints a
+session for a made-up user, so local dev needs no GitHub App, no client
+secret, and no callback URL. Runs execute on the stub runner
+(`RUNNER_PROVIDER = "stub"`), which fabricates scenetest events in the worker
+— no DigitalOcean token, no droplet.
 
-With `ENABLE_DEBUG_ROUTES=1` in `.dev.vars` (off by default in
-wrangler.toml so deploys are safe), `POST /api/debug/stub-run` fabricates a
-run end-to-end without GitHub or DigitalOcean — the fastest way to see the
-dashboard working.
+The demo data comes from the worker's own routes, so what you see is what a
+real GitHub delivery produces:
+
+- `pnpm dev:seed` — re-seed (two watched repos, three pull requests, four
+  runs). `pnpm dev --no-seed` starts with an empty database instead.
+- `pnpm dev:webhook` — send a signed `pull_request` delivery to the local
+  worker, the way GitHub would on a push, with no public tunnel. Defaults to a
+  new commit on the seeded PR; takes `--repo owner/name --pr 7 --action opened
+  --title '...'`.
+
+The dev sign-in, the seeded webhook secret, and `/api/debug/*` all hang off
+one switch, `ENABLE_DEBUG_ROUTES`, which `pnpm dev` sets for the local worker
+only. It is `"0"` in wrangler.toml, so a deployed worker serves 404 on every
+one of those routes.
+
+To point local dev at a real GitHub App instead, put the real values in
+`.dev.vars` (see `.dev.vars.example`) — anything you set there wins over the
+dev defaults, and the GitHub sign-in button works as it does in production.
+
+### The vite dev server
+
+`pnpm dev:dashboard` runs vite with HMR on its own port, proxying `/api`,
+`/auth`, and `/webhook` to the worker on :8787. For the proxied GitHub OAuth
+flow, add `http://localhost:<vite-port>/auth/github/callback` to the GitHub
+App's callback URLs; the dev sign-in needs no such registration.
 
 ## GitHub OAuth (sign-in)
 
