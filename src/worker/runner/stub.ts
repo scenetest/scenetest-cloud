@@ -36,8 +36,12 @@ async function runStub(env: Env, run: RunSpec) {
 
   const startTs = Date.now()
   let seq = 0
-  const emit = async (payload: unknown) => {
+  // Every event carries its run id: protocol 0.12 requires it, and the widget
+  // keys its runs/scenes collections by it. Stamped here so each emit site
+  // states only what is specific to that event.
+  const emit = async (event: Record<string, unknown>) => {
     seq += 1
+    const payload = { runId: run.runId, ...event }
     await prCoordinator(env, run.repo, run.prNumber).fetch(
       new Request(`https://do/ingest/${encodeURIComponent(run.runId)}`, {
         method: 'POST',

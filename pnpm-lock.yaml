@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@scenetest/dashboard':
-        specifier: ^0.13.0
-        version: 0.13.0(preact-render-to-string@6.7.0(preact@10.29.2))(typescript@6.0.3)
+        specifier: ^0.14.0
+        version: 0.14.0(preact-render-to-string@6.7.0(preact@10.29.2))(typescript@6.0.3)
       '@scenetest/protocol':
-        specifier: ^0.11.0
-        version: 0.11.0
+        specifier: ^0.12.0
+        version: 0.12.0
       '@tailwindcss/vite':
         specifier: ^4.3.0
         version: 4.3.0(vite@8.0.16(esbuild@0.27.3)(jiti@2.7.0))
@@ -560,11 +560,11 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@scenetest/dashboard@0.13.0':
-    resolution: {integrity: sha512-Cjw2mWCFZGemDYg2hobhreANMrZgMo901q1SrF87eRsnsl8Ww9FOHE8ol9Yp85v76l0Rd3s89I1qKhRFlXRyhw==}
+  '@scenetest/dashboard@0.14.0':
+    resolution: {integrity: sha512-iUKwqRLg89cscOE3/apSy9joNs+X5BG7SuzZfPj+4vOanSOXKCxKuxKI4GBJgkIdBzaz+uHvX+8fXy3nZ+xHuQ==}
 
-  '@scenetest/protocol@0.11.0':
-    resolution: {integrity: sha512-Lh/0nGWp+pck16ncePrNd9d4MGpXOQ1G2aJxXDkc3U9GoV76iXP+sdePLjPU00sSrei15RS1iXGE71moa/AEYg==}
+  '@scenetest/protocol@0.12.0':
+    resolution: {integrity: sha512-mq2chRafTxoa+b44wAHWas0OzHPfzcdjxImqy1tsKNxftti+maW99Zk+haxBHKSu04ADBlWO9pReBphihloKdQ==}
 
   '@sindresorhus/is@7.2.0':
     resolution: {integrity: sha512-P1Cz1dWaFfR4IR+U13mqqiGsLFf1KbayybWwdd2vfctdV6hDpUkgCY0nKOLLTMSoRd/jJNjtbqzf13K8DCCXQw==}
@@ -1538,9 +1538,9 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@scenetest/dashboard@0.13.0(preact-render-to-string@6.7.0(preact@10.29.2))(typescript@6.0.3)':
+  '@scenetest/dashboard@0.14.0(preact-render-to-string@6.7.0(preact@10.29.2))(typescript@6.0.3)':
     dependencies:
-      '@scenetest/protocol': 0.11.0
+      '@scenetest/protocol': 0.12.0
       '@tanstack/db': 0.6.8(typescript@6.0.3)
       preact: 10.29.2
       preact-iso: 2.12.0(preact-render-to-string@6.7.0(preact@10.29.2))(preact@10.29.2)
@@ -1548,7 +1548,7 @@ snapshots:
       - preact-render-to-string
       - typescript
 
-  '@scenetest/protocol@0.11.0': {}
+  '@scenetest/protocol@0.12.0': {}
 
   '@sindresorhus/is@7.2.0': {}
 

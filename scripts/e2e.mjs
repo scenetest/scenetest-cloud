@@ -405,8 +405,8 @@ async function main() {
   box.send(JSON.stringify({
     kind: 'events', runId: 'e2e-ws-run',
     events: [
-      { seq: 1, payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } },
-      { seq: 2, payload: { type: 'scene:start', timestamp: Date.now(), name: 'ws scene', file: 'x.scene.ts', actors: ['A'] } },
+      { seq: 1, payload: { type: 'run:start', timestamp: Date.now(), runId: 'e2e-ws-run', sceneCount: 1 } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: Date.now(), runId: 'e2e-ws-run', name: 'ws scene', file: 'x.scene.ts', actors: ['A'] } },
     ],
   }))
   check('coordinator acked the events batch',
@@ -436,7 +436,7 @@ async function main() {
   // dedupes the replay/live overlap on the PR-global id).
   box.send(JSON.stringify({
     kind: 'events', runId: 'e2e-ws-run',
-    events: [{ seq: 3, payload: { type: 'action:start', timestamp: Date.now(), actor: 'A', action: 'click', target: 'x' } }],
+    events: [{ seq: 3, payload: { type: 'action:start', timestamp: Date.now(), runId: 'e2e-ws-run', actor: 'A', action: 'click', target: 'x' } }],
   }))
   await waitInbox((m) => m.kind === 'ack' && m.runId === 'e2e-ws-run' && m.count >= 1)
 
@@ -480,7 +480,7 @@ async function main() {
       // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
       // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
       // run:end the agent settles the verdict from (1 failed → run failed).
-      scenes: `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'`,
+      scenes: `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"runId":"e2e-agent-run","sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"runId":"e2e-agent-run","duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'`,
     }),
   })
   check('debug box-update queued (no box connected yet)',
@@ -530,7 +530,7 @@ async function main() {
   // is a distinct (run_id, seq) and isn't dropped by the log's INSERT OR IGNORE.
   const localIngest = await fetch('http://127.0.0.1:4998/events/e2e-agent-run', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start', timestamp: Date.now(), sceneCount: 1 } }] }),
+    body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start', timestamp: Date.now(), runId: 'e2e-agent-run', sceneCount: 1 } }] }),
   })
   check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
   const agentReplay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 2500)
@@ -693,9 +693,9 @@ async function main() {
   artBox.send(JSON.stringify({
     kind: 'events', runId: 'e2e-artifact-run',
     events: [
-      { seq: 1, payload: { type: 'run:start', timestamp: 1, sceneCount: 1 } },
-      { seq: 2, payload: { type: 'scene:start', timestamp: 1, name: 'artifact scene', file: 'a.scene.ts', actors: ['A'] } },
-      { seq: 3, payload: { type: 'run:end', timestamp: 2, duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
+      { seq: 1, payload: { type: 'run:start', timestamp: 1, runId: 'e2e-artifact-run', sceneCount: 1 } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: 1, runId: 'e2e-artifact-run', name: 'artifact scene', file: 'a.scene.ts', actors: ['A'] } },
+      { seq: 3, payload: { type: 'run:end', timestamp: 2, runId: 'e2e-artifact-run', duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
     ],
   }))
   const artAck = await waitFor(() =>
@@ -827,8 +827,8 @@ async function main() {
   idleBox.send(JSON.stringify({
     kind: 'events', runId: 'e2e-idle-run',
     events: [
-      { seq: 1, payload: { type: 'run:start', timestamp: 1, sceneCount: 1 } },
-      { seq: 2, payload: { type: 'run:end', timestamp: 2, duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
+      { seq: 1, payload: { type: 'run:start', timestamp: 1, runId: 'e2e-idle-run', sceneCount: 1 } },
+      { seq: 2, payload: { type: 'run:end', timestamp: 2, runId: 'e2e-idle-run', duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
     ],
   }))
   await waitIdleInbox((m) => m.kind === 'ack' && m.runId === 'e2e-idle-run' && m.count === 2)
