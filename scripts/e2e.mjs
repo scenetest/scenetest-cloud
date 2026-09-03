@@ -164,6 +164,48 @@ async function wsStatus(path, cookie, maxMs = 2000) {
   })
 }
 
+// Open a box channel and collect what the coordinator sends. Retiring a box
+// closes the dev server's connections for a moment (a local wrangler artifact —
+// no error, no production analog), and a connect landing in that window is
+// refused. The box agent reconnects with backoff for the same reason; this
+// mirrors it so a section that follows a retire does not fail on the bounce.
+// A channel refused for a real reason (a bad token) fails every attempt and
+// still throws, just later.
+async function openBoxChannel(boxId, token, label, attempts = 5) {
+  for (let attempt = 1; ; attempt++) {
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/${boxId}/channel?token=${token}`)
+    const inbox = []
+    ws.addEventListener('message', (e) => inbox.push(JSON.parse(e.data)))
+    const opened = await new Promise((resolve) => {
+      ws.addEventListener('open', () => resolve(true))
+      ws.addEventListener('error', () => resolve(false))
+      ws.addEventListener('close', () => resolve(false))
+    })
+    if (opened) {
+      const wait = async (pred, maxMs = 4000) => {
+        const start = Date.now()
+        while (Date.now() - start < maxMs) {
+          const hit = inbox.find(pred)
+          if (hit) return hit
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        return null
+      }
+      return { ws, inbox, wait }
+    }
+    try { ws.close() } catch {}
+    if (attempt >= attempts) throw new Error(`${label} channel refused after ${attempts} attempts`)
+    await new Promise((r) => setTimeout(r, 200 * attempt))
+  }
+}
+
+// A connection killed by that same bounce, as undici reports it. Anything else
+// is a real failure and must not be retried into a pass.
+function isBounce(err) {
+  const code = err?.cause?.code ?? err?.code
+  return code === 'UND_ERR_SOCKET' || code === 'ECONNRESET'
+}
+
 // ---------- main -------------------------------------------------------------
 
 const persistDir = mkdtempSync(join(tmpdir(), 'scenetest-e2e-'))
@@ -368,22 +410,7 @@ async function main() {
     queuedCmd.status === 202 && (await j(queuedCmd)).delivered === false)
 
   // Connect as the box; collect everything the coordinator sends.
-  const box = new WebSocket(wsUrl(boxToken))
-  const inbox = []
-  box.addEventListener('message', (e) => inbox.push(JSON.parse(e.data)))
-  await new Promise((resolve, reject) => {
-    box.addEventListener('open', resolve)
-    box.addEventListener('error', () => reject(new Error('box channel refused valid token')))
-  })
-  const waitInbox = async (pred, maxMs = 4000) => {
-    const start = Date.now()
-    while (Date.now() - start < maxMs) {
-      const hit = inbox.find(pred)
-      if (hit) return hit
-      await new Promise((r) => setTimeout(r, 50))
-    }
-    return null
-  }
+  const { ws: box, inbox, wait: waitInbox } = await openBoxChannel('e2e-box-1', boxToken, 'box')
 
   const flushed = await waitInbox((m) => m.kind === 'command')
   check('queued command flushed to box on connect',
@@ -654,6 +681,17 @@ async function main() {
   const s = Object.fromEntries(statuses.map((r) => [r.id, r.status]))
   check('first run cancelled when box rebuilt', s[run1] === 'cancelled', `got ${s[run1]}`)
   check('second run reached its verdict', s[run2] === 'failed', `got ${s[run2]}`) // stub's checkout scene always fails
+  // The same run read back as a past-run report, folded from the object's live
+  // log (the R2 branch is covered after the archive below). The stub's four
+  // scenes carry five assertions, one of them failing.
+  const stubReport = await j(await fetch(
+    `${BASE}/api/cloud/repos/demo/repo/pr/1/runs/${run2}`, { headers: { cookie } }))
+  check('stub run folds into a report with its scenes, actions and assertions',
+    stubReport.scenes?.length === 4 &&
+      stubReport.scenes.every((sc) => sc.timeline.length > 0 && sc.assertions.length > 0) &&
+      stubReport.summary?.assertions?.total === 5 && stubReport.summary.assertions.failed === 1,
+    JSON.stringify(stubReport.summary))
+
   const live = d1Query(persistDir,
     "SELECT COUNT(*) AS n FROM boxes WHERE repo = 'demo/repo' AND pr_number = 1 AND status != 'destroyed'")
   check('exactly one live box per PR', live[0].n === 1, `got ${live[0].n}`)
@@ -683,23 +721,19 @@ async function main() {
     "INSERT INTO runs (id, repo, pr_number, head_sha, trigger, status, box_id) VALUES ('e2e-artifact-run', 'demo/watched', 11, 'artif1', 'manual', 'running', 'e2e-box-art')")
 
   // Drive the run's log into the PR object over its box channel.
-  const artBox = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/e2e-box-art/channel?token=${boxToken}`)
-  const artInbox = []
-  artBox.addEventListener('message', (e) => artInbox.push(JSON.parse(e.data)))
-  await new Promise((resolve, reject) => {
-    artBox.addEventListener('open', resolve)
-    artBox.addEventListener('error', () => reject(new Error('art box channel refused')))
-  })
+  const { ws: artBox, inbox: artInbox } = await openBoxChannel('e2e-box-art', boxToken, 'art box')
   artBox.send(JSON.stringify({
     kind: 'events', runId: 'e2e-artifact-run',
     events: [
       { seq: 1, payload: { type: 'run:start', timestamp: 1, runId: 'e2e-artifact-run', sceneCount: 1 } },
-      { seq: 2, payload: { type: 'scene:start', timestamp: 1, runId: 'e2e-artifact-run', name: 'artifact scene', file: 'a.scene.ts', actors: ['A'] } },
-      { seq: 3, payload: { type: 'run:end', timestamp: 2, runId: 'e2e-artifact-run', duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } },
+      { seq: 2, payload: { type: 'scene:start', timestamp: 1, runId: 'e2e-artifact-run', name: 'artifact scene', file: 'a.scene.ts', actors: ['A'], teamIndex: 0, team: { name: 'default' } } },
+      { seq: 3, payload: { type: 'assertion', timestamp: 1, runId: 'e2e-artifact-run', actor: 'A', description: 'page loads', result: true, scene: 'artifact scene', teamIndex: 0 } },
+      { seq: 4, payload: { type: 'scene:end', timestamp: 2, runId: 'e2e-artifact-run', name: 'artifact scene', status: 'completed', duration: 1, teamIndex: 0, team: { name: 'default' } } },
+      { seq: 5, payload: { type: 'run:end', timestamp: 2, runId: 'e2e-artifact-run', duration: 1, summary: { scenes: 1, completed: 1, failed: 0, assertions: { total: 1, passed: 1, failed: 0 }, warnings: 0, consoleErrors: 0 } } },
     ],
   }))
   const artAck = await waitFor(() =>
-    artInbox.some((m) => m.kind === 'ack' && m.runId === 'e2e-artifact-run' && m.count === 3))
+    artInbox.some((m) => m.kind === 'ack' && m.runId === 'e2e-artifact-run' && m.count === 5))
   check('artifact run events acked by the coordinator', artAck, JSON.stringify(artInbox))
 
   // run:end settles the verdict in D1 through the same projection writer (#36):
@@ -745,6 +779,40 @@ async function main() {
   check('replay has no duplicate seq',
     artifactReplay.seqs.length === new Set(artifactReplay.seqs).size, JSON.stringify(artifactReplay.seqs))
   artBox.close()
+
+  // --- past-run report (the run picker and the ?run=<id> deep link) ---------
+  // The widget leaves live mode when the URL carries ?run=<id> and reads the run
+  // from these two endpoints: the picker lists GET .../runs, the view renders
+  // GET .../runs/:runId. This runs after the archive above, so the report is
+  // folded from the R2 artifact — the same path a link followed days later takes.
+  console.log('· past-run report')
+  const runsBase = '/api/cloud/repos/demo/watched/pr/11'
+  check('run list anonymous → 401', (await fetch(`${BASE}${runsBase}/runs`)).status === 401)
+
+  const runList = await j(await fetch(`${BASE}${runsBase}/runs`, { headers: { cookie } }))
+  const listed = (runList.runs ?? []).find((r) => r.id === 'e2e-artifact-run')
+  check('run list names the PR\'s run with an mtime',
+    listed != null && typeof listed.mtime === 'number' && listed.mtime > 0, JSON.stringify(runList))
+
+  const reportRes = await fetch(`${BASE}${runsBase}/runs/e2e-artifact-run`, { headers: { cookie } })
+  const report = await j(reportRes)
+  check('run report serves the run folded from its archived log',
+    reportRes.status === 200 && report.scenes?.length === 1,
+    `${reportRes.status} ${JSON.stringify(report).slice(0, 200)}`)
+  check('run report carries the scene with its assertion',
+    report.scenes?.[0]?.name === 'artifact scene' &&
+      report.scenes[0].status === 'completed' &&
+      report.scenes[0].assertions?.[0]?.description === 'page loads',
+    JSON.stringify(report.scenes))
+  check('run report summary counts the scene and its assertion',
+    report.summary?.scenes === 1 && report.summary?.completed === 1 &&
+      report.summary?.assertions?.passed === 1,
+    JSON.stringify(report.summary))
+
+  // The PR in the path is the authority: another PR's run is not readable here.
+  const wrongPr = await fetch(
+    `${BASE}/api/cloud/repos/demo/watched/pr/10/runs/e2e-artifact-run`, { headers: { cookie } })
+  check('run report 404s for a run belonging to another PR', wrongPr.status === 404, `got ${wrongPr.status}`)
 
   // --- re-fold: an archived run rejoins the PR stream after teardown ---------
   // THE DO OWNS THE LOG and R2 can recreate it exactly. Reset the PR object's
@@ -794,27 +862,25 @@ async function main() {
 
   // Connect the box channel: the coordinator records the box it coordinates (the
   // alarm's retire target) and arms the idle alarm.
-  const idleBox = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/e2e-box-idle/channel?token=${boxToken}`)
-  const idleInbox = []
-  idleBox.addEventListener('message', (e) => idleInbox.push(JSON.parse(e.data)))
-  await new Promise((resolve, reject) => {
-    idleBox.addEventListener('open', resolve)
-    idleBox.addEventListener('error', () => reject(new Error('idle box channel refused')))
-  })
-  const waitIdleInbox = async (pred, maxMs = 4000) => {
-    const start = Date.now()
-    while (Date.now() - start < maxMs) {
-      const hit = idleInbox.find(pred)
-      if (hit) return hit
-      await new Promise((r) => setTimeout(r, 50))
+  const { ws: idleBox, wait: waitIdleInbox } = await openBoxChannel('e2e-box-idle', boxToken, 'idle box')
+  // Retiring a box closes the dev server's connections, so a request on a pooled
+  // one can die in transit — the same bounce openBoxChannel retries through.
+  // Retry rather than swallow: a lost request means the alarm never ran.
+  // Re-running it is a no-op once the box is retired.
+  const idleCheck = async (attempts = 4) => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fetch(`${BASE}/api/debug/idle-check`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ repo: 'demo/watched', prNumber: 13 }),
+        })
+      } catch (err) {
+        if (attempt >= attempts || !isBounce(err)) throw err
+        await new Promise((r) => setTimeout(r, 200 * attempt))
+      }
     }
-    return null
   }
 
-  const idleCheck = () => fetch(`${BASE}/api/debug/idle-check`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ repo: 'demo/watched', prNumber: 13 }),
-  })
   const idleBoxStatus = () =>
     d1Query(persistDir, "SELECT status FROM boxes WHERE id = 'e2e-box-idle'")[0].status
 

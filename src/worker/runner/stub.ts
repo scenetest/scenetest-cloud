@@ -19,6 +19,11 @@ const FAKE_SCENES = [
   { file: 'specs/dashboard.scene.ts', name: 'renders metrics widgets', actors: ['Viewer'], pass: true },
 ] as const
 
+// The stub runs one team, so every scene it fabricates carries the same
+// team identity — enough for a consumer to key scenes by (team, name).
+const TEAM_INDEX = 0
+const TEAM = { name: 'default' }
+
 export const localStubRunner: Runner = {
   async provision(_env, _ctx, box, _bearerToken) {
     return { runnerId: `stub-${box.boxId.slice(0, 8)}` }
@@ -57,6 +62,8 @@ async function runStub(env: Env, run: RunSpec) {
 
   let pass = 0
   let fail = 0
+  let assertionsPassed = 0
+  let assertionsFailed = 0
   for (const scene of targetScenes) {
     // Latest wins: a new commit retiring the box cancels this run mid-batch
     // (real boxes get the same signal over their command channel). Stop
@@ -73,6 +80,8 @@ async function runStub(env: Env, run: RunSpec) {
       name: scene.name,
       file: scene.file,
       actors: scene.actors,
+      teamIndex: TEAM_INDEX,
+      team: TEAM,
     })
 
     for (const actor of scene.actors) {
@@ -83,6 +92,8 @@ async function runStub(env: Env, run: RunSpec) {
         actor,
         action: 'click',
         target: 'button:Submit',
+        scene: scene.name,
+        teamIndex: TEAM_INDEX,
       })
       await sleep(120)
       await emit({
@@ -91,7 +102,8 @@ async function runStub(env: Env, run: RunSpec) {
         actor,
         action: 'click',
         duration: Date.now() - aStart,
-        error: null,
+        scene: scene.name,
+        teamIndex: TEAM_INDEX,
       })
     }
 
@@ -100,8 +112,11 @@ async function runStub(env: Env, run: RunSpec) {
       timestamp: Date.now(),
       actor: scene.actors[0],
       description: 'page loads without errors',
-      result: 'passed',
+      result: true,
+      scene: scene.name,
+      teamIndex: TEAM_INDEX,
     })
+    assertionsPassed += 1
 
     if (!scene.pass) {
       await emit({
@@ -109,8 +124,11 @@ async function runStub(env: Env, run: RunSpec) {
         timestamp: Date.now(),
         actor: scene.actors[0],
         description: 'order total is $42.00',
-        result: 'failed',
+        result: false,
+        scene: scene.name,
+        teamIndex: TEAM_INDEX,
       })
+      assertionsFailed += 1
     }
 
     const sceneEnd = Date.now()
@@ -118,9 +136,12 @@ async function runStub(env: Env, run: RunSpec) {
     await emit({
       type: 'scene:end',
       timestamp: sceneEnd,
+      name: scene.name,
       status,
       duration: sceneEnd - sceneStart,
-      error: scene.pass ? undefined : { message: 'Expected $42.00, got $0.00' },
+      error: scene.pass ? undefined : 'Expected $42.00, got $0.00',
+      teamIndex: TEAM_INDEX,
+      team: TEAM,
     })
 
     if (scene.pass) pass += 1
@@ -132,7 +153,18 @@ async function runStub(env: Env, run: RunSpec) {
     type: 'run:end',
     timestamp: endTs,
     duration: endTs - startTs,
-    summary: { scenes: targetScenes.length, completed: pass, failed: fail },
+    summary: {
+      scenes: targetScenes.length,
+      completed: pass,
+      failed: fail,
+      assertions: {
+        total: assertionsPassed + assertionsFailed,
+        passed: assertionsPassed,
+        failed: assertionsFailed,
+      },
+      warnings: 0,
+      consoleErrors: 0,
+    },
   })
 
   // run:end settles the verdict (passed/failed) via the coordinator's

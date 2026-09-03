@@ -1,9 +1,12 @@
-import { decodeCommand } from '@scenetest/protocol'
+import { decodeCommand, isEventShaped } from '@scenetest/protocol'
+import type { RunEvent } from '@scenetest/protocol'
+import type { Env } from '../env.ts'
 import type { AuthedHandler } from '../auth/session.ts'
 import { getWsSessionUser, jsonUnauthorized } from '../auth/session.ts'
 import type { Handler } from '../router.ts'
 import { prCoordinator } from '../do/pr-coordinator.ts'
-import { readArtifactBoxJsonl } from '../artifacts.ts'
+import { readArtifactBoxJsonl, readArtifactEvents } from '../artifacts.ts'
+import { buildRunReport } from './run-report.ts'
 
 // GET /api/runs/:runId/log — download the raw event log as .jsonl. Serves the
 // R2 artifact once it exists; before then (run in flight, or archive pending)
@@ -28,10 +31,7 @@ export const getRunLog: AuthedHandler = async (_req, env, _ctx, params) => {
     const jsonl = await readArtifactBoxJsonl(env, run.artifact_key)
     if (jsonl != null) return new Response(jsonl, { headers })
   }
-  const res = await prCoordinator(env, run.repo, run.pr_number).fetch(
-    `https://do/jsonl?runId=${encodeURIComponent(runId)}`,
-  )
-  return new Response(res.body, { headers })
+  return new Response((await liveRunLog(env, run.repo, run.pr_number, runId)).body, { headers })
 }
 
 // GET /api/cloud/repos/:owner/:name/pr/:number/ws — PR viewer WebSocket. Owns
@@ -104,4 +104,94 @@ export const postPrCommand: AuthedHandler = async (req, env, _ctx, params) => {
   })
   const { delivered } = (await res.json()) as { delivered: boolean }
   return Response.json({ delivered }, { status: 202 })
+}
+
+// GET /api/cloud/repos/:owner/:name/pr/:number/runs — the PR's runs, newest
+// first, for the widget's run picker. `mtime` is what the picker labels each
+// option with: when the run ended, or when it started while it still runs.
+export const listPrRuns: AuthedHandler = async (_req, env, _ctx, params) => {
+  const repo = `${params.owner}/${params.name}`
+  const prNumber = Number(params.number)
+  if (!Number.isFinite(prNumber)) return Response.json({ error: 'bad pr number' }, { status: 400 })
+
+  const rows = await env.DB.prepare(
+    `SELECT id, COALESCE(ended_at, started_at, 0) AS mtime FROM runs
+       WHERE repo = ?1 AND pr_number = ?2
+       ORDER BY mtime DESC, rowid DESC
+       LIMIT 100`,
+  )
+    .bind(repo, prNumber)
+    .all<{ id: string; mtime: number }>()
+
+  return Response.json({ runs: rows.results ?? [] })
+}
+
+// GET /api/cloud/repos/:owner/:name/pr/:number/runs/:runId — one run's report:
+// its event log folded into scenes, each with its assertions and timeline.
+// The PR in the path is the authority: a run belonging to another PR is a 404
+// here, not someone else's report.
+export const getPrRunReport: AuthedHandler = async (_req, env, _ctx, params) => {
+  const repo = `${params.owner}/${params.name}`
+  const prNumber = Number(params.number)
+  const runId = params.runId!
+  if (!Number.isFinite(prNumber)) return Response.json({ error: 'bad pr number' }, { status: 400 })
+
+  const run = await env.DB.prepare(
+    'SELECT artifact_key FROM runs WHERE id = ?1 AND repo = ?2 AND pr_number = ?3',
+  )
+    .bind(runId, repo, prNumber)
+    .first<{ artifact_key: string | null }>()
+  if (!run) return Response.json({ error: 'run not found' }, { status: 404 })
+
+  const events = await readRunEvents(env, repo, prNumber, runId, run.artifact_key)
+  return Response.json(buildRunReport(events))
+}
+
+// A run's events, oldest first: the R2 artifact once it exists, else the live
+// log from the PR object — the same source order the /log download uses.
+//
+// Parsed leniently (isEventShaped, not isRunEvent): a log written by an older
+// CLI predates fields the strict check now requires, and a report of a real run
+// must not come back empty because its producer was a version behind. The run
+// id is stamped on for the same reason — the fold partitions by `event.runId`,
+// and the cloud's id is the one the log filed the event under.
+async function readRunEvents(
+  env: Env,
+  repo: string,
+  prNumber: number,
+  runId: string,
+  artifactKey: string | null,
+): Promise<RunEvent[]> {
+  const archived = artifactKey ? await readArtifactEvents(env, artifactKey) : null
+  const payloads = archived ?? parseJsonl(await (await liveRunLog(env, repo, prNumber, runId)).text())
+
+  const events: RunEvent[] = []
+  for (const payload of payloads) {
+    if (isEventShaped(payload)) {
+      events.push({ ...(payload as object), runId } as unknown as RunEvent)
+    }
+  }
+  return events
+}
+
+// The PR object's live log for one run, as the box-compatible .jsonl.
+function liveRunLog(env: Env, repo: string, prNumber: number, runId: string): Promise<Response> {
+  return prCoordinator(env, repo, prNumber).fetch(
+    `https://do/jsonl?runId=${encodeURIComponent(runId)}`,
+  )
+}
+
+// `{"seq":N,"payload":…}` per line — the payloads only; the report has no use
+// for the box's sequence.
+function parseJsonl(jsonl: string): unknown[] {
+  const out: unknown[] = []
+  for (const line of jsonl.split('\n')) {
+    if (!line) continue
+    try {
+      out.push((JSON.parse(line) as { payload?: unknown }).payload)
+    } catch {
+      continue
+    }
+  }
+  return out
 }
