@@ -173,11 +173,12 @@ jobs:
       # a whole when any one path is absent, which would silently leave the base
       # tree on its own copies.
       #
-      # `package.json` is deliberately NOT fetched, though pnpm/action-setup
-      # reads its `packageManager` field. It is the input to
-      # `--frozen-lockfile`, and pairing head's manifest with base's lockfile
-      # fails the install outright. A pnpm version bump is the one skew this
-      # accepts.
+      # `package.json` is deliberately NOT checked out into the base tree, even
+      # though pnpm/action-setup reads its `packageManager` field. It is the
+      # input to `--frozen-lockfile`, and pairing head's manifest with base's
+      # lockfile would fail the install on every PR that adds a dependency.
+      # Head's copy is written to a scratch path below instead, where only the
+      # action reads it.
       #
       # `tsconfig.json` is deliberately NOT fetched, and this is the one place
       # this workflow departs from the skill's template, which groups it with
@@ -201,8 +202,18 @@ jobs:
             git checkout "${{ github.event.pull_request.head.sha }}" -- "$f" ||
               echo "no $f on head, leaving the base copy in place"
           done
+          # Head's `packageManager` field, somewhere only the action looks, so
+          # a PR that bumps pnpm sets up both trees with the new pnpm without
+          # base's lockfile ever meeting head's dependency list. tsconfig's
+          # `include` is `src/**/*`, so this path is invisible to the
+          # typecheck, and there is no pnpm-workspace.yaml to glob it up.
+          mkdir -p .ci-toolchain
+          git show "${{ github.event.pull_request.head.sha }}:package.json" \
+            >.ci-toolchain/package.json
 
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: .ci-toolchain/package.json
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc

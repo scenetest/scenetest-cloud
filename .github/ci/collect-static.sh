@@ -20,11 +20,22 @@ mkdir -p "$OUT"
 # runners ever differ in locale.
 export LC_ALL=C
 
-# `tsc --noEmit` needs no generated declarations here: the worker's types come
-# from @cloudflare/workers-types in devDependencies, not from `wrangler types`.
+# Calls the TOOL, not the `typecheck` script, although package.json has one.
+# This script is fetched from head and run against the BASE tree, so it must
+# only use things both trees have. `tsc` is a devDependency, present on both;
+# a script name is not — a PR that adds or renames one would break the base
+# measurement, and a broken base measurement fails the gate with an error
+# about the wrong thing.
+#
+# `--noEmit` is spelled out here for the same reason, and the two are trivially
+# the same today: `"typecheck": "tsc --noEmit"`.
+#
+# No generated declarations are needed first: the worker's types come from
+# @cloudflare/workers-types in devDependencies, not from `wrangler types`.
+#
 # Keep the grep — it drops the summary lines, which change with the error count
 # and would otherwise diff as noise.
-pnpm typecheck 2>&1 | grep ': error TS' | sort >"$OUT/typecheck.txt"
+pnpm exec tsc --noEmit 2>&1 | grep ': error TS' | sort >"$OUT/typecheck.txt"
 status=${PIPESTATUS[0]}
 
 # A typechecker that failed but printed nothing the grep recognises would leave
