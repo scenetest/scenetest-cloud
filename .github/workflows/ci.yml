@@ -23,10 +23,10 @@ on:
 # meant every PR branch built twice.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  # Every run here belongs to one PR branch, so a second run means someone
-  # pushed a new commit and the first run is already describing an old tree.
-  # Cancel it: the new run overwrites the same sticky comment anyway.
-  cancel-in-progress: true
+  # A cancelled run leaves its sticky comment describing an older commit, with
+  # no red X to explain why, so a PR run is never cancelled. This workflow only
+  # triggers on `pull_request`, so the value is a constant.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -179,10 +179,22 @@ jobs:
       # fails the install outright. A pnpm version bump is the one skew this
       # accepts.
       #
-      # `tsconfig.json` is deliberately not fetched either: a PR that tightens
-      # the compiler is changing the code's contract, and the base tree should
-      # be judged by the old one so the new errors read as new.
-      - name: Fetch check scripts and toolchain pins from head
+      # `tsconfig.json` is deliberately NOT fetched, and this is the one place
+      # this workflow departs from the skill's template, which groups it with
+      # the linter and formatter configs. That grouping is right for a linter
+      # being adopted gradually and wrong for a typecheck gate, because it
+      # fails OPEN on the change it should catch:
+      #
+      #   A PR sets `strict: true` and surfaces 40 errors. Judge the base tree
+      #   by head's tsconfig and the base shows the same 40, so the delta is
+      #   zero, `no-new` passes, the PR merges, and `pnpm typecheck` is broken
+      #   on main with CI having said nothing.
+      #
+      # Left on its own tsconfig, the base shows 0, the PR shows 40 new, and
+      # the gate blocks until they are fixed or POLICY is relaxed for one
+      # merge. Noisy in the safe direction. Revisit if the repo ever adopts a
+      # linter, whose configs SHOULD come from head.
+      - name: Fetch the measurement from head
         run: |
           git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.head.sha }}"
           for f in .github/ci .nvmrc; do
