@@ -31,6 +31,19 @@ concurrency:
 permissions:
   contents: read
 
+# GitHub's default shell for `run:` is `bash -e {0}` — note the missing
+# `pipefail`. Every step here that pipes into `tee` would report the exit
+# status of `tee`, which is always 0: a failed build would record `success`, a
+# failing `pnpm e2e` would render a green tick, and the `Gate` step, which also
+# pipes into `tee`, could never fail the run at all.
+#
+# Naming the shell explicitly is what turns pipefail on: `shell: bash` means
+# `bash --noprofile --norc -eo pipefail {0}`. Set once here rather than per
+# step, so a step added later cannot forget it.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # ── The PR's tree ─────────────────────────────────────────────────────
   # Install once, build once, then run everything off that one tree: the
