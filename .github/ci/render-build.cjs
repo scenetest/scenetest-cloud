@@ -21,10 +21,16 @@ const path = require('path')
 // How many log lines to quote. Enough to carry one error plus its import trace.
 const EXCERPT = 40
 
-// The first line of an error in Vite's output. The excerpt is anchored on this
-// rather than on the tail of the log, because Vite prints a summary, a stack,
-// and an exit code after the useful part.
-const ERROR_HEADING = /^\s*(error|ERROR|Error:|\[vite\]|✘|×|failed to)/
+// The first line of an error in the build tool's output. The excerpt is
+// anchored on this rather than on the tail of the log, because Vite prints a
+// summary, a stack, and an exit code after the useful part.
+//
+// The optional clock prefix is not for Vite, which does not timestamp. It
+// costs nothing and it is the failure mode to guard: an anchor that does not
+// allow a timestamp matches nothing, and matching nothing falls back silently
+// to quoting the tail — the least informative lines in the log.
+const ERROR_HEADING =
+	/^\s*(?:\d{1,2}:\d{2}:\d{2}\s+)?(?:\[(?:ERROR|\w*Error)\]|error\b|ERROR\b|Error:|\[vite\]|✘|×|failed to)/
 
 const read = (p) => {
 	try {

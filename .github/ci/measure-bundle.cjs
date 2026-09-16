@@ -14,7 +14,15 @@ const zlib = require('zlib')
 
 // Strip the content hash, so the same logical chunk is comparable across two
 // builds. Vite emits 8 characters after a dash: `index-BQfMk2wr.js`.
-const STRIP_HASH = /[-.][A-Za-z0-9_-]{8,20}(\.[a-z]+)$/
+//
+// Each accepted length is exact, and that is load-bearing. A range like {8,20}
+// matches from the FIRST dash in `client-entry-a1b2c3d4.js`, because
+// `entry-a1b2c3d4` is itself inside the range — the key becomes `client.js`,
+// and every chunk whose name contains a dash collapses onto a neighbour's key.
+// The identity comparison then reports two different files as one unchanged
+// chunk. This repo emits one dash-free chunk name today; the exact lengths are
+// what keep that true when the dashboard gains a manualChunks split.
+const STRIP_HASH = /[-.](?:[A-Za-z0-9_-]{8}|[A-Za-z0-9]{16}|[a-f0-9]{20})(\.[a-z0-9]+)$/
 
 const sizeOf = (file) => {
 	const buf = fs.readFileSync(file)
@@ -64,6 +72,10 @@ function measure(dist) {
 		// much as size: a chunk whose hash is unchanged is still in returning
 		// visitors' caches.
 		eagerChunks: {},
+		// Where the eager set came from. Said out loud because a walk over the
+		// whole output directory is a fallback whose "eager" total is really
+		// everything the build emitted.
+		eagerSource: 'index.html',
 		fileCount: 0,
 	}
 
