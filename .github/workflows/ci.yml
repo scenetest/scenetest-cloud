@@ -1,31 +1,253 @@
+# Delta-reporting PR checks.
+#
+# Shape: one job per TREE, not one per check. `head` and `base` each install
+# once and build once, then run every check that tree can answer. They run in
+# parallel with each other. `report` fans in, diffs the two, posts a single
+# comment that updates in place, and owns the pass/fail decision.
+#
+# Total cost: 2 installs, 2 builds — whatever the number of checks.
+#
+# The checks: build outcome, type errors, dashboard bundle size, tests, the
+# wrangler deploy dry-run, and the end-to-end worker run. There is no linter
+# and no formatter in this repo, so there is no lint or formatter delta.
+
 name: CI
 
 on:
   pull_request:
-  push:
     branches: [main]
 
+# No `push` trigger. This workflow compares two trees, and a push has no base
+# to compare against — it would run both jobs and report nothing. The old
+# single-job CI ran on `push: [main]` as well as `pull_request`, which also
+# meant every PR branch built twice.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  # Every run here belongs to one PR branch, so a second run means someone
+  # pushed a new commit and the first run is already describing an old tree.
+  # Cancel it: the new run overwrites the same sticky comment anyway.
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
-  check:
+  # ── The PR's tree ─────────────────────────────────────────────────────
+  # Install once, build once, then run everything off that one tree: the
+  # typecheck, the bundle measurement, the tests, the deploy dry-run, the
+  # end-to-end run.
+  head:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
+      # pnpm/action-setup MUST come before setup-node: setup-node's `cache:
+      # pnpm` needs the pnpm binary to locate the store.
+      #
+      # No `version:` here. The action reads the `packageManager` field in
+      # package.json, so the version lives in one place. Pinning it here as
+      # well is the most common way this workflow breaks.
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      # `id` and the guard below: when the install fails, every later step is
+      # measuring nothing. Skip them rather than filling the report with the
+      # consequences of one failure.
+      - name: Install
+        id: install
+        run: pnpm install --frozen-lockfile
 
-      - run: pnpm typecheck
+      # The typecheck runs BEFORE the build and never depends on it. A branch
+      # that fails to build is the branch that most needs to hear about its
+      # type errors.
+      - name: Static checks
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: bash .github/ci/collect-static.sh /tmp/out/static
 
-      - run: pnpm test
+      # `continue-on-error` and `tee`: a failed build is a finding to report,
+      # not a reason to lose the comment. The log feeds the Build section,
+      # which says whether this PR broke the build or inherited a broken base.
+      - name: Build dashboard
+        id: build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/out
+          pnpm build:dashboard 2>&1 | tee /tmp/out/build.log
 
-      - run: pnpm build:dashboard
+      - name: Measure dashboard bundle
+        if: ${{ steps.build.outcome == 'success' }}
+        run: node .github/ci/measure-bundle.cjs dist/dashboard /tmp/out/bundle.json
 
-      - run: pnpm e2e
+      # The only thing that validates wrangler.toml and the D1, R2, and
+      # Durable Object bindings. It bundles the worker exactly as a deploy
+      # would, without deploying. Needs dist/dashboard, because the assets
+      # binding points at it — hence after the build.
+      - name: Worker deploy dry-run
+        id: deploy
+        if: ${{ steps.build.outcome == 'success' }}
+        continue-on-error: true
+        run: pnpm exec wrangler deploy --dry-run 2>&1 | tee /tmp/out/deploy.log
 
-      - run: pnpm exec wrangler deploy --dry-run
+      # scripts/e2e.mjs boots wrangler dev + workerd against a throwaway D1 in
+      # a temp --persist-to dir with inline secrets. It reads neither .dev.vars
+      # nor .wrangler/state, and nothing here gives it either.
+      - name: End-to-end
+        id: e2e
+        if: ${{ steps.build.outcome == 'success' }}
+        continue-on-error: true
+        run: pnpm e2e 2>&1 | tee /tmp/out/e2e.log
+
+      - name: Tests
+        id: tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        run: pnpm test --reporter=json --outputFile=/tmp/test-results.json
+
+      # One recording step for all four outcomes. A step that never ran records
+      # `skipped`, which the gate treats as "not shown to pass" rather than as
+      # a pass.
+      - name: Record step outcomes
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p /tmp/out
+          echo "${{ steps.build.outcome }}"  >/tmp/out/build.outcome
+          echo "${{ steps.deploy.outcome }}" >/tmp/out/deploy.outcome
+          echo "${{ steps.e2e.outcome }}"    >/tmp/out/e2e.outcome
+
+      - name: Render head fragments
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          node -e "require('./.github/ci/render-tests.cjs')({
+            results: '/tmp/test-results.json', out: '/tmp/out/fragments'
+          })"
+          node -e "require('./.github/ci/render-worker.cjs')({
+            dir: '/tmp/out', out: '/tmp/out/fragments'
+          })"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: tree-head
+          path: /tmp/out/
+          retention-days: 1
+
+  # ── The base branch's tree ────────────────────────────────────────────
+  # Same install and build, but only the checks that need a comparison point.
+  # No tests, no deploy dry-run, no end-to-end run — those are head-only
+  # questions, and running them twice would double the slowest half of CI.
+  base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref }}
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        id: install
+        run: pnpm install --frozen-lockfile
+
+      # The scripts live on the head branch, so fetch them rather than using
+      # the base branch's copy. Both trees must be measured by the SAME
+      # scripts, or a change to a script shows up as a change in the codebase.
+      #
+      # There is no linter or formatter config to fetch alongside them.
+      # tsconfig.json is deliberately NOT fetched: a PR that changes the
+      # compiler's strictness is changing the code's contract, and the base
+      # tree should be judged by the old one so the new errors show as new.
+      - name: Fetch check scripts from head
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.head.sha }}"
+          git checkout "${{ github.event.pull_request.head.sha }}" -- .github/ci/
+
+      - name: Static checks
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: bash .github/ci/collect-static.sh /tmp/out/static
+
+      - name: Build dashboard
+        id: build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/out
+          pnpm build:dashboard 2>&1 | tee /tmp/out/build.log
+
+      - name: Record the build outcome
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p /tmp/out
+          echo "${{ steps.build.outcome }}" >/tmp/out/build.outcome
+
+      - name: Measure dashboard bundle
+        if: ${{ steps.build.outcome == 'success' }}
+        run: node .github/ci/measure-bundle.cjs dist/dashboard /tmp/out/bundle.json
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: tree-base
+          path: /tmp/out/
+          retention-days: 1
+
+  # ── Fan-in: diff, one comment, one verdict ────────────────────────────
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [head, base]
+    # `always()`, or a failing check job cancels the report and the contributor
+    # sees a red X with no explanation.
+    if: ${{ always() }}
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with: { name: tree-head, path: /tmp/head }
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with: { name: tree-base, path: /tmp/base }
+        continue-on-error: true
+
+      # The diff happens here, once, over artifacts. Neither tree is present.
+      - name: Render fragments
+        run: |
+          mkdir -p /tmp/fragments
+          cp -r /tmp/head/fragments/. /tmp/fragments/ 2>/dev/null || true
+          node -e "require('./.github/ci/render-build.cjs')({
+            head: '/tmp/head', base: '/tmp/base', out: '/tmp/fragments'
+          })"
+          node -e "require('./.github/ci/render-static.cjs')({
+            head: '/tmp/head/static', base: '/tmp/base/static', out: '/tmp/fragments'
+          })"
+          node -e "require('./.github/ci/render-bundle.cjs')({
+            head: '/tmp/head/bundle.json', base: '/tmp/base/bundle.json', out: '/tmp/fragments'
+          })"
+
+      - name: Post comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { assemble, upsertComment } = require('./.github/ci/comment.cjs')
+            const body = assemble('/tmp/fragments', {
+              id: 'pr-checks',
+              title: '### PR checks',
+              header: `_Compared against \`${context.payload.pull_request.base.ref}\`._`,
+            })
+            core.info(JSON.stringify(await upsertComment(github, context, 'pr-checks', body)))
+
+      # `tee` puts the verdict on the run's summary page, so the reason a
+      # required check went red is visible without opening the log.
+      - name: Gate
+        run: node .github/ci/gate.cjs /tmp/fragments | tee -a "$GITHUB_STEP_SUMMARY"
