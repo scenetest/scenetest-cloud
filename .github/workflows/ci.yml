@@ -148,6 +148,35 @@ jobs:
         with:
           ref: ${{ github.base_ref }}
 
+      # This runs BEFORE setup-node, not after the install, because `.nvmrc` is
+      # one of the files it fetches and setup-node reads it.
+      #
+      # Both trees must be measured by the SAME scripts and the SAME toolchain,
+      # or editing a script — or bumping Node — shows up as a change in the
+      # codebase. It is also what lets this workflow bootstrap: the PR that
+      # adds `.nvmrc` is a PR whose base branch does not have one yet.
+      #
+      # One `git checkout` per path: a single call listing all of them fails as
+      # a whole when any one path is absent, which would silently leave the base
+      # tree on its own copies.
+      #
+      # `package.json` is deliberately NOT fetched, though pnpm/action-setup
+      # reads its `packageManager` field. It is the input to
+      # `--frozen-lockfile`, and pairing head's manifest with base's lockfile
+      # fails the install outright. A pnpm version bump is the one skew this
+      # accepts.
+      #
+      # `tsconfig.json` is deliberately not fetched either: a PR that tightens
+      # the compiler is changing the code's contract, and the base tree should
+      # be judged by the old one so the new errors read as new.
+      - name: Fetch check scripts and toolchain pins from head
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.head.sha }}"
+          for f in .github/ci .nvmrc; do
+            git checkout "${{ github.event.pull_request.head.sha }}" -- "$f" ||
+              echo "no $f on head, leaving the base copy in place"
+          done
+
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -157,19 +186,6 @@ jobs:
       - name: Install
         id: install
         run: pnpm install --frozen-lockfile
-
-      # The scripts live on the head branch, so fetch them rather than using
-      # the base branch's copy. Both trees must be measured by the SAME
-      # scripts, or a change to a script shows up as a change in the codebase.
-      #
-      # There is no linter or formatter config to fetch alongside them.
-      # tsconfig.json is deliberately NOT fetched: a PR that changes the
-      # compiler's strictness is changing the code's contract, and the base
-      # tree should be judged by the old one so the new errors show as new.
-      - name: Fetch check scripts from head
-        run: |
-          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.head.sha }}"
-          git checkout "${{ github.event.pull_request.head.sha }}" -- .github/ci/
 
       - name: Static checks
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
