@@ -11,7 +11,8 @@ Background in [architecture.md](./architecture.md); setup steps in
 1. GitHub POSTs a `pull_request` event to `/webhook/github`
    (`src/worker/routes/webhook-github.ts`). The handler verifies the HMAC
    signature, drops duplicate deliveries (`webhook_deliveries` table), checks
-   the repo against `watched_repo`, and upserts `prs`.
+   the repo against `watched_repo`, ignores PRs whose head lives in a fork
+   (`ignored:fork-pr`), and upserts `prs`.
 2. For `opened` / `synchronize` / `reopened`, `createRun()`
    (`src/worker/runner/create-run.ts`) calls `ensureBox()`, which computes
    the push's stage vector from the repo's pipeline file and git tree
@@ -29,8 +30,11 @@ Background in [architecture.md](./architecture.md); setup steps in
    itself is dispatched through the PR's Durable Object
    (`src/worker/do/pr-coordinator.ts`) — queued until the box connects.
 4. On the box, the image's `scenetest-runner` service runs the agent
-   (`infra/box/agent.mjs`): it reads `/etc/scenetest/run.env`, clones the
-   repo at `SCENETEST_HEAD_SHA`, and connects out to the box channel. The
+   (`infra/box/agent.mjs`) as root: it reads `/etc/scenetest/run.env`,
+   blocks the metadata endpoint for the `scenetest-run` user, clones the
+   repo at `SCENETEST_HEAD_SHA` as that user, and connects out to the box
+   channel. Every repo command runs as `scenetest-run` with an allowlisted
+   environment ([threat-model.md](./threat-model.md)). The
    queued pipeline `update` arrives first (FIFO) and the agent runs its
    stages — app, database, seeds, the same code path as a developer's
    laptop — then reports the realized vector via
@@ -118,7 +122,11 @@ non-zero exit marks the run failed, so no batch is left dangling.
 | `SCENETEST_REPO` | `owner/name` |
 | `SCENETEST_HEAD_SHA` / `SCENETEST_BASE_SHA` / `SCENETEST_BASE_REF` | what to build |
 | `SCENETEST_INGEST_URL` | origin of this deployment (`PUBLIC_BASE_URL`) |
-| `SCENETEST_BEARER_TOKEN` | the box's credential (channel + ingest API) |
+| `SCENETEST_BEARER_TOKEN` | the box's credential (channel + ingest API); agent-only, never passed to repo commands |
+
+The unit adds `SCENETEST_RUN_AS=scenetest-run` and
+`SCENETEST_BLOCK_METADATA=1`. As root without `SCENETEST_RUN_AS`, the agent
+refuses to start.
 
 Scene subsets are not box-level: they arrive per run inside `dispatch`
 batches.
@@ -147,8 +155,11 @@ end-to-end before any DigitalOcean setup.
 ## Invariants
 
 - User code executes only on the disposable box, never in the worker.
-- The bearer token's plaintext exists in two places: the box's `run.env`
-  and the provision request that wrote it. D1 holds only the hash.
+- The bearer token's plaintext exists in three places: the box's `run.env`,
+  the droplet's `user_data` (served by the metadata endpoint, which repo
+  commands can't reach), and the provision request that wrote it. D1 holds
+  only the hash.
+- Repo commands never run as root and never see the bearer token.
 - At most one live box per PR (unique partial index), and at most one
   connected box channel per coordinator (a new connection replaces the old).
 - Every `runner_instances` row reaches `destroyed` or `lost`; `lost` rows

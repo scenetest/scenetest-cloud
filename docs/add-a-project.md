@@ -7,7 +7,10 @@ itself has its own page: [pipeline.md](./pipeline.md).
 
 Current constraints, up front: **public repos only** (the box clones without
 credentials); webhook secret is **per-deployment**, shared by every watched
-repo; runs trigger on **pull requests only** (no push-to-main runs yet).
+repo; runs trigger on **pull requests only** (no push-to-main runs yet);
+**PRs from forks don't run** (only branches pushed to the watched repo);
+pipeline commands run **without root or Docker**
+([threat-model.md](./threat-model.md)).
 
 ## Phase 0 — scenes pass locally
 
@@ -93,8 +96,9 @@ In escalation order:
 1. GitHub → the webhook's **Recent Deliveries**: was it sent, what status
    came back?
 2. `webhook_deliveries.result` in D1: `ignored:unwatched-repo` means Phase
-   1 and Phase 2 disagree about the repo name; `run-created:` means the
-   trigger side is fine.
+   1 and Phase 2 disagree about the repo name; `ignored:fork-pr` means the
+   PR's branch lives in a fork; `run-created:` means the trigger side is
+   fine.
 3. `wrangler tail` on the worker: provisioning, image-build, and
    stage-hashing logs (coarse-fallback warnings show up here; the operator
    can set `GITHUB_API_TOKEN` to stop them).

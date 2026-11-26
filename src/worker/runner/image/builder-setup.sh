@@ -33,6 +33,11 @@ apt-get install -y /tmp/supabase.deb && rm /tmp/supabase.deb
 npx -y playwright@latest install-deps chromium
 
 # --- the box agent -----------------------------------------------------------
+# Repo commands run as this user; the agent itself stays root
+# (docs/threat-model.md). Not in the docker group: membership would be root
+# in all but name, and the agent drops supplementary groups anyway.
+useradd --system --create-home --home-dir /home/scenetest-run --shell /bin/bash scenetest-run
+
 mkdir -p /opt/scenetest
 echo '__AGENT_B64__' | base64 -d > /opt/scenetest/agent.mjs
 chmod 755 /opt/scenetest/agent.mjs
@@ -46,6 +51,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/scenetest/run.env
+Environment=SCENETEST_RUN_AS=scenetest-run
+Environment=SCENETEST_BLOCK_METADATA=1
 ExecStart=/usr/bin/node /opt/scenetest/agent.mjs
 Restart=on-failure
 RestartSec=5

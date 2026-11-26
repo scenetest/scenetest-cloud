@@ -49,7 +49,8 @@ one repo-side contract; editing it re-runs the pipeline like any other edit
 to this file. When omitted it falls back to the legacy hook,
 `bash scenetest/box-run.sh`.
 
-The box runs this command at the repo root and sets these for it:
+The box runs this command at the repo root as the `scenetest-run` user. Its
+environment is the stage environment (below) plus these:
 
 | Variable | Meaning |
 |---|---|
@@ -96,10 +97,13 @@ files under `supabase/`; `*.md` matches `README.md` but **not**
 4. **Editing `pipeline.json` re-runs every stage.** The file is one of its
    own inputs. This is also the lever: pushing a whitespace change to it is
    a full rebuild on demand.
-5. **The machine itself is not yours to define (yet).** Node, pnpm, docker,
-   the supabase CLI, and Playwright system libraries are preinstalled in the
-   box image. Need an extra apt package today? Install it in a `run` line.
-   When that's too slow, the `toolchain` field is the planned fix.
+5. **The machine itself is not yours to define (yet).** Node, pnpm, the
+   supabase CLI, and Playwright system libraries are preinstalled in the
+   box image. Commands run without root, so `apt-get install` and
+   `playwright install --with-deps` fail. Docker is installed but out of
+   reach of repo commands for now, so `supabase start` fails too
+   ([threat-model.md](./threat-model.md), "Known gaps"). The `toolchain`
+   field is the planned way to ask for more.
 6. **No file = everything coarse.** Without `pipeline.json`, every push
    rebuilds the whole box (running `scenetest/box-setup.sh` if present).
    Correct, just slower — adding the file is pure optimization.
@@ -107,7 +111,11 @@ files under `supabase/`; `*.md` matches `README.md` but **not**
 What stages can rely on: repo checked out at the PR's head commit (cwd =
 repo root, public repos only for now), previous stages' effects present
 (warm box) or freshly re-run, and a non-zero exit failing the box — the
-next push provisions a fresh one. Scene batches arrive separately after
+next push provisions a fresh one. Stages run as the unprivileged
+`scenetest-run` user, which owns the checkout and has its own `HOME`. Their
+environment is exactly `PATH`, `HOME`, `USER`, `LOGNAME`, and `LANG`,
+`LC_ALL`, `TZ`, `TERM` when the box sets them; nothing else is passed in.
+PRs from forks don't run at all. Scene batches arrive separately after
 the pipeline is ready, via the top-level `scenes` command above (the box
 sets `SCENETEST_REPORT_URL` so the CLI streams results back).
 
@@ -121,7 +129,8 @@ Do this, in order:
 2. Find the database directory (`supabase/`, `prisma/`, `drizzle/`,
    `migrations/`) → the `db` stage: watch the whole directory, `run` the
    project's reset command (for supabase: `supabase start && supabase db
-   reset` — `start` is idempotent).
+   reset` — `start` is idempotent). Supabase needs Docker, which repo
+   commands can't use yet (rule 5), so this stage fails on today's boxes.
 3. Find the build (`package.json` scripts: `build`, plus typegen if the
    project runs one) → the `build` stage: watch source dirs and config
    files (`src/**`, `*.config.*`, `tsconfig*.json`, `public/**` if used).

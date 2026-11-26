@@ -276,6 +276,11 @@ local `.jsonl` and also streams events up the box's single outbound WebSocket to
 the PR's Durable Object. Outbound-only means no inbound firewall holes; directions
 ride the same socket back down.
 
+The box runs the PR's code, so it is the trust boundary.
+[threat-model.md](./threat-model.md) says what a PR author can and cannot do
+there: fork PRs don't run, and repo commands run as an unprivileged user
+without the box's credential.
+
 Teardown is idle-based and owned by the PR object: a Durable Object alarm is
 re-armed on every activity signal and, when it fires after the PR's runs have all
 settled, the box is retired. An in-flight run re-arms rather than retiring. A
