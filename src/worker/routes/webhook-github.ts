@@ -9,21 +9,28 @@ import { retireBox } from '../runner/box.ts'
 // Trigger pipeline: pull_request opened/synchronize/reopened on a watched
 // repo → upsert prs → create a run for the new head sha (consuming the PR's
 // next_push_filter as the scene subset, if set). 'closed' just updates PR
-// state. Everything else is recorded and ignored.
+// state. PRs whose head lives in a fork are ignored (docs/threat-model.md).
+// Everything else is recorded and ignored.
 //
 // Responses are 200 for anything we chose to ignore — non-2xx makes GitHub
 // surface the hook as failing and retry, which is only right when *we* are
 // at fault (bad signature, missing config, thrown error).
 
+interface PayloadRepo {
+  id?: number
+  full_name: string
+}
+
 interface PullRequestPayload {
   action: string
   number: number
-  repository: { full_name: string }
+  repository: PayloadRepo
   pull_request: {
     state: string
     title?: string
-    head: { sha: string }
-    base: { ref: string; sha: string }
+    // null when the fork the PR came from has since been deleted.
+    head: { sha: string; repo?: PayloadRepo | null }
+    base: { ref: string; sha: string; repo?: PayloadRepo }
   }
 }
 
@@ -87,15 +94,30 @@ export function classifyWebhook(
   event: string,
   action: string | undefined,
   isWatched: boolean,
+  isFork: boolean,
 ): WebhookDecision {
   if (event === 'ping') return { kind: 'ignore', reason: 'ping' }
   if (event !== 'pull_request') return { kind: 'ignore', reason: `event:${event}` }
   if (!isWatched) return { kind: 'ignore', reason: 'unwatched-repo' }
+  // Closing still applies to a fork PR: it tears down any box the PR got
+  // before fork PRs were ignored.
   if (action === 'closed') return { kind: 'pr-closed' }
   if (action === 'opened' || action === 'synchronize' || action === 'reopened') {
+    if (isFork) return { kind: 'ignore', reason: 'fork-pr' }
     return { kind: 'create-run' }
   }
   return { kind: 'ignore', reason: `action:${action}` }
+}
+
+// Whether the PR's head commit lives outside the base repo. A missing head
+// repo (deleted fork, or a payload without the field) counts as a fork: the
+// guard fails closed. Repo ids survive renames, so they win over names.
+export function isForkPr(payload: Pick<PullRequestPayload, 'repository' | 'pull_request'>): boolean {
+  const head = payload.pull_request.head.repo
+  if (!head) return true
+  const base = payload.pull_request.base.repo ?? payload.repository
+  if (typeof head.id === 'number' && typeof base.id === 'number') return head.id !== base.id
+  return head.full_name.toLowerCase() !== base.full_name.toLowerCase()
 }
 
 async function handleEvent(
@@ -110,7 +132,7 @@ async function handleEvent(
   // webhook is created, so a ping delivery row with the repo name is the
   // "wiring verified" signal project onboarding (and its UI) checks for.
   if (event !== 'pull_request') {
-    const d = classifyWebhook(event, undefined, false) as { kind: 'ignore'; reason: string }
+    const d = classifyWebhook(event, undefined, false, false) as { kind: 'ignore'; reason: string }
     let repo: string | undefined
     try {
       repo = (JSON.parse(rawBody) as { repository?: { full_name?: string } }).repository?.full_name
@@ -135,8 +157,12 @@ async function handleEvent(
     .bind(owner ?? '', name ?? '')
     .first()
 
-  const decision = classifyWebhook(event, action, watched !== null)
+  const decision = classifyWebhook(event, action, watched !== null, isForkPr(payload))
   if (decision.kind === 'ignore') {
+    if (decision.reason === 'fork-pr') {
+      const headRepo = payload.pull_request.head.repo?.full_name ?? 'a deleted fork'
+      console.log(`webhook: ignored ${action} on ${repo}#${prNumber}: head is in ${headRepo}, not ${repo}`)
+    }
     return { ...base, result: `ignored:${decision.reason}` }
   }
 

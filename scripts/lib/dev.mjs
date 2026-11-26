@@ -139,8 +139,8 @@ export function pullRequestPayload({ repo, prNumber, action, headSha, title }) {
     pull_request: {
       state: action === 'closed' ? 'closed' : 'open',
       title,
-      head: { sha: headSha },
-      base: { ref: 'main', sha: randomSha() },
+      head: { sha: headSha, repo: { full_name: repo } },
+      base: { ref: 'main', sha: randomSha(), repo: { full_name: repo } },
     },
   }
 }

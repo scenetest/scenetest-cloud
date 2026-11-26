@@ -25,34 +25,124 @@
 //      comes with the receiver-core integration.)
 //   6. Power off when the channel closes with "box retired".
 //
+// Privilege split (docs/threat-model.md): the agent runs as root and holds
+// the bearer token. Every repo-supplied command — git operations on the
+// checkout, pipeline stages, the scenes command — runs as SCENETEST_RUN_AS
+// with commandEnv()'s allowlisted environment, in a checkout that user owns.
+// The agent's own files (run logs, command files) live in WORK_DIR, which
+// that user can read but not write.
+//
 // Zero dependencies: node >= 22 builtins only (global WebSocket included).
 // Test hooks: SCENETEST_SKIP_CHECKOUT=1 skips clone/setup,
 // SCENETEST_NO_POWEROFF=1 logs instead of powering off.
 
 import { spawn, execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { appendFileSync, chownSync, existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const env = (k, fallback) => {
-  const v = process.env[k] ?? fallback
-  if (v === undefined) {
-    console.error(`agent: missing required env ${k}`)
-    process.exit(1)
-  }
-  return v
+// ---------- pure helpers (exported for tests) ---------------------------------
+
+// Run ids name files in WORK_DIR, and the local ingest takes them from a URL
+// any repo command can POST to: nothing that can climb out of the directory.
+export function isSafeRunId(runId) {
+  return typeof runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId)
 }
 
-const BOX_ID = env('SCENETEST_BOX_ID')
-const REPO = env('SCENETEST_REPO')
-const HEAD_SHA = env('SCENETEST_HEAD_SHA')
-const INGEST_URL = env('SCENETEST_INGEST_URL').replace(/\/+$/, '')
-const TOKEN = env('SCENETEST_BEARER_TOKEN')
-const WORK_DIR = env('SCENETEST_WORK_DIR', '/opt/scenetest/work')
-const LOCAL_PORT = Number(env('SCENETEST_LOCAL_PORT', '4999'))
+const INHERITED_ENV = ['PATH', 'LANG', 'LC_ALL', 'TZ', 'TERM']
+const DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
-const AUTH = { authorization: `Bearer ${TOKEN}` }
+// The complete environment a repo command sees: a few locale/path keys from
+// the agent's own environment, the identity of the user it runs as, and the
+// caller's extras. Nothing else from agentEnv crosses over — the agent's
+// environment carries the bearer token (systemd loads run.env into it).
+export function commandEnv(agentEnv, identity, extra = {}) {
+  const out = {}
+  for (const k of INHERITED_ENV) if (agentEnv[k] !== undefined) out[k] = agentEnv[k]
+  out.PATH ??= DEFAULT_PATH
+  if (identity) {
+    out.HOME = identity.home
+    out.USER = identity.name
+    out.LOGNAME = identity.name
+  } else {
+    for (const k of ['HOME', 'USER', 'LOGNAME']) if (agentEnv[k] !== undefined) out[k] = agentEnv[k]
+  }
+  return { ...out, ...extra }
+}
+
+// ---------- configuration ------------------------------------------------------
+
+let BOX_ID, REPO, HEAD_SHA, INGEST_URL, TOKEN, WORK_DIR, LOCAL_PORT, AUTH
+// { name, uid, gid, home } of SCENETEST_RUN_AS, or null to run repo
+// commands as the agent's own user (only allowed when that isn't root).
+let runAs = null
+
+function loadConfig() {
+  const env = (k, fallback) => {
+    const v = process.env[k] ?? fallback
+    if (v === undefined) {
+      console.error(`agent: missing required env ${k}`)
+      process.exit(1)
+    }
+    return v
+  }
+  BOX_ID = env('SCENETEST_BOX_ID')
+  REPO = env('SCENETEST_REPO')
+  HEAD_SHA = env('SCENETEST_HEAD_SHA')
+  INGEST_URL = env('SCENETEST_INGEST_URL').replace(/\/+$/, '')
+  TOKEN = env('SCENETEST_BEARER_TOKEN')
+  WORK_DIR = env('SCENETEST_WORK_DIR', '/opt/scenetest/work')
+  LOCAL_PORT = Number(env('SCENETEST_LOCAL_PORT', '4999'))
+  AUTH = { authorization: `Bearer ${TOKEN}` }
+
+  const name = process.env.SCENETEST_RUN_AS
+  if (name) {
+    runAs = lookupUser(name)
+  } else if (process.getuid?.() === 0) {
+    console.error('agent: refusing to run repo commands as root; set SCENETEST_RUN_AS')
+    process.exit(1)
+  }
+}
+
+function lookupUser(name) {
+  const line = execFileSync('getent', ['passwd', name], { encoding: 'utf8' }).trim()
+  const [, , uid, gid, , home] = line.split(':')
+  return { name, uid: Number(uid), gid: Number(gid), home }
+}
+
 const log = (...args) => console.log(new Date().toISOString(), ...args)
+
+// ---------- running repo commands ----------------------------------------------
+
+// spawn/execFileSync options that run a child as the repo-command user.
+// Setting uid/gid makes libuv call setgroups(0) first, so the child gets no
+// supplementary groups: adding that user to a group (docker, sudo, ...) has
+// no effect on repo commands.
+function asRunUser(extraEnv = {}) {
+  return {
+    env: commandEnv(process.env, runAs, extraEnv),
+    ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
+  }
+}
+
+function runRepoSync(file, args, opts = {}) {
+  return execFileSync(file, args, { stdio: ['ignore', 'inherit', 'inherit'], ...asRunUser(), ...opts })
+}
+
+// The cloud metadata endpoint serves this droplet's user_data, which carries
+// the bearer token in plaintext. Reject the repo-command user's traffic to
+// all of link-local before any repo command runs; if the rule can't be
+// installed, the agent exits rather than run commands without it.
+function blockMetadata() {
+  const rule = ['OUTPUT', '-d', '169.254.0.0/16', '-m', 'owner', '--uid-owner', String(runAs.uid), '-j', 'REJECT']
+  try {
+    execFileSync('iptables', ['-w', '-C', ...rule], { stdio: 'ignore' })
+  } catch {
+    execFileSync('iptables', ['-w', '-I', ...rule])
+  }
+  log(`blocked link-local (metadata) for uid ${runAs.uid}`)
+}
 
 let ws = null
 let currentScenes = null // from the latest pipeline update
@@ -61,27 +151,36 @@ const runEndByRun = new Map() // runId -> run:end payload (settles the verdict)
 
 // ---------- checkout + project setup -----------------------------------------
 
-function checkout() {
+// The checkout directory, owned by the repo-command user. Created empty in
+// test mode (SCENETEST_SKIP_CHECKOUT=1) so commands still get a cwd of their own.
+function prepareRepoDir() {
   const dir = join(WORK_DIR, 'repo')
-  if (existsSync(dir)) return dir
-  mkdirSync(WORK_DIR, { recursive: true })
-  log(`cloning ${REPO} @ ${HEAD_SHA}`)
-  // Public repos only for now (docs/runner-provisioning.md tracks the
-  // credential question). Fetch the single sha, shallow. Project setup is no
-  // longer run here: it arrives as pipeline stages in an 'update' message
-  // (the default pipeline's stage runs scenetest/box-setup.sh, so hook-era
-  // repos behave the same).
-  execFileSync('git', ['init', '-q', dir])
-  execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', `https://github.com/${REPO}.git`])
-  execFileSync('git', ['-C', dir, 'fetch', '-q', '--depth', '1', 'origin', HEAD_SHA])
-  execFileSync('git', ['-C', dir, 'checkout', '-q', 'FETCH_HEAD'])
+  const fresh = !existsSync(dir)
+  if (fresh) {
+    mkdirSync(dir)
+    if (runAs) chownSync(dir, runAs.uid, runAs.gid)
+  }
+  if (fresh && process.env.SCENETEST_SKIP_CHECKOUT !== '1') {
+    log(`cloning ${REPO} @ ${HEAD_SHA}`)
+    // Public repos only for now (docs/runner-provisioning.md tracks the
+    // credential question). Fetch the single sha, shallow. Project setup
+    // arrives as pipeline stages in an 'update' message (the default
+    // pipeline's stage runs scenetest/box-setup.sh, so hook-era repos behave
+    // the same).
+    runRepoSync('git', ['init', '-q', dir])
+    runRepoSync('git', ['-C', dir, 'remote', 'add', 'origin', `https://github.com/${REPO}.git`])
+    checkoutSha(dir, HEAD_SHA)
+  }
   return dir
 }
 
-// Move the checkout to a new sha (warm-box pipeline update).
+// Move the checkout to a new sha (warm-box pipeline update). Runs as the
+// repo-command user like everything else touching the checkout: earlier
+// stages could have written .git/config (core.fsmonitor, hooks), and git
+// executes what it finds there.
 function checkoutSha(repoDir, sha) {
-  execFileSync('git', ['-C', repoDir, 'fetch', '-q', '--depth', '1', 'origin', sha])
-  execFileSync('git', ['-C', repoDir, 'checkout', '-q', 'FETCH_HEAD'])
+  runRepoSync('git', ['-C', repoDir, 'fetch', '-q', '--depth', '1', 'origin', sha])
+  runRepoSync('git', ['-C', repoDir, 'checkout', '-q', 'FETCH_HEAD'])
 }
 
 // ---------- pipeline updates --------------------------------------------------
@@ -98,14 +197,14 @@ async function applyUpdate(update, repoDir) {
   log(`update: ${stages.length} stage(s) at ${headSha}`)
   let current = 'checkout'
   try {
-    if (repoDir && headSha && process.env.SCENETEST_SKIP_CHECKOUT !== '1') {
+    if (headSha && process.env.SCENETEST_SKIP_CHECKOUT !== '1') {
       checkoutSha(repoDir, headSha)
     }
     for (const stage of stages) {
       current = stage.name
       if (!stage.run) continue
       log(`stage ${stage.name}: ${stage.run}`)
-      execFileSync('bash', ['-c', stage.run], { cwd: repoDir ?? WORK_DIR, stdio: 'inherit' })
+      runRepoSync('bash', ['-c', stage.run], { cwd: repoDir })
     }
     await fetch(`${INGEST_URL}/api/boxes/${BOX_ID}/ready`, {
       method: 'POST',
@@ -162,7 +261,16 @@ function startLocalIngest() {
       res.writeHead(404).end()
       return
     }
-    const runId = decodeURIComponent(m[1])
+    let runId
+    try {
+      runId = decodeURIComponent(m[1])
+    } catch {
+      runId = null
+    }
+    if (!isSafeRunId(runId)) {
+      res.writeHead(400).end('bad run id')
+      return
+    }
     let body = ''
     req.on('data', (c) => { body += c })
     req.on('end', () => {
@@ -206,10 +314,9 @@ function runBatch(run, repoDir) {
   const localIngest = `http://127.0.0.1:${LOCAL_PORT}`
 
   const child = spawn('bash', ['-c', command], {
-    cwd: repoDir ?? WORK_DIR,
-    stdio: 'inherit',
-    env: {
-      ...process.env,
+    cwd: repoDir,
+    stdio: ['ignore', 'inherit', 'inherit'],
+    ...asRunUser({
       SCENETEST_RUN_ID: run.runId,
       // Carries dispatch intent (run all / a subset of scene ids). The CLI
       // has no --subset flag; a scenes command that wants subsetting expands
@@ -219,7 +326,7 @@ function runBatch(run, repoDir) {
       // Where the scenes CLI POSTs its event batches; the box wires it so a
       // bare `scenetest` reports to the dashboard.
       SCENETEST_REPORT_URL: `${localIngest}/events/${run.runId}`,
-    },
+    }),
   })
 
   child.on('exit', (code) => {
@@ -234,8 +341,15 @@ function runBatch(run, repoDir) {
       const failed = end.summary?.failed ?? 0
       void completeRun(run.runId, failed > 0 ? 'failed' : 'passed')
     }
-    // Exit 0 with no run:end: the command reported through the ingest /
-    // /complete itself; leave it be.
+    // Exit 0 with no run:end seen here: leave it be. The command holds no
+    // token, so it can't call /complete itself.
+  })
+  // Without a listener, a failed spawn (e.g. a bad SCENETEST_RUN_AS uid) is
+  // an uncaught error that takes the whole agent down.
+  child.on('error', (err) => {
+    log(`batch ${run.runId} failed to start: ${err.message}`)
+    runEndByRun.delete(run.runId)
+    void completeRun(run.runId, 'failed')
   })
 }
 
@@ -257,9 +371,9 @@ function connectChannel(repoDir, attempt = 0) {
     } catch {
       return
     }
-    if (msg.kind === 'dispatch' && msg.run?.runId) runBatch(msg.run, repoDir)
+    if (msg.kind === 'dispatch' && isSafeRunId(msg.run?.runId)) runBatch(msg.run, repoDir)
     else if (msg.kind === 'update') void applyUpdate(msg.update, repoDir)
-    else if (msg.kind === 'command' && msg.runId) {
+    else if (msg.kind === 'command' && isSafeRunId(msg.runId)) {
       appendFileSync(
         join(WORK_DIR, `${msg.runId}.commands.jsonl`),
         JSON.stringify(msg.command) + '\n',
@@ -287,11 +401,18 @@ function connectChannel(repoDir, attempt = 0) {
 
 // ---------- main --------------------------------------------------------------
 
-mkdirSync(WORK_DIR, { recursive: true })
-const repoDir = process.env.SCENETEST_SKIP_CHECKOUT === '1' ? null : checkout()
-startLocalIngest()
+function main() {
+  loadConfig()
+  if (runAs && process.env.SCENETEST_BLOCK_METADATA === '1') blockMetadata()
+  mkdirSync(WORK_DIR, { recursive: true })
+  const repoDir = prepareRepoDir()
+  startLocalIngest()
 
-// No bare "ready" on boot: readiness is the outcome of the queued pipeline
-// update, which arrives the moment the channel connects (FIFO, ahead of any
-// dispatches) and reports through /ready with the realized stage vector.
-connectChannel(repoDir)
+  // No bare "ready" on boot: readiness is the outcome of the queued pipeline
+  // update, which arrives the moment the channel connects (FIFO, ahead of any
+  // dispatches) and reports through /ready with the realized stage vector.
+  connectChannel(repoDir)
+}
+
+// Imported by unit tests for the helpers above; only `node agent.mjs` boots.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main()

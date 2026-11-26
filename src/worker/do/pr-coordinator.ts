@@ -148,6 +148,9 @@ export class PrCoordinator implements DurableObject {
   private runMeta = new Map<string, RunMeta>()
   // Last home-view rollup emit per run, for throttling progress updates.
   private lastRollupAt = new Map<string, number>()
+  // Runs confirmed to belong to a box (runId → boxId), so a box's events
+  // batches check ownership once per run. Positive entries only.
+  private runBox = new Map<string, string>()
 
   constructor(
     private state: DurableObjectState,
@@ -309,6 +312,19 @@ export class PrCoordinator implements DurableObject {
     const envelope = parsed as Partial<EventsEnvelope>
     if (envelope.kind !== 'events' || typeof envelope.runId !== 'string' || !Array.isArray(envelope.events)) {
       ws.send(JSON.stringify({ kind: 'error', message: 'unknown envelope' }))
+      return
+    }
+    // Viewer sockets land in this handler too. Only the box socket reports
+    // events, and only for its own runs: the projection writer updates D1
+    // rows by run id alone, so an unchecked id would let one PR's box settle
+    // another PR's run.
+    const [role, boxId] = this.state.getTags(ws)
+    if (role !== 'box' || !boxId) {
+      ws.send(JSON.stringify({ kind: 'error', message: 'events come from the box socket only' }))
+      return
+    }
+    if (!(await this.runBelongsToBox(envelope.runId, boxId))) {
+      ws.send(JSON.stringify({ kind: 'error', message: `run ${envelope.runId} is not on box ${boxId}` }))
       return
     }
     const events = envelope.events.filter(
@@ -497,6 +513,16 @@ export class PrCoordinator implements DurableObject {
     // scene:start + scene:end arriving together settle in sequence.
     if (stmts.length === 1) await stmts[0]!.run()
     else if (stmts.length > 1) await this.env.DB.batch(stmts)
+  }
+
+  private async runBelongsToBox(runId: string, boxId: string): Promise<boolean> {
+    if (this.runBox.get(runId) === boxId) return true
+    const row = await this.env.DB.prepare('SELECT box_id FROM runs WHERE id = ?1')
+      .bind(runId)
+      .first<{ box_id: string | null }>()
+    if (row?.box_id !== boxId) return false
+    this.runBox.set(runId, boxId)
+    return true
   }
 
   // The run's immutable identity for the scene_executions projection. Cached on

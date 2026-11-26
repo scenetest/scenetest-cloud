@@ -14,7 +14,7 @@
 // this stage's watch globs.)
 
 import { spawn, execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -295,10 +295,14 @@ async function main() {
       body: raw,
     })
   }
-  const prPayload = (repo, n, sha) => ({
+  const prPayload = (repo, n, sha, headRepo = repo) => ({
     action: 'opened', number: n,
     repository: { full_name: repo },
-    pull_request: { state: 'open', head: { sha }, base: { ref: 'main', sha: 'base000' } },
+    pull_request: {
+      state: 'open',
+      head: { sha, repo: { full_name: headRepo } },
+      base: { ref: 'main', sha: 'base000', repo: { full_name: repo } },
+    },
   })
 
   check('bad signature → 401', (await hook('ping', {}, { badSig: true })).status === 401)
@@ -314,6 +318,11 @@ async function main() {
   check('duplicate delivery → dropped', (await j(await hook('ping', { zen: 'ok' }, { delivery: dupId }))).result === 'duplicate')
   check('unwatched repo → ignored',
     (await j(await hook('pull_request', prPayload('demo/unwatched', 1, 'aaa1')))).result === 'ignored:unwatched-repo')
+
+  const forked = await j(await hook('pull_request', prPayload('demo/watched', 7, 'fork01', 'mallory/watched')))
+  check('fork PR on a watched repo → ignored', forked.result === 'ignored:fork-pr', JSON.stringify(forked))
+  check('fork PR created no PR row and no run',
+    d1Query(persistDir, "SELECT (SELECT COUNT(*) FROM prs WHERE pr_number = 7) + (SELECT COUNT(*) FROM runs WHERE head_sha = 'fork01') AS n")[0].n === 0)
 
   const created = await j(await hook('pull_request', prPayload('demo/watched', 5, 'aaa2')))
   const webhookRunId = created.result?.startsWith('run-created:') ? created.result.slice('run-created:'.length) : null
@@ -349,7 +358,11 @@ async function main() {
   const closedPayload = {
     action: 'closed', number: 12,
     repository: { full_name: 'demo/watched' },
-    pull_request: { state: 'closed', head: { sha: 'closebox1' }, base: { ref: 'main', sha: 'base000' } },
+    pull_request: {
+      state: 'closed',
+      head: { sha: 'closebox1', repo: { full_name: 'demo/watched' } },
+      base: { ref: 'main', sha: 'base000', repo: { full_name: 'demo/watched' } },
+    },
   }
   const closed = await j(await hook('pull_request', closedPayload))
   check('closed PR with a live box → retired', closed.result === 'pr-closed:retired', JSON.stringify(closed))
@@ -443,6 +456,17 @@ async function main() {
   check('coordinator acked the events batch',
     (await waitInbox((m) => m.kind === 'ack' && m.count === 2)) !== null, JSON.stringify(inbox))
 
+  // A box reports events only for its own runs. e2e-agent-run is box 2's
+  // (PR 10); a run:end for it from box 1 must not settle it.
+  box.send(JSON.stringify({
+    kind: 'events', runId: 'e2e-agent-run',
+    events: [{ seq: 99, payload: { type: 'run:end', timestamp: 1, runId: 'e2e-agent-run', duration: 1, summary: { scenes: 1, completed: 1, failed: 0 } } }],
+  }))
+  check('box channel refuses events for another box\'s run',
+    (await waitInbox((m) => m.kind === 'error' && m.message.includes('e2e-agent-run'))) !== null, JSON.stringify(inbox))
+  check('the refused run:end left the other box\'s run unsettled',
+    d1Query(persistDir, "SELECT status, ended_at FROM runs WHERE id = 'e2e-agent-run'")[0].ended_at === null)
+
   // The coordinator derives D1 projections from the same event stream (#36):
   // no /scene-executions call, no stub hand-writes. run:start moves the run to
   // 'running' with a started_at; scene:start writes a scene_executions row.
@@ -524,6 +548,12 @@ async function main() {
   // --- the real box agent, spawned in test mode -----------------------------
   console.log('· box agent (infra/box/agent.mjs)')
   const agentWork = mkdtempSync(join(tmpdir(), 'scenetest-agent-'))
+  // As root, the agent refuses to run repo commands as itself: give it
+  // `nobody`, which also exercises the real privilege drop. The run user
+  // has to traverse the work dir to reach its checkout.
+  const asRoot = process.getuid?.() === 0
+  if (asRoot) chmodSync(agentWork, 0o755)
+  const agentRepo = join(agentWork, 'repo')
   // Queue a pipeline update and a command before the agent exists; both must
   // arrive via flush on connect, update first (FIFO). The update's stage
   // drops a marker file so we can see it actually executed, and its vector
@@ -534,12 +564,12 @@ async function main() {
       boxId: 'e2e-box-2',
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
-      stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
+      stages: [{ name: 'setup', run: 'touch stage-ran.marker && env > stage-env.txt && id -u > stage-uid.txt' }],
       // The scenes command from pipeline.json rides the update. This stands
       // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
       // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
       // run:end the agent settles the verdict from (1 failed → run failed).
-      scenes: `curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"runId":"e2e-agent-run","sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"runId":"e2e-agent-run","duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'`,
+      scenes: `env > scenes-env.txt && curl -s -X POST "$SCENETEST_REPORT_URL" -H 'content-type: application/json' -d '{"events":[{"seq":0,"payload":{"type":"run:start","timestamp":1,"runId":"e2e-agent-run","sceneCount":1}},{"seq":1,"payload":{"type":"run:end","timestamp":2,"runId":"e2e-agent-run","duration":1,"summary":{"scenes":1,"completed":0,"failed":1}}}]}'`,
     }),
   })
   check('debug box-update queued (no box connected yet)',
@@ -566,6 +596,7 @@ async function main() {
       SCENETEST_LOCAL_PORT: '4998',
       SCENETEST_SKIP_CHECKOUT: '1',
       SCENETEST_NO_POWEROFF: '1',
+      ...(asRoot ? { SCENETEST_RUN_AS: 'nobody' } : {}),
     },
   })
   let agentLog = ''
@@ -575,7 +606,18 @@ async function main() {
   check('agent connected its channel',
     await waitFor(() => agentLog.includes('channel connected')), agentLog)
   check('agent ran the queued pipeline stage',
-    await waitFor(() => existsSync(join(agentWork, 'stage-ran.marker'))), agentLog)
+    await waitFor(() => existsSync(join(agentRepo, 'stage-ran.marker'))), agentLog)
+  // The stage's environment is commandEnv()'s allowlist: no bearer token,
+  // nothing from run.env.
+  const stageEnv = readFileSync(join(agentRepo, 'stage-env.txt'), 'utf8')
+  check('pipeline stage env carries no bearer token',
+    !stageEnv.includes('SCENETEST_BEARER_TOKEN') && !stageEnv.includes(boxToken), stageEnv)
+  check('pipeline stage env carries nothing from run.env',
+    !/^SCENETEST_/m.test(stageEnv), stageEnv)
+  if (asRoot) {
+    check('pipeline stage ran as the run user, not root',
+      readFileSync(join(agentRepo, 'stage-uid.txt'), 'utf8').trim() === '65534')
+  }
   check('agent received the queued command (flush on connect)',
     await waitFor(() => {
       try { return readFileSync(join(agentWork, 'e2e-agent-run.commands.jsonl'), 'utf8').includes('run:pause') }
@@ -592,6 +634,11 @@ async function main() {
     body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start', timestamp: Date.now(), runId: 'e2e-agent-run', sceneCount: 1 } }] }),
   })
   check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
+  const traversal = await fetch('http://127.0.0.1:4998/events/..%2F..%2Fescaped', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start' } }] }),
+  })
+  check('agent local ingest refuses a run id that leaves the work dir', traversal.status === 400)
   const agentReplay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 2500)
   check('agent-relayed event reached viewer via WS',
     agentReplay.events.some((e) => e.type === 'run:start'))
@@ -611,6 +658,10 @@ async function main() {
       const replay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 1200)
       return replay.events.some((e) => e.type === 'run:end')
     }, 8000))
+  const scenesEnv = readFileSync(join(agentRepo, 'scenes-env.txt'), 'utf8')
+  check('scenes command env has the run wiring and no bearer token',
+    scenesEnv.includes('SCENETEST_REPORT_URL=http://127.0.0.1:4998/events/e2e-agent-run') &&
+      !scenesEnv.includes('SCENETEST_BEARER_TOKEN') && !scenesEnv.includes(boxToken), scenesEnv)
   check('agent settled the verdict from run:end (1 failing scene → failed)',
     await waitFor(async () => {
       const rows = d1Query(persistDir, "SELECT status FROM runs WHERE id = 'e2e-agent-run'")
