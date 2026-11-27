@@ -15,7 +15,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 # --- base toolchain ----------------------------------------------------------
 apt-get update
-apt-get install -y git curl ca-certificates iproute2
+apt-get install -y git curl ca-certificates iproute2 ufw
 
 # Docker from Docker's apt repo, not Ubuntu's docker.io: only Docker's
 # packages ship dockerd-rootless.sh, which the run user's daemon needs.
@@ -27,8 +27,9 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin \
   docker-ce-rootless-extras uidmap slirp4netns
-# The rootful daemon's socket is root's alone; nothing on the box uses it.
-systemctl disable --now docker.service docker.socket
+# The rootful daemons are root's alone and nothing on the box uses them:
+# the run user's rootless dockerd starts its own containerd.
+systemctl disable --now docker.service docker.socket containerd.service
 rm -f /var/run/docker.sock
 
 # node + pnpm via corepack
@@ -45,6 +46,26 @@ apt-get install -y /tmp/supabase.deb && rm /tmp/supabase.deb
 # themselves are version-coupled to the project's playwright, so the
 # project's own install fetches them at box-setup time).
 npx -y playwright@latest install-deps chromium
+
+# --- closed to inbound traffic ------------------------------------------------
+# A box only ever connects out (the agent's channel, git, registries).
+# Nothing logs in, so sshd goes; ufw drops every unsolicited inbound packet,
+# including ports that stages publish. ufw's stock rules also accept ping,
+# mDNS and UPnP; those become DROP. The greps fail the build if ufw's rules
+# files stop matching these edits.
+apt-get purge -y openssh-server
+sed -i -E '/^-A ufw6?-before-input .*(--icmp(v6)?-type echo-request|--dport (5353|1900)) -j ACCEPT$/s/-j ACCEPT$/-j DROP/' \
+  /etc/ufw/before.rules /etc/ufw/before6.rules
+grep -qE 'echo-request -j DROP' /etc/ufw/before.rules
+grep -qE 'echo-request -j DROP' /etc/ufw/before6.rules
+if grep -qE '^-A ufw6?-before-input .*(echo-request|--dport (5353|1900)) -j ACCEPT' /etc/ufw/before.rules /etc/ufw/before6.rules; then
+  echo 'ufw rules still accept ping, mDNS or UPnP' >&2
+  exit 1
+fi
+ufw default deny incoming
+ufw default deny routed
+ufw default allow outgoing
+ufw --force enable
 
 # --- the run user and its rootless Docker -------------------------------------
 # Repo commands run as this user; the agent itself stays root

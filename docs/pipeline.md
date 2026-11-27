@@ -114,9 +114,12 @@ repo root, public repos only for now), previous stages' effects present
 (warm box) or freshly re-run, and a non-zero exit failing the box — the
 next push provisions a fresh one. Stages run as the unprivileged
 `scenetest-run` user, which owns the checkout and has its own `HOME`. Their
-environment is exactly `PATH`, `HOME`, `USER`, `LOGNAME`, `DOCKER_HOST`, and
-`LANG`, `LC_ALL`, `TZ`, `TERM` when the box sets them; nothing else is
-passed in.
+environment is exactly `PATH`, `HOME`, `USER`, `LOGNAME`, `DOCKER_HOST`,
+`SCENETEST_BOX_ID`, `SCENETEST_REPO`, `SCENETEST_HEAD_SHA` (the sha the
+checkout is at), `SCENETEST_BASE_SHA`, `SCENETEST_BASE_REF`, and `LANG`,
+`LC_ALL`, `TZ`, `TERM` when the box sets them; nothing else is passed in.
+Ports you serve on are reachable on the box only: it accepts no inbound
+connections, so point your scenes at `localhost`.
 PRs from forks don't run at all. Scene batches arrive separately after
 the pipeline is ready, via the top-level `scenes` command above (the box
 sets `SCENETEST_REPORT_URL` so the CLI streams results back).

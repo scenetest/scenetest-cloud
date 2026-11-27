@@ -92,8 +92,8 @@ export async function provisionDroplet(
     image: Number.isInteger(Number(imageId)) ? Number(imageId) : imageId,
     user_data: userData(env, box, bearerToken),
     tags: boxTags(box),
-    // No ssh_keys: nothing should need to log in. Attach one temporarily
-    // via the DO console when debugging an image.
+    // No ssh_keys: the image has no sshd and drops all inbound traffic, so
+    // a key would open nothing (docs/threat-model.md).
   })
   const runnerId = String(droplet.id)
 

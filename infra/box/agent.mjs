@@ -73,7 +73,9 @@ export function commandEnv(agentEnv, identity, extra = {}) {
 
 // ---------- configuration ------------------------------------------------------
 
-let BOX_ID, REPO, HEAD_SHA, INGEST_URL, TOKEN, WORK_DIR, LOCAL_PORT, AUTH
+let BOX_ID, REPO, HEAD_SHA, BASE_SHA, BASE_REF, INGEST_URL, TOKEN, WORK_DIR, LOCAL_PORT, AUTH
+// The sha the checkout is at: HEAD_SHA at boot, then each update's headSha.
+let currentSha
 // { name, uid, gid, home } of SCENETEST_RUN_AS, or null to run repo
 // commands as the agent's own user (only allowed when that isn't root).
 let runAs = null
@@ -90,6 +92,9 @@ function loadConfig() {
   BOX_ID = env('SCENETEST_BOX_ID')
   REPO = env('SCENETEST_REPO')
   HEAD_SHA = env('SCENETEST_HEAD_SHA')
+  BASE_SHA = env('SCENETEST_BASE_SHA', '')
+  BASE_REF = env('SCENETEST_BASE_REF', '')
+  currentSha = HEAD_SHA
   INGEST_URL = env('SCENETEST_INGEST_URL').replace(/\/+$/, '')
   TOKEN = env('SCENETEST_BEARER_TOKEN')
   WORK_DIR = env('SCENETEST_WORK_DIR', '/opt/scenetest/work')
@@ -121,8 +126,19 @@ const log = (...args) => console.log(new Date().toISOString(), ...args)
 // no effect on repo commands.
 function asRunUser(extraEnv = {}) {
   return {
-    env: commandEnv(process.env, runAs, extraEnv),
+    env: commandEnv(process.env, runAs, { ...boxEnv(), ...extraEnv }),
     ...(runAs ? { uid: runAs.uid, gid: runAs.gid } : {}),
+  }
+}
+
+// What a repo command may know about the box and the commit. Not secret.
+function boxEnv() {
+  return {
+    SCENETEST_BOX_ID: BOX_ID,
+    SCENETEST_REPO: REPO,
+    SCENETEST_HEAD_SHA: currentSha,
+    SCENETEST_BASE_SHA: BASE_SHA,
+    SCENETEST_BASE_REF: BASE_REF,
   }
 }
 
@@ -200,6 +216,7 @@ async function applyUpdate(update, repoDir) {
     if (headSha && process.env.SCENETEST_SKIP_CHECKOUT !== '1') {
       checkoutSha(repoDir, headSha)
     }
+    if (headSha) currentSha = headSha
     for (const stage of stages) {
       current = stage.name
       if (!stage.run) continue

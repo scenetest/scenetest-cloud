@@ -273,8 +273,9 @@ against a warm box costs seconds, not a provisioning cycle.
 
 Configuration is the only difference from dev mode: the box's sink writes the
 local `.jsonl` and also streams events up the box's single outbound WebSocket to
-the PR's Durable Object. Outbound-only means no inbound firewall holes; directions
-ride the same socket back down.
+the PR's Durable Object. Outbound-only means no inbound firewall holes, and the box's firewall
+enforces it: nothing reaches the box that it didn't ask for. Directions ride
+the same socket back down.
 
 The box runs the PR's code, so it is the trust boundary.
 [threat-model.md](./threat-model.md) says what a PR author can and cannot do

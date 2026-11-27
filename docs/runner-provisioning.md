@@ -94,8 +94,10 @@ the image: `run.env` doesn't exist yet, so an enabled unit would crash-loop
 at first boot. Provision-time `user_data` (written by
 `src/worker/runner/digitalocean.ts`) creates `run.env` and starts it.
 
-Nothing else crosses the boundary: no SSH keys are attached, the box only
-ever connects outbound, and the bearer token it holds dies with the box.
+Nothing else crosses the boundary: the image has no sshd, ufw drops all
+unsolicited inbound traffic, the box only ever connects outbound, and the
+bearer token it holds dies with the box. Debugging a box means reading what
+it reports (the channel, `wrangler tail`); there is no way in.
 
 ### Project hooks
 
@@ -163,6 +165,9 @@ end-to-end before any DigitalOcean setup.
   commands can't reach), and the provision request that wrote it. D1 holds
   only the hash.
 - Repo commands never run as root and never see the bearer token.
+- A box accepts no inbound connections.
+- A box reports events only for runs dispatched to it (the coordinator's
+  `box_runs` table, written by `POST /dispatch`).
 - At most one live box per PR (unique partial index), and at most one
   connected box channel per coordinator (a new connection replaces the old).
 - Every `runner_instances` row reaches `destroyed` or `lost`; `lost` rows

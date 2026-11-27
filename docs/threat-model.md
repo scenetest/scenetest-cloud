@@ -34,10 +34,16 @@ Every command that comes from the repo runs as the `scenetest-run` user:
 - pipeline stages
 - the `scenes` command
 
-These commands get a fixed environment: `PATH`, `HOME`, `USER`, `LOGNAME`,
-`LANG`, `LC_ALL`, `TZ`, `TERM`, `DOCKER_HOST`, plus the `SCENETEST_RUN_ID`,
-`SCENETEST_SUBSET`, `SCENETEST_LOCAL_INGEST` and `SCENETEST_REPORT_URL`
-variables for a scene batch. Nothing from `run.env` reaches them.
+These commands get a fixed environment:
+
+- `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ`, `TERM` and
+  `DOCKER_HOST`
+- `SCENETEST_BOX_ID`, `SCENETEST_REPO`, `SCENETEST_HEAD_SHA` (the sha the
+  checkout is at), `SCENETEST_BASE_SHA` and `SCENETEST_BASE_REF`
+- for a scene batch, `SCENETEST_RUN_ID`, `SCENETEST_SUBSET`,
+  `SCENETEST_LOCAL_INGEST` and `SCENETEST_REPORT_URL`
+
+The bearer token and the ingest URL are not among them.
 
 Docker for repo commands is `scenetest-run`'s own rootless daemon (the
 `scenetest-docker` unit). Root inside a container maps to `scenetest-run`
@@ -53,6 +59,12 @@ user. That range holds the DigitalOcean metadata endpoint,
 which serves the droplet's `user_data`, and `user_data` contains the bearer
 token in plaintext. If the rule can't be installed, the agent exits without
 running anything.
+
+The box accepts no inbound connections. The image has no sshd, and ufw
+drops every unsolicited inbound packet, including ping. A port that a stage
+or container publishes is reachable from the box itself and from nowhere
+else. Everything the box does starts from the box: the channel to the PR
+coordinator, git fetches, package and image downloads.
 
 ## What a PR author can do
 
@@ -82,7 +94,10 @@ running anything.
   - connect the box channel
   - call `/api/boxes/:id/ready`, `/api/events/:runId` or `/api/runs/:runId/complete`
 - Settle or write events into another box's runs. The PR coordinator accepts
-  events only from the box socket, and only for runs on that box.
+  events only from the box socket, and only for runs that were dispatched to
+  that box.
+- Accept connections from the internet. Published ports and listening
+  services are dropped at the box's firewall, which only root can change.
 - Write files outside the work directory through the agent. Run ids are
   validated before they name a file.
 - Reach the operator's credentials. `GITHUB_API_TOKEN`,
@@ -123,7 +138,9 @@ stay out of reach.
   but its AppArmor profile for `rootlesskit` lifts that restriction, and
   any repo command can run `rootlesskit`.
 - **Abuse of the droplet's network.** Mining, scanning and spam all run from
-  the deployment's DigitalOcean account until the age cap.
+  the deployment's DigitalOcean account until the age cap. An outbound tunnel
+  (ngrok and the like) can also carry traffic back in, since outbound
+  traffic is not filtered.
 - **The shared webhook secret.** Every watched repo's webhook uses
   `GITHUB_WEBHOOK_SECRET`, so each repo admin who configured one holds it. A
   holder can forge a signed delivery for any watched repo, including a

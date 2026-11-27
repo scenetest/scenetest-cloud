@@ -148,9 +148,6 @@ export class PrCoordinator implements DurableObject {
   private runMeta = new Map<string, RunMeta>()
   // Last home-view rollup emit per run, for throttling progress updates.
   private lastRollupAt = new Map<string, number>()
-  // Runs confirmed to belong to a box (runId → boxId), so a box's events
-  // batches check ownership once per run. Positive entries only.
-  private runBox = new Map<string, string>()
 
   constructor(
     private state: DurableObjectState,
@@ -172,6 +169,14 @@ export class PrCoordinator implements DurableObject {
          payload TEXT    NOT NULL,
          ts      INTEGER NOT NULL,
          UNIQUE (run_id, seq)
+       )`,
+    )
+    // Which box each run was dispatched to. A box may report events only for
+    // runs in this table; /dispatch is the only writer.
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS box_runs (
+         run_id TEXT PRIMARY KEY,
+         box_id TEXT NOT NULL
        )`,
     )
   }
@@ -259,7 +264,15 @@ export class PrCoordinator implements DurableObject {
     }
 
     if (url.pathname === '/dispatch' && req.method === 'POST') {
-      const { run } = (await req.json()) as { run: unknown }
+      const { run } = (await req.json()) as { run: { runId?: unknown; boxId?: unknown } }
+      if (typeof run?.runId !== 'string' || typeof run.boxId !== 'string') {
+        return new Response('run.runId and run.boxId required', { status: 400 })
+      }
+      this.sql.exec(
+        'INSERT OR REPLACE INTO box_runs (run_id, box_id) VALUES (?, ?)',
+        run.runId,
+        run.boxId,
+      )
       const delivered = await this.sendOrQueue({ kind: 'dispatch', run })
       return Response.json({ delivered })
     }
@@ -315,15 +328,19 @@ export class PrCoordinator implements DurableObject {
       return
     }
     // Viewer sockets land in this handler too. Only the box socket reports
-    // events, and only for its own runs: the projection writer updates D1
-    // rows by run id alone, so an unchecked id would let one PR's box settle
-    // another PR's run.
+    // events, and only for runs dispatched to it: the projection writer
+    // updates D1 rows by run id alone, so an unchecked id would let one PR's
+    // box settle another PR's run. The check must stay synchronous: an await
+    // here lets the next batch overtake this one before the log insert.
     const [role, boxId] = this.state.getTags(ws)
     if (role !== 'box' || !boxId) {
       ws.send(JSON.stringify({ kind: 'error', message: 'events come from the box socket only' }))
       return
     }
-    if (!(await this.runBelongsToBox(envelope.runId, boxId))) {
+    const owned = this.sql
+      .exec('SELECT 1 FROM box_runs WHERE run_id = ? AND box_id = ?', envelope.runId, boxId)
+      .toArray().length > 0
+    if (!owned) {
       ws.send(JSON.stringify({ kind: 'error', message: `run ${envelope.runId} is not on box ${boxId}` }))
       return
     }
@@ -513,16 +530,6 @@ export class PrCoordinator implements DurableObject {
     // scene:start + scene:end arriving together settle in sequence.
     if (stmts.length === 1) await stmts[0]!.run()
     else if (stmts.length > 1) await this.env.DB.batch(stmts)
-  }
-
-  private async runBelongsToBox(runId: string, boxId: string): Promise<boolean> {
-    if (this.runBox.get(runId) === boxId) return true
-    const row = await this.env.DB.prepare('SELECT box_id FROM runs WHERE id = ?1')
-      .bind(runId)
-      .first<{ box_id: string | null }>()
-    if (row?.box_id !== boxId) return false
-    this.runBox.set(runId, boxId)
-    return true
   }
 
   // The run's immutable identity for the scene_executions projection. Cached on

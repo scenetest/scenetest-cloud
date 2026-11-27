@@ -173,6 +173,19 @@ async function wsStatus(path, cookie, maxMs = 2000) {
 // mirrors it so a section that follows a retire does not fail on the bounce.
 // A channel refused for a real reason (a bad token) fails every attempt and
 // still throws, just later.
+// Hand a seeded run to a box through its coordinator, as createRun does. A
+// box may report events only for runs dispatched to it.
+async function dispatchRun(boxId, runId, prNumber, headSha) {
+  const res = await fetch(`${BASE}/api/debug/box-dispatch`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      boxId,
+      run: { runId, boxId, repo: 'demo/watched', prNumber, headSha, subset: null },
+    }),
+  })
+  if (res.status !== 202) throw new Error(`dispatch ${runId} → ${boxId}: ${res.status}`)
+}
+
 async function openBoxChannel(boxId, token, label, attempts = 5) {
   for (let attempt = 1; ; attempt++) {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/api/boxes/${boxId}/channel?token=${token}`)
@@ -428,6 +441,8 @@ async function main() {
 
   // Connect as the box; collect everything the coordinator sends.
   const { ws: box, inbox, wait: waitInbox } = await openBoxChannel('e2e-box-1', boxToken, 'box')
+  await dispatchRun('e2e-box-1', 'e2e-ws-run', 9, 'wsbox1')
+  await dispatchRun('e2e-box-1', 'e2e-team-run', 9, 'wsbox1')
 
   const flushed = await waitInbox((m) => m.kind === 'command')
   check('queued command flushed to box on connect',
@@ -562,7 +577,9 @@ async function main() {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       boxId: 'e2e-box-2',
-      headSha: 'agbox1',
+      // Differs from the boot sha in run.env (agbox1): a warm-box update
+      // moves the checkout, and stages must see the sha it moved to.
+      headSha: 'agbox2',
       vector: { setup: 'hash-setup-1' },
       stages: [{ name: 'setup', run: 'env > stage-env.txt && id -u > stage-uid.txt && touch stage-ran.marker' }],
       // The scenes command from pipeline.json rides the update. This stands
@@ -590,6 +607,8 @@ async function main() {
       SCENETEST_BOX_ID: 'e2e-box-2',
       SCENETEST_REPO: 'demo/watched',
       SCENETEST_HEAD_SHA: 'agbox1',
+      SCENETEST_BASE_SHA: 'base000',
+      SCENETEST_BASE_REF: 'main',
       SCENETEST_INGEST_URL: BASE,
       SCENETEST_BEARER_TOKEN: boxToken,
       SCENETEST_WORK_DIR: agentWork,
@@ -612,8 +631,13 @@ async function main() {
   const stageEnv = readFileSync(join(agentRepo, 'stage-env.txt'), 'utf8')
   check('pipeline stage env carries no bearer token',
     stageEnv.includes('PATH=') && !stageEnv.includes('SCENETEST_BEARER_TOKEN') && !stageEnv.includes(boxToken), stageEnv)
-  check('pipeline stage env carries nothing from run.env',
-    !/^SCENETEST_/m.test(stageEnv), stageEnv)
+  check('pipeline stage env has no ingest URL',
+    !stageEnv.includes('SCENETEST_INGEST_URL'), stageEnv)
+  check('pipeline stage env names the box, repo, and commit',
+    ['SCENETEST_BOX_ID=e2e-box-2', 'SCENETEST_REPO=demo/watched', 'SCENETEST_BASE_SHA=base000', 'SCENETEST_BASE_REF=main']
+      .every((line) => stageEnv.split('\n').includes(line)), stageEnv)
+  check('pipeline stage env has the sha the update checked out, not the boot sha',
+    stageEnv.split('\n').includes('SCENETEST_HEAD_SHA=agbox2'), stageEnv)
   if (asRoot) {
     check('pipeline stage ran as the run user, not root',
       readFileSync(join(agentRepo, 'stage-uid.txt'), 'utf8').trim() === '65534')
@@ -624,24 +648,11 @@ async function main() {
       catch { return false }
     }), agentLog)
 
-  // The scenes CLI on a box reports to the agent's local ingest; the agent
-  // relays up the channel and the coordinator appends to its SQLite log. seq 0
-  // shares this run's seq space with the dispatch's scenes report below (run:start
-  // seq 0, run:end seq 1) — one producer, one seq sequence — so run:end (seq 1)
-  // is a distinct (run_id, seq) and isn't dropped by the log's INSERT OR IGNORE.
-  const localIngest = await fetch('http://127.0.0.1:4998/events/e2e-agent-run', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start', timestamp: Date.now(), runId: 'e2e-agent-run', sceneCount: 1 } }] }),
-  })
-  check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
   const traversal = await fetch('http://127.0.0.1:4998/events/..%2F..%2Fescaped', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ events: [{ seq: 0, payload: { type: 'run:start' } }] }),
   })
   check('agent local ingest refuses a run id that leaves the work dir', traversal.status === 400)
-  const agentReplay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 2500)
-  check('agent-relayed event reached viewer via WS',
-    agentReplay.events.some((e) => e.type === 'run:start'))
 
   // Dispatch a batch: the agent runs the scenes command from the update,
   // which POSTs its event batch to $SCENETEST_REPORT_URL (the agent's local
@@ -666,6 +677,21 @@ async function main() {
     await waitFor(async () => {
       const rows = d1Query(persistDir, "SELECT status FROM runs WHERE id = 'e2e-agent-run'")
       return rows[0].status === 'failed'
+    }, 5000))
+  // The scenes CLI on a box reports to the agent's local ingest; the agent
+  // relays up the channel and the coordinator appends to its SQLite log. The
+  // run is dispatched by now, so the coordinator accepts it. seq 2 follows the
+  // scenes report's run:start (0) and run:end (1) in this run's seq space, so
+  // the log's INSERT OR IGNORE keeps it.
+  const localIngest = await fetch('http://127.0.0.1:4998/events/e2e-agent-run', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ events: [{ seq: 2, payload: { type: 'action:start', timestamp: Date.now(), runId: 'e2e-agent-run', actor: 'A', action: 'click', target: 'x' } }] }),
+  })
+  check('agent local ingest accepts and relays', localIngest.status === 202 && (await j(localIngest)).relayed === true)
+  check('agent-relayed event reached viewer via WS',
+    await waitFor(async () => {
+      const replay = await collectWs('/api/cloud/repos/demo/watched/pr/10/ws', cookie, 1200)
+      return replay.events.some((e) => e.type === 'action:start')
     }, 5000))
   agent.kill('SIGTERM')
 
@@ -805,6 +831,7 @@ async function main() {
 
   // Drive the run's log into the PR object over its box channel.
   const { ws: artBox, inbox: artInbox } = await openBoxChannel('e2e-box-art', boxToken, 'art box')
+  await dispatchRun('e2e-box-art', 'e2e-artifact-run', 11, 'artif1')
   artBox.send(JSON.stringify({
     kind: 'events', runId: 'e2e-artifact-run',
     events: [
@@ -946,6 +973,7 @@ async function main() {
   // Connect the box channel: the coordinator records the box it coordinates (the
   // alarm's retire target) and arms the idle alarm.
   const { ws: idleBox, wait: waitIdleInbox } = await openBoxChannel('e2e-box-idle', boxToken, 'idle box')
+  await dispatchRun('e2e-box-idle', 'e2e-idle-run', 13, 'idlebox1')
   // Retiring a box closes the dev server's connections, so a request on a pooled
   // one can die in transit — the same bounce openBoxChannel retries through.
   // Retry rather than swallow: a lost request means the alarm never ran.
