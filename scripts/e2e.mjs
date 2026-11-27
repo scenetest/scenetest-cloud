@@ -535,10 +535,10 @@ async function main() {
      VALUES ('e2e-rep-run', 'demo/watched', 14, 'rephead', 'repbase', 'manual', 'passed',
              '{"build":"rephead"}', '{"build":"repbase"}')`)
 
-  const report = (inputHash, reports) =>
+  const sendReport = (inputHash, reports) =>
     box.send(JSON.stringify({ kind: 'report', stage: 'build', inputHash, reports }))
   // head: bundle grew, no-console fixed, no-debugger introduced.
-  report('rephead', [
+  sendReport('rephead', [
     { type: 'metric', name: 'bundle.raw', value: 1200, unit: 'bytes' },
     { type: 'summary', kind: 'lint', summary: { errors: 0, warnings: 2 } },
     { type: 'issues', kind: 'lint', issues: [
@@ -547,7 +547,7 @@ async function main() {
     ] },
   ])
   // base: smaller bundle, had no-console, shared no-unused.
-  report('repbase', [
+  sendReport('repbase', [
     { type: 'metric', name: 'bundle.raw', value: 1000, unit: 'bytes' },
     { type: 'summary', kind: 'lint', summary: { errors: 1, warnings: 2 } },
     { type: 'issues', kind: 'lint', issues: [
