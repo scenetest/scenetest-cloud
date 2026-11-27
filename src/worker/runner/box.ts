@@ -29,11 +29,14 @@ export interface BoxRow {
 //
 // Stub path: the original sha-equality model (fake boxes do no real work, so
 // staged updates have nothing to optimize).
+//
+// Returns the stage plan it computed (DigitalOcean path only; null on the stub
+// path), so the caller reuses it instead of fetching the GitHub tree again.
 export async function ensureBox(
   env: Env,
   ctx: ExecutionContext,
   pr: PrRef,
-): Promise<BoxRow> {
+): Promise<{ box: BoxRow; plan: StagePlan | null }> {
   const live = await env.DB.prepare(
     `SELECT id, head_sha, status, realized_stages FROM boxes
        WHERE repo = ?1 AND pr_number = ?2 AND status != 'destroyed'`,
@@ -46,10 +49,10 @@ export async function ensureBox(
       await env.DB.prepare('UPDATE boxes SET last_used_at = ?1 WHERE id = ?2')
         .bind(Date.now(), live.id)
         .run()
-      return live
+      return { box: live, plan: null }
     }
     if (live) await retireBox(env, live.id)
-    return provisionBox(env, ctx, pr)
+    return { box: await provisionBox(env, ctx, pr), plan: null }
   }
 
   const plan = await computeStagePlan(env, pr.repo, pr.headSha)
@@ -67,7 +70,7 @@ export async function ensureBox(
       await env.DB.prepare('UPDATE boxes SET last_used_at = ?1, head_sha = ?2 WHERE id = ?3')
         .bind(Date.now(), pr.headSha, live.id)
         .run()
-      return { ...live, head_sha: pr.headSha }
+      return { box: { ...live, head_sha: pr.headSha }, plan }
     }
 
     // Latest wins: verdicts in flight are for a state that no longer
@@ -84,14 +87,14 @@ export async function ensureBox(
       ).bind(pr.headSha, now, live.id),
     ])
     await queueUpdate(env, pr, plan, divergeAt)
-    return { id: live.id, head_sha: pr.headSha, status: 'rebuilding' }
+    return { box: { id: live.id, head_sha: pr.headSha, status: 'rebuilding' }, plan }
   }
 
   const box = await provisionBox(env, ctx, pr)
   // The fresh box runs every stage; the update waits in the coordinator's
   // FIFO queue ahead of any dispatches, delivered when the agent connects.
   await queueUpdate(env, pr, plan, 0)
-  return box
+  return { box, plan }
 }
 
 async function queueUpdate(env: Env, pr: PrRef, plan: StagePlan, fromStage: number): Promise<void> {

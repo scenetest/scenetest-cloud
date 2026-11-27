@@ -22,15 +22,15 @@ export async function createRun(
   ctx: ExecutionContext,
   opts: CreateRunOptions,
 ): Promise<{ runId: string; boxId: string }> {
-  const box = await ensureBox(env, ctx, opts)
+  const { box, plan } = await ensureBox(env, ctx, opts)
 
   // The desired report vectors (report name → input hash) for head and base
-  // (#25). The head vector names the same hashes the box tags its reports with
-  // (both come from computeStagePlan), so the comparison view resolves "report
-  // at head hash"; the base vector resolves "report at base hash" without
-  // re-hitting GitHub on every page load. Empty on the coarse-fallback path;
-  // base is null when the PR has no base sha (a manual stub run).
-  const headVector = (await computeStagePlan(env, opts.repo, opts.headSha)).reports
+  // (#25). The head vector is the plan ensureBox queued to the box, so it names
+  // the exact hashes the box tags its reports with; the stub path computes no
+  // plan, so it is computed here. The base vector resolves "report at base hash"
+  // without re-hitting GitHub on every page load. Empty on the coarse-fallback
+  // path; base is null when the PR has no base sha (a manual stub run).
+  const headVector = (plan ?? (await computeStagePlan(env, opts.repo, opts.headSha))).reports
   const baseVector = opts.baseSha
     ? (await computeStagePlan(env, opts.repo, opts.baseSha)).reports
     : null
