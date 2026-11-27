@@ -564,7 +564,7 @@ async function main() {
       boxId: 'e2e-box-2',
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
-      stages: [{ name: 'setup', run: 'touch stage-ran.marker && env > stage-env.txt && id -u > stage-uid.txt' }],
+      stages: [{ name: 'setup', run: 'env > stage-env.txt && id -u > stage-uid.txt && touch stage-ran.marker' }],
       // The scenes command from pipeline.json rides the update. This stands
       // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
       // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
@@ -611,7 +611,7 @@ async function main() {
   // nothing from run.env.
   const stageEnv = readFileSync(join(agentRepo, 'stage-env.txt'), 'utf8')
   check('pipeline stage env carries no bearer token',
-    !stageEnv.includes('SCENETEST_BEARER_TOKEN') && !stageEnv.includes(boxToken), stageEnv)
+    stageEnv.includes('PATH=') && !stageEnv.includes('SCENETEST_BEARER_TOKEN') && !stageEnv.includes(boxToken), stageEnv)
   check('pipeline stage env carries nothing from run.env',
     !/^SCENETEST_/m.test(stageEnv), stageEnv)
   if (asRoot) {

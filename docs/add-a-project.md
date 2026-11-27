@@ -9,7 +9,7 @@ Current constraints, up front: **public repos only** (the box clones without
 credentials); webhook secret is **per-deployment**, shared by every watched
 repo; runs trigger on **pull requests only** (no push-to-main runs yet);
 **PRs from forks don't run** (only branches pushed to the watched repo);
-pipeline commands run **without root or Docker**
+pipeline commands run **without root**, with rootless Docker
 ([threat-model.md](./threat-model.md)).
 
 ## Phase 0 — scenes pass locally

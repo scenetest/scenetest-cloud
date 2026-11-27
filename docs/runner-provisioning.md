@@ -72,7 +72,9 @@ agent source — and looks it up in the global `stage_cache` table.
 - **Hit:** boxes provision from the cached snapshot immediately.
 - **Miss** (first run ever, or any input changed): the worker boots a
   builder droplet from stock `ubuntu-24-04-x64` whose cloud-init installs
-  the toolchain — node + pnpm, git, docker, the supabase CLI, Playwright
+  the toolchain — node + pnpm, git, Docker from Docker's apt repo (run
+  rootless, as the `scenetest-docker` unit for `scenetest-run`), the
+  supabase CLI, Playwright
   *system* deps (browsers are version-coupled to the project's playwright,
   so the project installs its own at box-setup time) — bakes in the agent
   and its systemd unit, neutralizes machine identity, and powers off.
@@ -124,9 +126,10 @@ non-zero exit marks the run failed, so no batch is left dangling.
 | `SCENETEST_INGEST_URL` | origin of this deployment (`PUBLIC_BASE_URL`) |
 | `SCENETEST_BEARER_TOKEN` | the box's credential (channel + ingest API); agent-only, never passed to repo commands |
 
-The unit adds `SCENETEST_RUN_AS=scenetest-run` and
-`SCENETEST_BLOCK_METADATA=1`. As root without `SCENETEST_RUN_AS`, the agent
-refuses to start.
+The unit adds `SCENETEST_RUN_AS=scenetest-run`,
+`SCENETEST_BLOCK_METADATA=1`, and `DOCKER_HOST` for the run user's
+rootless daemon, which it starts first (`Wants=`/`After=scenetest-docker`).
+As root without `SCENETEST_RUN_AS`, the agent refuses to start.
 
 Scene subsets are not box-level: they arrive per run inside `dispatch`
 batches.

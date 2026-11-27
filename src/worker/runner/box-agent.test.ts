@@ -6,6 +6,7 @@ import { commandEnv, isSafeRunId } from '../../../infra/box/agent.mjs'
 const agentEnv = {
   PATH: '/usr/local/bin:/usr/bin:/bin',
   LANG: 'C.UTF-8',
+  DOCKER_HOST: 'unix:///run/scenetest-docker/docker.sock',
   HOME: '/root',
   USER: 'root',
   LOGNAME: 'root',
@@ -35,6 +36,7 @@ describe('commandEnv', () => {
     expect(commandEnv(agentEnv, runUser)).toEqual({
       PATH: '/usr/local/bin:/usr/bin:/bin',
       LANG: 'C.UTF-8',
+      DOCKER_HOST: 'unix:///run/scenetest-docker/docker.sock',
       HOME: '/home/scenetest-run',
       USER: 'scenetest-run',
       LOGNAME: 'scenetest-run',

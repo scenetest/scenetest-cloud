@@ -35,12 +35,21 @@ Every command that comes from the repo runs as the `scenetest-run` user:
 - the `scenes` command
 
 These commands get a fixed environment: `PATH`, `HOME`, `USER`, `LOGNAME`,
-`LANG`, `LC_ALL`, `TZ`, `TERM`, plus the `SCENETEST_RUN_ID`,
+`LANG`, `LC_ALL`, `TZ`, `TERM`, `DOCKER_HOST`, plus the `SCENETEST_RUN_ID`,
 `SCENETEST_SUBSET`, `SCENETEST_LOCAL_INGEST` and `SCENETEST_REPORT_URL`
 variables for a scene batch. Nothing from `run.env` reaches them.
 
+Docker for repo commands is `scenetest-run`'s own rootless daemon (the
+`scenetest-docker` unit). Root inside a container maps to `scenetest-run`
+on the host, and other container uids map to its subordinate range
+(100000–165535). A container started with `--privileged` and the host's `/`
+mounted still reads host files with `scenetest-run`'s permissions, so
+`run.env` stays unreadable. The rootful daemon is disabled.
+
 The agent installs an iptables rule that rejects `scenetest-run`'s traffic
-to `169.254.0.0/16`. That range holds the DigitalOcean metadata endpoint,
+to `169.254.0.0/16`. Container traffic counts as `scenetest-run`'s, because
+the rootless network driver (slirp4netns) opens host connections as that
+user. That range holds the DigitalOcean metadata endpoint,
 which serves the droplet's `user_data`, and `user_data` contains the bearer
 token in plaintext. If the rule can't be installed, the agent exits without
 running anything.
@@ -49,8 +58,11 @@ running anything.
 
 - Run any code as `scenetest-run` on their own PR's box, for up to the box's
   age cap (`RUNNER_MAX_AGE_MINUTES`, default 30).
-- Reach any host on the internet from the box. Outbound traffic is not
-  filtered beyond link-local.
+- Reach any host on the internet from the box, from the host or from a
+  container. Outbound traffic is not filtered beyond link-local.
+- Run containers with the run user's rootless Docker, including
+  `--privileged` ones, which are privileged only inside the run user's
+  namespace.
 - Decide their own runs' verdicts. The scenes command reports events to the
   agent's local ingest on `127.0.0.1:4999`, and a `run:end` event settles the
   run. This is inherent: the author writes the tests. The `scenetest` commit
@@ -81,9 +93,13 @@ running anything.
   - pipeline updates: sha, stage vector, stage commands and the scenes command
   - run dispatches
   - dashboard commands
-- Become root through the agent. The agent never runs repo-supplied input as
-  root. Repo commands get no supplementary groups, so docker and sudo are
-  out of reach.
+- Become root through the agent or through Docker. The agent never runs
+  repo-supplied input as root. Repo commands get no supplementary groups,
+  so the rootful docker socket and sudo are out of reach, and the rootless
+  daemon has no more rights than `scenetest-run`.
+- Reach the agent's local ingest from inside a container. Rootless Docker
+  blocks the host's loopback for containers. Repo commands on the host can
+  reach it, as they must.
 
 ## What the bearer token is worth
 
@@ -102,7 +118,10 @@ stay out of reach.
 
 - **Local privilege escalation.** A kernel bug or a setuid binary on the box
   turns `scenetest-run` into root. With root, the token is readable. A
-  separate user is not a sandbox.
+  separate user is not a sandbox. Rootless Docker widens the kernel surface
+  the run user can touch: Ubuntu restricts unprivileged user namespaces,
+  but its AppArmor profile for `rootlesskit` lifts that restriction, and
+  any repo command can run `rootlesskit`.
 - **Abuse of the droplet's network.** Mining, scanning and spam all run from
   the deployment's DigitalOcean account until the age cap.
 - **The shared webhook secret.** Every watched repo's webhook uses
@@ -118,9 +137,9 @@ stay out of reach.
 
 ## Known gaps
 
-- Repo commands can't use Docker. The docker socket is root-only, so a stage
-  that runs `supabase start` or `docker compose` fails. Rootless Docker for
-  `scenetest-run` is the planned fix.
 - Repo commands can't install system packages. There is no `sudo`, so
   `apt-get install` in a `run` line and `playwright install --with-deps`
   fail. The image preinstalls Playwright's system libraries.
+- Container resource limits (`--memory`, `--cpus`) are untested on boxes.
+  Docker supports them in rootless mode only with cgroup v2 and a systemd
+  user session, and the box's daemon runs from a system unit instead.

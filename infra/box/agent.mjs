@@ -50,7 +50,7 @@ export function isSafeRunId(runId) {
   return typeof runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId)
 }
 
-const INHERITED_ENV = ['PATH', 'LANG', 'LC_ALL', 'TZ', 'TERM']
+const INHERITED_ENV = ['PATH', 'LANG', 'LC_ALL', 'TZ', 'TERM', 'DOCKER_HOST']
 const DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 // The complete environment a repo command sees: a few locale/path keys from
