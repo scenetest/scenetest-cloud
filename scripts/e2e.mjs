@@ -519,6 +519,62 @@ async function main() {
   check('PR stream sinceId resumes past the cursor',
     prResume.ids.every((v) => v > lastId), JSON.stringify(prResume.ids))
 
+  // --- reports-as-stages: stage report → overview tables → PR comparison ----
+  // #25: a build stage emits static-analysis reports tagged with its input
+  // hash; the agent relays them up the box channel as {kind:'report'}; the
+  // coordinator upserts the global overview_* tables, keyed by (stage,hash) —
+  // independent of run, so we can drive them over this already-open channel.
+  // The PR comparison resolves "report at base hash vs head hash" from the
+  // run's stored vectors. Seed a PR + run whose head/base vectors name the two
+  // hashes we report at.
+  console.log('· reports-as-stages (overview comparison)')
+  d1Query(persistDir,
+    "INSERT INTO prs (repo, pr_number, head_sha, base_ref, state, opened_at, updated_at) VALUES ('demo/watched', 14, 'rephead', 'main', 'open', 0, 0)")
+  d1Query(persistDir,
+    `INSERT INTO runs (id, repo, pr_number, head_sha, base_sha, trigger, status, head_vector_json, base_vector_json)
+     VALUES ('e2e-rep-run', 'demo/watched', 14, 'rephead', 'repbase', 'manual', 'passed',
+             '{"build":"rephead"}', '{"build":"repbase"}')`)
+
+  const sendReport = (inputHash, reports) =>
+    box.send(JSON.stringify({ kind: 'report', stage: 'build', inputHash, reports }))
+  // head: bundle grew, no-console fixed, no-debugger introduced.
+  sendReport('rephead', [
+    { type: 'metric', name: 'bundle.raw', value: 1200, unit: 'bytes' },
+    { type: 'summary', kind: 'lint', summary: { errors: 0, warnings: 2 } },
+    { type: 'issues', kind: 'lint', issues: [
+      { file: 'c.ts', line: 9, message: 'no-debugger' },
+      { file: 'a.ts', line: 1, message: 'no-unused' },
+    ] },
+  ])
+  // base: smaller bundle, had no-console, shared no-unused.
+  sendReport('repbase', [
+    { type: 'metric', name: 'bundle.raw', value: 1000, unit: 'bytes' },
+    { type: 'summary', kind: 'lint', summary: { errors: 1, warnings: 2 } },
+    { type: 'issues', kind: 'lint', issues: [
+      { file: 'b.ts', line: 5, message: 'no-console' },
+      { file: 'a.ts', line: 1, message: 'no-unused' },
+    ] },
+  ])
+  check('coordinator acked the report batches',
+    (await waitInbox((m) => m.kind === 'report-ack' && m.stage === 'build')) !== null, JSON.stringify(inbox))
+  check('reports upserted into overview_metrics keyed by stage hash', await waitFor(() => {
+    const r = d1Query(persistDir,
+      "SELECT COUNT(*) AS n FROM overview_metrics WHERE stage = 'build' AND name = 'bundle.raw'")
+    return r[0].n === 2
+  }), 'overview_metrics never written')
+
+  const reportsResp = await j(await fetch(`${BASE}/api/cloud/repos/demo/watched/pr/14/reports`, { headers: { cookie } }))
+  const bundle = reportsResp.comparison?.metrics?.find((m) => m.name === 'bundle.raw')
+  check('PR comparison pairs base vs head bundle size with a delta',
+    reportsResp.available === true && bundle?.base === 1000 && bundle?.head === 1200 && bundle?.delta === 200,
+    JSON.stringify(reportsResp.comparison?.metrics))
+  const lint = reportsResp.comparison?.issues?.find((i) => i.stage === 'build' && i.kind === 'lint')
+  check('PR comparison diffs issues into added / resolved / unchanged',
+    lint?.added?.some((i) => i.message === 'no-debugger') &&
+      lint?.resolved?.some((i) => i.message === 'no-console') &&
+      lint?.unchanged === 1,
+    JSON.stringify(lint))
+
   box.close()
 
   // --- the real box agent, spawned in test mode -----------------------------
@@ -534,7 +590,30 @@ async function main() {
       boxId: 'e2e-box-2',
       headSha: 'agbox1',
       vector: { setup: 'hash-setup-1' },
-      stages: [{ name: 'setup', run: 'touch stage-ran.marker' }],
+      // The stage drops a known source file (loc counts 3 lines) and a tiny
+      // built dist/ (the bundle report measures it: a 120-byte index chunk + a
+      // 200-byte vendor chunk, both referenced from index.html → 320 eager raw).
+      stages: [{
+        name: 'setup',
+        run: "mkdir -p src dist/assets && printf 'a\\nb\\nc\\n' > src/x.ts" +
+          " && head -c 120 /dev/zero | tr '\\0' a > dist/assets/index-abcd1234.js" +
+          " && head -c 200 /dev/zero | tr '\\0' b > dist/assets/react-vendor-deadbeef.js" +
+          " && printf '<script src=assets/index-abcd1234.js></script><link rel=modulepreload href=assets/react-vendor-deadbeef.js>' > dist/index.html" +
+          " && touch stage-ran.marker",
+      }],
+      // Static-analysis reports (#25) run after /ready. `loc` is builtin (the
+      // agent walks src/** and counts lines → 3); `lint` runs a command whose
+      // stdout is real oxlint --format=json output the worker adapter parses
+      // (miette diagnostics: rule in `code`, line/col in labels[].span);
+      // `bundle` is builtin (the agent measures dist/ → 320 eager raw bytes).
+      reports: [
+        { name: 'loc', type: 'loc', inputHash: 'loc-h1', watch: ['src/**'] },
+        {
+          name: 'lint', type: 'lint', inputHash: 'lint-h1', tool: 'oxlint',
+          run: `echo '{"diagnostics":[{"message":"debugger statement is not allowed","code":"eslint(no-debugger)","severity":"warning","filename":"src/x.ts","labels":[{"span":{"offset":0,"length":8,"line":1,"column":1}}]}],"number_of_files":1}'`,
+        },
+        { name: 'bundle', type: 'bundle', inputHash: 'bundle-h1', watch: ['src/**'], dist: 'dist' },
+      ],
       // The scenes command from pipeline.json rides the update. This stands
       // in for `scenetest --report-url $SCENETEST_REPORT_URL`: POST the
       // batched {events:[{seq,payload}]} envelope the 0.15 CLI sends, with a
@@ -581,6 +660,49 @@ async function main() {
       try { return readFileSync(join(agentWork, 'e2e-agent-run.commands.jsonl'), 'utf8').includes('run:pause') }
       catch { return false }
     }), agentLog)
+
+  // Reports-as-stages, the real agent path (#25): the agent ran the loc + lint
+  // reports after /ready, shipping raw output up; the worker parsed each with
+  // its adapter and upserted the overview_* tables. loc walked src/x.ts (3
+  // lines); lint's echoed eslint-JSON yielded one error.
+  check('agent loc report parsed to a line total (builtin walk + worker adapter)',
+    await waitFor(() => {
+      const r = d1Query(persistDir,
+        "SELECT value FROM overview_metrics WHERE stage = 'loc' AND input_hash = 'loc-h1' AND name = 'loc.total'")
+      return r.length === 1 && r[0].value === 3
+    }), agentLog)
+  check('agent lint report parsed to an issue (command stdout → worker adapter)',
+    await waitFor(() => {
+      const r = d1Query(persistDir,
+        "SELECT message FROM overview_issues WHERE stage = 'lint' AND input_hash = 'lint-h1'")
+      return r.length === 1 && r[0].message === 'debugger statement is not allowed'
+    }), agentLog)
+  check('agent bundle report measured dist/ (builtin gzip + worker adapter)',
+    await waitFor(() => {
+      const r = d1Query(persistDir,
+        "SELECT value FROM overview_metrics WHERE stage = 'bundle' AND input_hash = 'bundle-h1' AND name = 'bundle.eager.raw'")
+      return r.length === 1 && r[0].value === 320
+    }), agentLog)
+  // Point PR 10's run at these report hashes so the comparison view resolves
+  // them (no base vector → every issue is "added").
+  d1Query(persistDir,
+    `UPDATE runs SET head_vector_json = '{"loc":"loc-h1","lint":"lint-h1","bundle":"bundle-h1"}' WHERE id = 'e2e-agent-run'`)
+  // The d1 subprocesses above leave undici's keep-alive socket idle long enough
+  // for wrangler to close it; a reused socket then reads "other side closed".
+  // Retry on a fresh connection — a harness artifact, not a worker error.
+  const fetchJson = async (url, init) => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await j(await fetch(url, init)) }
+      catch (err) { if (attempt >= 3) throw err; await new Promise((r) => setTimeout(r, 200)) }
+    }
+  }
+  const agentReports = await fetchJson(`${BASE}/api/cloud/repos/demo/watched/pr/10/reports`, { headers: { cookie } })
+  check('agent reports surface in the PR comparison view',
+    agentReports.available === true &&
+      agentReports.comparison.metrics.some((m) => m.name === 'loc.total' && m.head === 3) &&
+      agentReports.comparison.metrics.some((m) => m.name === 'bundle.eager.raw' && m.head === 320) &&
+      agentReports.comparison.issues.some((i) => i.stage === 'lint' && i.added.some((a) => a.message === 'debugger statement is not allowed')),
+    JSON.stringify(agentReports.comparison))
 
   // The scenes CLI on a box reports to the agent's local ingest; the agent
   // relays up the channel and the coordinator appends to its SQLite log. seq 0

@@ -3,6 +3,7 @@ import type { RunSpec } from './types.ts'
 import { getRunner } from './registry.ts'
 import { ensureBox, type PrRef } from './box.ts'
 import { postCommitStatus } from '../github.ts'
+import { computeStagePlan } from './pipeline.ts'
 
 export { getRunner }
 
@@ -21,13 +22,25 @@ export async function createRun(
   ctx: ExecutionContext,
   opts: CreateRunOptions,
 ): Promise<{ runId: string; boxId: string }> {
-  const box = await ensureBox(env, ctx, opts)
+  const { box, plan } = await ensureBox(env, ctx, opts)
+
+  // The desired report vectors (report name → input hash) for head and base
+  // (#25). The head vector is the plan ensureBox queued to the box, so it names
+  // the exact hashes the box tags its reports with; the stub path computes no
+  // plan, so it is computed here. The base vector resolves "report at base hash"
+  // without re-hitting GitHub on every page load. Empty on the coarse-fallback
+  // path; base is null when the PR has no base sha (a manual stub run).
+  const headVector = (plan ?? (await computeStagePlan(env, opts.repo, opts.headSha))).reports
+  const baseVector = opts.baseSha
+    ? (await computeStagePlan(env, opts.repo, opts.baseSha)).reports
+    : null
 
   const runId = crypto.randomUUID()
   await env.DB.prepare(
     `INSERT INTO runs
-       (id, repo, pr_number, head_sha, base_sha, trigger, subset_json, status, box_id, triggered_by_user_id)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9)`,
+       (id, repo, pr_number, head_sha, base_sha, trigger, subset_json, status, box_id, triggered_by_user_id,
+        head_vector_json, base_vector_json)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11)`,
   )
     .bind(
       runId,
@@ -39,6 +52,8 @@ export async function createRun(
       opts.subset ? JSON.stringify(opts.subset) : null,
       box.id,
       opts.triggeredByUserId ?? null,
+      JSON.stringify(headVector),
+      baseVector ? JSON.stringify(baseVector) : null,
     )
     .run()
 

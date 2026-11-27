@@ -76,6 +76,64 @@ Reserved for future versions, accepted and ignored today: `save`, `restore`
 (per-stage artifact caching), `toolchain` (per-project machine image).
 Writing them now is harmless.
 
+## Reports (optional)
+
+A top-level `reports` array adds **static-analysis reports** to a PR — lines
+of code, lint findings, and (more types coming) — shown as a base-vs-head
+comparison on the PR page. Each report is content-addressed like a stage: it
+declares the files it `watch`es, and scenetest only re-runs it when those
+change. Identical inputs share one report across runs and PRs, so a rebase or
+an unrelated PR never recomputes it.
+
+```json
+{
+  "version": 1,
+  "stages": [ /* … */ ],
+  "reports": [
+    { "name": "loc",       "type": "loc",       "watch": ["src/**"], "exclude": ["**/*.test.ts"] },
+    { "name": "lint",      "type": "lint",      "watch": ["src/**"], "run": "pnpm exec oxlint --format=json src", "after": "build" },
+    { "name": "typecheck", "type": "typecheck", "watch": ["src/**", "tsconfig*.json"], "run": "pnpm exec tsc --noEmit", "after": "build" },
+    { "name": "bundle",    "type": "bundle",    "watch": ["src/**"], "after": "build", "dist": "dist" }
+  ],
+  "scenes": "pnpm exec scenetest"
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | `[a-z0-9_-]`, max 32, unique among reports |
+| `type` | yes | `loc`, `lint`, `typecheck`, or `bundle` (the worker-side parser to apply) |
+| `watch` | yes | globs whose content keys the report (same glob rules as stages) |
+| `run` | for `lint`/`typecheck` | command emitting the tool's output on stdout (see types below) |
+| `exclude` | no | (`loc`) paths matched by `watch` but not counted |
+| `dist` | no | (`bundle`) the built output dir to measure, default `dist` |
+| `after` | no | a stage name whose hash folds in as a parent — set it to the build stage so a **toolchain** change (a new linter/tsc version in the lockfile, or just a rebuild) re-runs the report, not just a source change |
+
+Types today:
+
+- **`loc`** — built in, no tool. Counts lines of the files matched by `watch`
+  minus `exclude`.
+- **`lint`** — `run` emits JSON: ESLint `-f json` or oxlint `--format=json`
+  (auto-detected). Reports findings with severities.
+- **`typecheck`** — `run` emits `tsc`'s default (non-pretty) output, i.e. plain
+  `pnpm exec tsc --noEmit`. Reports `TS####` diagnostics.
+- **`bundle`** — built in, no tool (point `after` at the build stage). Measures
+  the eager-load JS of the `dist` dir — the entry chunk plus every
+  `modulepreload` chunk in `index.html`, raw and gzipped — and the per-vendor
+  chunk sizes, so the comparison shows what a first paint downloads.
+
+How it works: the box runs/collects each report after the build is ready and
+ships the raw output up; scenetest-cloud owns the parser for each `type`, so
+you don't normalize anything yourself. A malformed report entry is dropped and
+ignored — it never disables stage caching or blocks a run. More types
+(formatter, unit tests, bundle size) are landing behind the same shape.
+
+The PR comparison is base-vs-head per report. For issue lists (lint,
+typecheck) it distinguishes genuinely **new** and **resolved** findings from
+ones that merely **shifted** line because an unrelated edit moved them — a
+finding with the same file, column, and message within ±10 lines is the same
+finding, not a regression.
+
 Glob rules (deliberately minimal): `**` crosses directories, `*` stays
 within one path segment, everything else is literal. `supabase/**` matches
 files under `supabase/`; `*.md` matches `README.md` but **not**

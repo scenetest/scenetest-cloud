@@ -2,6 +2,9 @@ import type { Env } from '../env.ts'
 import type { RunEvent } from '../db.ts'
 import type { HomeTile } from './home-coordinator.ts'
 import { artifactKey, readArtifactLog } from '../artifacts.ts'
+import type { ReportItem } from '../reports.ts'
+import { ingestReports } from '../reports-ingest.ts'
+import { parseReport } from '../report-adapters.ts'
 
 // One Durable Object per PR: the coordination point between the PR's box and
 // the rest of the system. It terminates the box's single outbound WebSocket
@@ -31,6 +34,14 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   box → cloud: { kind: 'events', runId, events: [{ seq, payload }] }
 //     — same shape as the HTTP ingest body plus runId; payloads stay opaque
 //       (envelope-grade checks only, so newer event types relay through).
+//   box → cloud: { kind: 'report-raw', name, type, inputHash, raw, tool?, root? }
+//     — static-analysis stage output (#25), NOT a run event: stage-scoped, no
+//       runId, keyed by the report's content hash. The worker parses `raw` with
+//       the type's adapter (report-adapters.ts) and upserts the overview_*
+//       tables (global, deduped by hash). See src/worker/reports.ts.
+//   box → cloud: { kind: 'report', stage, inputHash, reports: [ReportItem] }
+//     — the same, but pre-normalized (a producer that already emits items, and
+//       the unit/e2e path). Stored directly, no adapter.
 //   cloud → box: { kind: 'command', runId?, command } (a protocol Command;
 //                  runId present only when the command targets a run)
 //                { kind: 'dispatch', run }              (a RunSpec batch)
@@ -64,11 +75,34 @@ import { artifactKey, readArtifactLog } from '../artifacts.ts'
 //   POST /retire                           — { boxId } → close sockets, drop queue
 //   POST /idle-check                       — run the idle-alarm logic now (test hook)
 //   POST /ingest/:runId                    — { events } → ingestAndFanout
+//   POST /report-ingest                    — { stage, inputHash, reports } → overview_*
 
 interface EventsEnvelope {
   kind: 'events'
   runId: string
   events: RunEvent[]
+}
+
+interface ReportEnvelope {
+  kind: 'report'
+  stage: string
+  inputHash: string
+  reports: ReportItem[]
+}
+
+// The box's raw report output (#25): the worker parses it with the type's
+// adapter, so the parsing lives in one place and stays off the box. `name` is
+// the report's name (the overview `stage` column); `root` is the checkout dir,
+// for relativizing file paths.
+interface RawReportEnvelope {
+  kind: 'report-raw'
+  name: string
+  type: string
+  inputHash: string
+  raw: string
+  tool?: string
+  root?: string
+  exitCode?: number
 }
 
 // A stored log row, as returned by the ingest RETURNING clause: `id` is the
@@ -294,6 +328,15 @@ export class PrCoordinator implements DurableObject {
       return Response.json({ ok: true, count: valid.length })
     }
 
+    if (url.pathname === '/report-ingest' && req.method === 'POST') {
+      const body = (await req.json()) as Partial<ReportEnvelope>
+      if (typeof body.stage !== 'string' || typeof body.inputHash !== 'string') {
+        return new Response('stage and inputHash required', { status: 400 })
+      }
+      const count = await ingestReports(this.env, body.stage, body.inputHash, body.reports ?? [])
+      return Response.json({ ok: true, count })
+    }
+
     return new Response('Not Found', { status: 404 })
   }
 
@@ -304,6 +347,35 @@ export class PrCoordinator implements DurableObject {
       parsed = JSON.parse(message)
     } catch {
       ws.send(JSON.stringify({ kind: 'error', message: 'not json' }))
+      return
+    }
+    const kind = (parsed as { kind?: unknown }).kind
+    if (kind === 'report-raw') {
+      // Raw stage output (#25): the worker parses it with the type's adapter and
+      // upserts the global overview_* tables, keyed by (name, hash) — no runId.
+      const r = parsed as Partial<RawReportEnvelope>
+      if (typeof r.name !== 'string' || typeof r.type !== 'string' || typeof r.inputHash !== 'string') {
+        ws.send(JSON.stringify({ kind: 'error', message: 'bad report-raw envelope' }))
+        return
+      }
+      const items = parseReport(r.type, typeof r.raw === 'string' ? r.raw : '', {
+        tool: r.tool,
+        root: r.root,
+        exitCode: r.exitCode,
+      })
+      const count = await ingestReports(this.env, r.name, r.inputHash, items)
+      ws.send(JSON.stringify({ kind: 'report-ack', stage: r.name, count }))
+      return
+    }
+    if (kind === 'report') {
+      // Pre-normalized stage output: stored directly (no adapter).
+      const r = parsed as Partial<ReportEnvelope>
+      if (typeof r.stage !== 'string' || typeof r.inputHash !== 'string') {
+        ws.send(JSON.stringify({ kind: 'error', message: 'bad report envelope' }))
+        return
+      }
+      const count = await ingestReports(this.env, r.stage, r.inputHash, r.reports ?? [])
+      ws.send(JSON.stringify({ kind: 'report-ack', stage: r.stage, count }))
       return
     }
     const envelope = parsed as Partial<EventsEnvelope>

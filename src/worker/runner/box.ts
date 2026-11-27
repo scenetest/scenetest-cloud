@@ -29,11 +29,14 @@ export interface BoxRow {
 //
 // Stub path: the original sha-equality model (fake boxes do no real work, so
 // staged updates have nothing to optimize).
+//
+// Returns the stage plan it computed (DigitalOcean path only; null on the stub
+// path), so the caller reuses it instead of fetching the GitHub tree again.
 export async function ensureBox(
   env: Env,
   ctx: ExecutionContext,
   pr: PrRef,
-): Promise<BoxRow> {
+): Promise<{ box: BoxRow; plan: StagePlan | null }> {
   const live = await env.DB.prepare(
     `SELECT id, head_sha, status, realized_stages FROM boxes
        WHERE repo = ?1 AND pr_number = ?2 AND status != 'destroyed'`,
@@ -46,10 +49,10 @@ export async function ensureBox(
       await env.DB.prepare('UPDATE boxes SET last_used_at = ?1 WHERE id = ?2')
         .bind(Date.now(), live.id)
         .run()
-      return live
+      return { box: live, plan: null }
     }
     if (live) await retireBox(env, live.id)
-    return provisionBox(env, ctx, pr)
+    return { box: await provisionBox(env, ctx, pr), plan: null }
   }
 
   const plan = await computeStagePlan(env, pr.repo, pr.headSha)
@@ -67,7 +70,7 @@ export async function ensureBox(
       await env.DB.prepare('UPDATE boxes SET last_used_at = ?1, head_sha = ?2 WHERE id = ?3')
         .bind(Date.now(), pr.headSha, live.id)
         .run()
-      return { ...live, head_sha: pr.headSha }
+      return { box: { ...live, head_sha: pr.headSha }, plan }
     }
 
     // Latest wins: verdicts in flight are for a state that no longer
@@ -84,14 +87,14 @@ export async function ensureBox(
       ).bind(pr.headSha, now, live.id),
     ])
     await queueUpdate(env, pr, plan, divergeAt)
-    return { id: live.id, head_sha: pr.headSha, status: 'rebuilding' }
+    return { box: { id: live.id, head_sha: pr.headSha, status: 'rebuilding' }, plan }
   }
 
   const box = await provisionBox(env, ctx, pr)
   // The fresh box runs every stage; the update waits in the coordinator's
   // FIFO queue ahead of any dispatches, delivered when the agent connects.
   await queueUpdate(env, pr, plan, 0)
-  return box
+  return { box, plan }
 }
 
 async function queueUpdate(env: Env, pr: PrRef, plan: StagePlan, fromStage: number): Promise<void> {
@@ -101,9 +104,30 @@ async function queueUpdate(env: Env, pr: PrRef, plan: StagePlan, fromStage: numb
       headSha: pr.headSha,
       vector: plan.vector,
       stages: plan.stages.slice(fromStage),
+      // Only reports whose content hash isn't already in the overview tables —
+      // an unchanged (or cross-PR-shared) report is a cache hit, so the box
+      // skips it and the existing row stands (#25).
+      reports: await uncachedReports(env, plan.reportItems),
       scenes: plan.scenes,
     }),
   })
+}
+
+// Filter a plan's reports to the cache misses. A report's presence marker is any
+// overview_summaries row at its (name, input_hash) — every adapter writes one,
+// even for an empty/clean report — so a hit means the report already ran for
+// this content, here or on another PR.
+async function uncachedReports(env: Env, items: StagePlan['reportItems']): Promise<StagePlan['reportItems']> {
+  if (items.length === 0) return []
+  const hashes = [...new Set(items.map((i) => i.inputHash))]
+  const placeholders = hashes.map((_, i) => `?${i + 1}`).join(', ')
+  const rows = await env.DB.prepare(
+    `SELECT stage, input_hash FROM overview_summaries WHERE input_hash IN (${placeholders})`,
+  )
+    .bind(...hashes)
+    .all<{ stage: string; input_hash: string }>()
+  const present = new Set((rows.results ?? []).map((r) => `${r.stage} ${r.input_hash}`))
+  return items.filter((i) => !present.has(`${i.name} ${i.inputHash}`))
 }
 
 async function provisionBox(env: Env, ctx: ExecutionContext, pr: PrRef): Promise<BoxRow> {

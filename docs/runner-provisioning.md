@@ -101,6 +101,20 @@ vector through `/api/boxes/:boxId/ready` (a failed stage retires the box).
 Repos without a pipeline file get the coarse default, which runs
 `scenetest/box-setup.sh` if present — the legacy hook keeps working.
 
+The `update` also carries the **report plan** (#25): the cache-miss subset of
+the pipeline's `reports`, each resolved to its input hash. After reporting
+ready, the agent runs each one — built-in `loc` walks the watched files and
+counts lines; a tool report (`lint`) runs its command and captures stdout —
+and ships the raw output up its channel as `{kind:'report-raw', name, type,
+inputHash, raw, root}`. The worker parses `raw` with the type's adapter and
+upserts the `overview_*` tables, keyed by `(name, input_hash)` so identical
+inputs share one report across runs and PRs. The box stays format-agnostic:
+scenetest-cloud owns the parsers, so a parser fix never re-bakes the image.
+Reports are best-effort — a failed report never blocks runs. (A stage may also
+emit pre-normalized items directly to the agent's local `/reports/:stage`
+ingest, relayed as `{kind:'report', …}`; the plan-driven path above is the
+norm.) See architecture.md, "The build pipeline".
+
 Scene batches run the pipeline file's top-level `scenes` command (default:
 the legacy `bash scenetest/box-run.sh` hook), delivered to the agent with
 every update. It receives `SCENETEST_RUN_ID`, `SCENETEST_SUBSET` (advisory;

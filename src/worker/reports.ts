@@ -1,0 +1,228 @@
+// Static-analysis reports as stage outputs (#25). A report is produced by a
+// pipeline stage's command (lint, typecheck, bundle metrics) and keyed by that
+// stage's content-addressed input hash — never a run id. The box agent tags
+// each report with the ambient stage + its input hash (which it knows from the
+// update vector it is executing), relays it upstream to the PR coordinator, and
+// the coordinator upserts the overview_* tables. Because the key is the hash,
+// identical inputs share one report across runs and PRs, and a cache-hit (i.e.
+// skipped) stage's report already exists. The PR view compares "report at base
+// hash" against "report at head hash". See architecture.md, "The build
+// pipeline".
+
+// One item in a report batch the agent relays. The wire envelope is
+// { kind: 'report', stage, inputHash, reports: ReportItem[] } — see
+// PrCoordinator and docs/runner-provisioning.md.
+export type ReportItem =
+  | { type: 'metric'; name: string; value: number; unit?: string }
+  | { type: 'summary'; kind: string; summary: unknown }
+  | { type: 'issues'; kind: string; issues: ReportIssue[] }
+
+export interface ReportIssue {
+  file?: string
+  line?: number
+  col?: number
+  severity?: string
+  message?: string
+  raw?: string
+}
+
+// A stable per-issue id: same issue (file/position/message) re-emitted for the
+// same input hash dedupes to one row, and the cross-hash diff anchors on it.
+// Not cryptographic — a short, deterministic djb2 hex over the identifying
+// fields is enough and is cheap to compute synchronously in the DO.
+export function issueFingerprint(kind: string, issue: ReportIssue): string {
+  const key = [kind, issue.file ?? '', issue.line ?? '', issue.col ?? '', issue.message ?? ''].join('\u0000')
+  let h = 5381
+  for (let i = 0; i < key.length; i++) h = (((h << 5) + h) ^ key.charCodeAt(i)) >>> 0
+  return h.toString(16).padStart(8, '0')
+}
+
+// ---- the comparison the PR view renders ------------------------------------
+
+// Rows as stored, narrowed to what the comparison reads.
+export interface MetricRow { stage: string; input_hash: string; name: string; value: number; unit: string | null }
+export interface SummaryRow { stage: string; input_hash: string; kind: string; summary_json: string }
+export interface IssueRow {
+  stage: string
+  input_hash: string
+  kind: string
+  fingerprint: string
+  file: string | null
+  line: number | null
+  col: number | null
+  severity: string | null
+  message: string | null
+  raw: string | null
+}
+
+export interface MetricComparison {
+  stage: string
+  name: string
+  unit: string | null
+  base: number | null
+  head: number | null
+  delta: number | null // head - base, null when either side is missing
+}
+
+export interface SummaryComparison {
+  stage: string
+  kind: string
+  base: unknown | null
+  head: unknown | null
+}
+
+export interface IssuesComparison {
+  stage: string
+  kind: string
+  // Issues present at head but not base (regressions) and base but not head
+  // (fixes); `unchanged` is the count that persisted at the same position.
+  // `moved` is the count that exists on both sides but shifted line — the same
+  // issue an unrelated edit pushed up or down the file — counted as neither a
+  // regression nor a fix.
+  added: ReportIssue[]
+  resolved: ReportIssue[]
+  unchanged: number
+  moved: number
+}
+
+export interface ReportComparison {
+  metrics: MetricComparison[]
+  summaries: SummaryComparison[]
+  issues: IssuesComparison[]
+  // True when no base vector was available (e.g. base never built, or coarse
+  // fallback): the head columns stand alone and "added" lists every issue.
+  baseMissing: boolean
+}
+
+// How far an issue may shift (in lines) and still be considered the same issue
+// that merely moved, rather than one resolved + one new. Matches the reference
+// CI's ±10.
+const LINE_PROXIMITY = 10
+
+const issueShape = (r: IssueRow): ReportIssue => ({
+  ...(r.file != null ? { file: r.file } : {}),
+  ...(r.line != null ? { line: r.line } : {}),
+  ...(r.col != null ? { col: r.col } : {}),
+  ...(r.severity != null ? { severity: r.severity } : {}),
+  ...(r.message != null ? { message: r.message } : {}),
+  ...(r.raw != null ? { raw: r.raw } : {}),
+})
+
+// Pure: given a PR's head/base stage vectors and every overview row at the
+// hashes those vectors name, pair head-hash rows against base-hash rows per
+// stage. Exposed for unit tests; the read endpoint feeds it.
+export function buildReportComparison(
+  headVector: Record<string, string>,
+  baseVector: Record<string, string> | null,
+  rows: { metrics: MetricRow[]; summaries: SummaryRow[]; issues: IssueRow[] },
+): ReportComparison {
+  // For each (stage, hash) pick the right side. A stage's head hash and base
+  // hash are distinct values; index rows by hash and look both up per stage.
+  const hashSide = new Map<string, 'head' | 'base'>()
+  for (const [stage, hash] of Object.entries(headVector)) hashSide.set(`${stage}\u0000${hash}`, 'head')
+  if (baseVector) {
+    for (const [stage, hash] of Object.entries(baseVector)) {
+      // A stage whose base hash equals its head hash didn't change — it counts
+      // as head (no delta); don't overwrite the head marker.
+      const k = `${stage}\u0000${hash}`
+      if (!hashSide.has(k)) hashSide.set(k, 'base')
+    }
+  }
+  const sideOf = (stage: string, hash: string) => hashSide.get(`${stage}\u0000${hash}`) ?? null
+
+  // metrics: pair by (stage, name)
+  const metricPairs = new Map<string, MetricComparison>()
+  for (const r of rows.metrics) {
+    const side = sideOf(r.stage, r.input_hash)
+    if (!side) continue
+    const key = `${r.stage}\u0000${r.name}`
+    const mc = metricPairs.get(key) ?? { stage: r.stage, name: r.name, unit: r.unit, base: null, head: null, delta: null }
+    mc[side] = r.value
+    if (r.unit != null) mc.unit = r.unit
+    metricPairs.set(key, mc)
+  }
+  const metrics = [...metricPairs.values()].map((m) => ({
+    ...m,
+    delta: m.base != null && m.head != null ? m.head - m.base : null,
+  }))
+
+  // summaries: pair by (stage, kind)
+  const summaryPairs = new Map<string, SummaryComparison>()
+  for (const r of rows.summaries) {
+    const side = sideOf(r.stage, r.input_hash)
+    if (!side) continue
+    const key = `${r.stage}\u0000${r.kind}`
+    const sc = summaryPairs.get(key) ?? { stage: r.stage, kind: r.kind, base: null, head: null }
+    let parsed: unknown = null
+    try { parsed = JSON.parse(r.summary_json) } catch { parsed = null }
+    sc[side] = parsed
+    summaryPairs.set(key, sc)
+  }
+  const summaries = [...summaryPairs.values()]
+
+  // issues: per (stage, kind), set-diff head fingerprints against base
+  interface Bucket { head: Map<string, ReportIssue>; base: Map<string, ReportIssue> }
+  const buckets = new Map<string, Bucket>()
+  for (const r of rows.issues) {
+    const side = sideOf(r.stage, r.input_hash)
+    if (!side) continue
+    const key = `${r.stage}\u0000${r.kind}`
+    const b = buckets.get(key) ?? { head: new Map(), base: new Map() }
+    b[side].set(r.fingerprint, issueShape(r))
+    buckets.set(key, b)
+  }
+  const issues: IssuesComparison[] = []
+  for (const [key, b] of buckets) {
+    const [stage, kind] = key.split('\u0000') as [string, string]
+    const added: ReportIssue[] = []
+    let unchanged = 0
+    for (const [fp, issue] of b.head) {
+      if (b.base.has(fp)) unchanged++
+      else added.push(issue)
+    }
+    const resolved: ReportIssue[] = []
+    for (const [fp, issue] of b.base) if (!b.head.has(fp)) resolved.push(issue)
+    // Second pass: pair a leftover "added" with a leftover "resolved" when it's
+    // the same issue (file + col + message) that merely shifted line within
+    // LINE_PROXIMITY — an unrelated edit bumped its line number. Such pairs are
+    // "moved", neither a regression nor a fix. A changed column means the line
+    // itself was edited, so the issue stays fair game. (Mirrors the reference
+    // CI's diff — the original-motivation workflow.)
+    const pool = [...resolved]
+    const trulyAdded: ReportIssue[] = []
+    let moved = 0
+    for (const n of added) {
+      const i = pool.findIndex(
+        (r) => r.file === n.file && r.col === n.col && r.message === n.message &&
+          Math.abs((r.line ?? 0) - (n.line ?? 0)) <= LINE_PROXIMITY,
+      )
+      if (i >= 0) {
+        moved++
+        pool.splice(i, 1)
+      } else trulyAdded.push(n)
+    }
+    issues.push({ stage, kind, added: trulyAdded, resolved: pool, unchanged, moved })
+  }
+
+  return { metrics, summaries, issues, baseMissing: !baseVector }
+}
+
+// The distinct stage hashes a PR's two vectors reference — the WHERE-IN set the
+// read endpoint queries the overview tables for. Deduped; coarse-plan pseudo
+// stages ('*coarse*') carry no reports but are harmless to include.
+export function reportHashes(
+  headVector: Record<string, string>,
+  baseVector: Record<string, string> | null,
+): Array<{ stage: string; hash: string }> {
+  const seen = new Set<string>()
+  const out: Array<{ stage: string; hash: string }> = []
+  const add = (stage: string, hash: string) => {
+    const k = `${stage}\u0000${hash}`
+    if (seen.has(k)) return
+    seen.add(k)
+    out.push({ stage, hash })
+  }
+  for (const [stage, hash] of Object.entries(headVector)) add(stage, hash)
+  if (baseVector) for (const [stage, hash] of Object.entries(baseVector)) add(stage, hash)
+  return out
+}
